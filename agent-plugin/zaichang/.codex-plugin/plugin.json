@@ -1,0 +1,21 @@
+{
+  "name": "zaichang",
+  "version": "0.2.3",
+  "description": "Read the current 在场 meeting transcript when the user asks an agent to use live meeting context.",
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "在场会议上下文",
+    "shortDescription": "按用户提示读取当前会议原文",
+    "longDescription": "读取当前在场会议的转写、说话人和时间信息，供用户明确提出的分析或研究使用。只读，不主动分析，也不更改录音或转写模式。",
+    "developerName": "在场",
+    "category": "Productivity",
+    "capabilities": [
+      "Read"
+    ],
+    "defaultPrompt": [
+      "查看在场正在进行的会议内容，再按我的要求分析。"
+    ]
+  },
+  "apps": "./.app.json"
+}

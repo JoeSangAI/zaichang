@@ -1,0 +1,6 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "zaichang",
+  "version": "0.2.3",
+  "description": "Read the current 在场 meeting transcript when the user asks an agent to use live meeting context."
+}

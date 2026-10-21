@@ -1,0 +1,48 @@
+#!/bin/sh
+set -eu
+
+APP="${ZAICHANG_APP_PATH:-}"
+if [ -z "$APP" ]; then
+  for candidate in "/Applications/在场.app" "$HOME/Applications/在场.app" "$HOME/Desktop/在场.app"; do
+    if [ -d "$candidate" ] && [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$candidate/Contents/Info.plist" 2>/dev/null || true)" = "com.joesang.zaichang.standalone" ]; then APP="$candidate"; break; fi
+  done
+fi
+if [ -z "$APP" ] && command -v mdfind >/dev/null 2>&1; then
+  APP="$(mdfind 'kMDItemCFBundleIdentifier == "com.joesang.zaichang.standalone"' | head -n 1 || true)"
+fi
+if [ -z "$APP" ]; then
+  printf '%s\n' '{"status":"unavailable","reason":"找不到在场应用；请设置 ZAICHANG_APP_PATH。"}'
+  exit 2
+fi
+READER="$APP/Contents/Resources/Runtime/meeting_context.py"
+
+if [ ! -f "$READER" ]; then
+  printf '%s\n' '{"status":"unavailable","reason":"在场本机会议读取器尚未安装或应用需要更新。"}'
+  exit 2
+fi
+
+PYTHON=""
+for candidate in \
+  "$APP/Contents/Resources/Runtime/Python/bin/python3" \
+  "$APP/Contents/Resources/Python/bin/python3" \
+  "/opt/homebrew/bin/python3" \
+  "/usr/local/bin/python3" \
+  "/usr/bin/python3"; do
+  if [ -x "$candidate" ]; then
+    if "$candidate" -I -c 'import sys; raise SystemExit(sys.version_info < (3, 12))' >/dev/null 2>&1; then
+      PYTHON="$candidate"
+      break
+    fi
+  fi
+done
+
+if [ -z "$PYTHON" ] && command -v python3 >/dev/null 2>&1; then
+  PYTHON="$(command -v python3)"
+fi
+
+if [ -z "$PYTHON" ]; then
+  printf '%s\n' '{"status":"unavailable","reason":"找不到可运行在场本机读取器的 Python 3。"}'
+  exit 2
+fi
+
+exec "$PYTHON" "$READER" "$@"

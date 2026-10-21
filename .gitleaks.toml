@@ -1,0 +1,6 @@
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Ignored local build and dependency directories"
+paths = ['''(^|/)\.runtime/''', '''(^|/)\.zxz-tasks/''', '''(^|/)native/local-(speaker|embedding)-install/''', '''(^|/)\.venv/''', '''(^|/)__pycache__/''']

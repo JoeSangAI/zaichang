@@ -1,0 +1,328 @@
+{
+  "schema": 1,
+  "revision": "public-2026-10-21",
+  "files": [
+    {
+      "path": "native/local-speaker-install/runtime-models/monolithic/v2/Nemotron3Diarizer_low.mlmodelc/analytics/coremldata.bin",
+      "url": "https://huggingface.co/FluidInference/nemotron-3-diarization-coreml/resolve/25a90f97f254428d4b30374b76af9c74fdee8327/monolithic/v2/Nemotron3Diarizer_low.mlmodelc/analytics/coremldata.bin?download=true",
+      "bytes": 243,
+      "source": "FluidInference/nemotron-3-diarization-coreml@25a90f97f254428d4b30374b76af9c74fdee8327",
+      "sha256": "1ec46d7392b470ebfaac473123de9e5bc62630972b01349b929bf6e48e067c6c",
+      "git_blob_oid": "4644d8f5d1ce3cb12009d981cab296b5d0f2800a"
+    },
+    {
+      "path": "native/local-speaker-install/runtime-models/monolithic/v2/Nemotron3Diarizer_low.mlmodelc/coremldata.bin",
+      "url": "https://huggingface.co/FluidInference/nemotron-3-diarization-coreml/resolve/25a90f97f254428d4b30374b76af9c74fdee8327/monolithic/v2/Nemotron3Diarizer_low.mlmodelc/coremldata.bin?download=true",
+      "bytes": 752,
+      "source": "FluidInference/nemotron-3-diarization-coreml@25a90f97f254428d4b30374b76af9c74fdee8327",
+      "sha256": "2c2c82efc948433cb47b60aceb4917182e2e00d1d79097b8898adfd615b0c5f8",
+      "git_blob_oid": "fe71de5df2fb072c9be35e2cba0b83e533e57c2b"
+    },
+    {
+      "path": "native/local-speaker-install/runtime-models/monolithic/v2/Nemotron3Diarizer_low.mlmodelc/model.mil",
+      "url": "https://huggingface.co/FluidInference/nemotron-3-diarization-coreml/resolve/25a90f97f254428d4b30374b76af9c74fdee8327/monolithic/v2/Nemotron3Diarizer_low.mlmodelc/model.mil?download=true",
+      "bytes": 503842,
+      "source": "FluidInference/nemotron-3-diarization-coreml@25a90f97f254428d4b30374b76af9c74fdee8327",
+      "git_blob_oid": "8005abdfaaa138437fb86fc292e0fdb787873e8b"
+    },
+    {
+      "path": "native/local-speaker-install/runtime-models/monolithic/v2/Nemotron3Diarizer_low.mlmodelc/weights/weight.bin",
+      "url": "https://huggingface.co/FluidInference/nemotron-3-diarization-coreml/resolve/25a90f97f254428d4b30374b76af9c74fdee8327/monolithic/v2/Nemotron3Diarizer_low.mlmodelc/weights/weight.bin?download=true",
+      "bytes": 198617472,
+      "source": "FluidInference/nemotron-3-diarization-coreml@25a90f97f254428d4b30374b76af9c74fdee8327",
+      "sha256": "88307e2c51d1877de59803299354f689e70cad7f8892a197764d5f3626089495",
+      "git_blob_oid": "ff9b10d68a95918c28e6d55be8f27c330988bbd4"
+    },
+    {
+      "path": "native/local-speaker-install/learnable_sil_emb.bin",
+      "url": "https://huggingface.co/FluidInference/nemotron-3-diarization-coreml/resolve/25a90f97f254428d4b30374b76af9c74fdee8327/learnable_sil_emb.bin?download=true",
+      "bytes": 2048,
+      "source": "FluidInference/nemotron-3-diarization-coreml@25a90f97f254428d4b30374b76af9c74fdee8327",
+      "sha256": "d4417b3c0eabdf7c47032fac2b5b5a7ee83d819a6ddda8fd8eaf74e2b5cc4ac7",
+      "git_blob_oid": "38da5a752e26d2ff4bd0f1a1b655092b774ca1a5"
+    },
+    {
+      "path": "native/local-speaker-install/runtime-models/Nemotron3Diarizer_fast128.mlmodelc/model.mil",
+      "url": "https://huggingface.co/FluidInference/nemotron-3-diarization-coreml/resolve/25a90f97f254428d4b30374b76af9c74fdee8327/monolithic/v2/Nemotron3Diarizer_fast128.mlmodelc/model.mil?download=true",
+      "bytes": 502794,
+      "source": "FluidInference/nemotron-3-diarization-coreml@25a90f97f254428d4b30374b76af9c74fdee8327",
+      "sha256": "e7c029a46d9f327bec4c47fc34e5d32ee2cec9ce596950af0c403d05146b4ead"
+    },
+    {
+      "path": "native/local-speaker-install/runtime-models/Nemotron3Diarizer_fast128.mlmodelc/coremldata.bin",
+      "url": "https://huggingface.co/FluidInference/nemotron-3-diarization-coreml/resolve/25a90f97f254428d4b30374b76af9c74fdee8327/monolithic/v2/Nemotron3Diarizer_fast128.mlmodelc/coremldata.bin?download=true",
+      "bytes": 758,
+      "source": "FluidInference/nemotron-3-diarization-coreml@25a90f97f254428d4b30374b76af9c74fdee8327",
+      "sha256": "ebcca7245d8d774305752b9f2b79433ad1858f8a06df3b326e0ae6305d981d25"
+    },
+    {
+      "path": "native/local-speaker-install/runtime-models/Nemotron3Diarizer_fast128.mlmodelc/weights/weight.bin",
+      "url": "https://huggingface.co/FluidInference/nemotron-3-diarization-coreml/resolve/25a90f97f254428d4b30374b76af9c74fdee8327/monolithic/v2/Nemotron3Diarizer_fast128.mlmodelc/weights/weight.bin?download=true",
+      "bytes": 198590592,
+      "source": "FluidInference/nemotron-3-diarization-coreml@25a90f97f254428d4b30374b76af9c74fdee8327",
+      "sha256": "e8c90d2d0e16787a420de6805fd5b7a95c116fac0163208b5bc4d8a9ae459ca4"
+    },
+    {
+      "path": "native/local-speaker-install/runtime-models/Nemotron3Diarizer_fast128.mlmodelc/analytics/coremldata.bin",
+      "url": "https://huggingface.co/FluidInference/nemotron-3-diarization-coreml/resolve/25a90f97f254428d4b30374b76af9c74fdee8327/monolithic/v2/Nemotron3Diarizer_fast128.mlmodelc/analytics/coremldata.bin?download=true",
+      "bytes": 243,
+      "source": "FluidInference/nemotron-3-diarization-coreml@25a90f97f254428d4b30374b76af9c74fdee8327",
+      "sha256": "a71e06616a3ae7bddef06ce5dfc7fe523a286e489f63a8da2fc4f1e940d560a4"
+    },
+    {
+      "path": "native/local-speaker-install/runtime-models/localvqe-v1.3-4.8M-16ms.mlmodelc/analytics/coremldata.bin",
+      "url": "https://huggingface.co/FluidInference/localvqe-coreml/resolve/4205430781c240397073d6f7bf676fb4c732fc12/localvqe-v1.3-4.8M-16ms.mlmodelc/analytics/coremldata.bin?download=true",
+      "bytes": 243,
+      "source": "FluidInference/localvqe-coreml@4205430781c240397073d6f7bf676fb4c732fc12",
+      "sha256": "b38b26719f7fdb1d37d0ea66e2a72c0cb2f111105b606636d733b958ea3d7892"
+    },
+    {
+      "path": "native/local-speaker-install/runtime-models/localvqe-v1.3-4.8M-16ms.mlmodelc/coremldata.bin",
+      "url": "https://huggingface.co/FluidInference/localvqe-coreml/resolve/4205430781c240397073d6f7bf676fb4c732fc12/localvqe-v1.3-4.8M-16ms.mlmodelc/coremldata.bin?download=true",
+      "bytes": 3528,
+      "source": "FluidInference/localvqe-coreml@4205430781c240397073d6f7bf676fb4c732fc12",
+      "sha256": "795709e1ad528f94a7d76226e0e408d1897ee0a6603d32fdfad9ffb5b668fd22"
+    },
+    {
+      "path": "native/local-speaker-install/runtime-models/localvqe-v1.3-4.8M-16ms.mlmodelc/model.mil",
+      "url": "https://huggingface.co/FluidInference/localvqe-coreml/resolve/4205430781c240397073d6f7bf676fb4c732fc12/localvqe-v1.3-4.8M-16ms.mlmodelc/model.mil?download=true",
+      "bytes": 311978,
+      "source": "FluidInference/localvqe-coreml@4205430781c240397073d6f7bf676fb4c732fc12",
+      "sha256": "8dddf32c801cdb90329e43748a46e9321ef2b14c8d41d6515c541c81a43cbbf4"
+    },
+    {
+      "path": "native/local-speaker-install/runtime-models/localvqe-v1.3-4.8M-16ms.mlmodelc/weights/weight.bin",
+      "url": "https://huggingface.co/FluidInference/localvqe-coreml/resolve/4205430781c240397073d6f7bf676fb4c732fc12/localvqe-v1.3-4.8M-16ms.mlmodelc/weights/weight.bin?download=true",
+      "bytes": 19281728,
+      "source": "FluidInference/localvqe-coreml@4205430781c240397073d6f7bf676fb4c732fc12",
+      "sha256": "fc5f290cbfb497718d9d9568ee965c352bfe4663bab49b30a10e91f8fcfff826"
+    },
+    {
+      "path": "native/local-speaker-install/runtime-models/community-1/Embedding.mlmodelc/analytics/coremldata.bin",
+      "url": "https://huggingface.co/FluidInference/speaker-diarization-coreml/resolve/df2625ac79a7ac6b65ad868fee6d80f320da4232/Embedding.mlmodelc/analytics/coremldata.bin?download=true",
+      "bytes": 243,
+      "source": "FluidInference/speaker-diarization-coreml@df2625ac79a7ac6b65ad868fee6d80f320da4232",
+      "sha256": "8d6706436639b53830b4dbe8aaf9c9a843f7f582d63e16f3cb8bb7c6ccd58682"
+    },
+    {
+      "path": "native/local-speaker-install/runtime-models/community-1/Embedding.mlmodelc/coremldata.bin",
+      "url": "https://huggingface.co/FluidInference/speaker-diarization-coreml/resolve/df2625ac79a7ac6b65ad868fee6d80f320da4232/Embedding.mlmodelc/coremldata.bin?download=true",
+      "bytes": 704,
+      "source": "FluidInference/speaker-diarization-coreml@df2625ac79a7ac6b65ad868fee6d80f320da4232",
+      "sha256": "4a705bac27d151d9642f37609296042a15602a42253039e0921dc9e75da7e004"
+    },
+    {
+      "path": "native/local-speaker-install/runtime-models/community-1/Embedding.mlmodelc/metadata.json",
+      "url": "https://huggingface.co/FluidInference/speaker-diarization-coreml/resolve/df2625ac79a7ac6b65ad868fee6d80f320da4232/Embedding.mlmodelc/metadata.json?download=true",
+      "bytes": 2818,
+      "source": "FluidInference/speaker-diarization-coreml@df2625ac79a7ac6b65ad868fee6d80f320da4232",
+      "sha256": "1854371eb6b438fb8aeac96afb45c999af7902581c06afdfcd7ff3cb1ce66be5"
+    },
+    {
+      "path": "native/local-speaker-install/runtime-models/community-1/Embedding.mlmodelc/model.mil",
+      "url": "https://huggingface.co/FluidInference/speaker-diarization-coreml/resolve/df2625ac79a7ac6b65ad868fee6d80f320da4232/Embedding.mlmodelc/model.mil?download=true",
+      "bytes": 78432,
+      "source": "FluidInference/speaker-diarization-coreml@df2625ac79a7ac6b65ad868fee6d80f320da4232",
+      "sha256": "22fa958aef72a561c21f874a07cbdcd30fdf40ee961c0bc2fb67c119273b46d3"
+    },
+    {
+      "path": "native/local-speaker-install/runtime-models/community-1/Embedding.mlmodelc/weights/weight.bin",
+      "url": "https://huggingface.co/FluidInference/speaker-diarization-coreml/resolve/df2625ac79a7ac6b65ad868fee6d80f320da4232/Embedding.mlmodelc/weights/weight.bin?download=true",
+      "bytes": 13412288,
+      "source": "FluidInference/speaker-diarization-coreml@df2625ac79a7ac6b65ad868fee6d80f320da4232",
+      "sha256": "99356b2985b8d43880a657024d941d450b38820451ccff903f76ed4e52d1868b"
+    },
+    {
+      "path": "native/local-speaker-install/runtime-models/community-1/FBank.mlmodelc/analytics/coremldata.bin",
+      "url": "https://huggingface.co/FluidInference/speaker-diarization-coreml/resolve/df2625ac79a7ac6b65ad868fee6d80f320da4232/FBank.mlmodelc/analytics/coremldata.bin?download=true",
+      "bytes": 243,
+      "source": "FluidInference/speaker-diarization-coreml@df2625ac79a7ac6b65ad868fee6d80f320da4232",
+      "sha256": "0e8bd3a8b82ac123580989f490e4d9245127c535857630b543311268accc3f0a"
+    },
+    {
+      "path": "native/local-speaker-install/runtime-models/community-1/FBank.mlmodelc/coremldata.bin",
+      "url": "https://huggingface.co/FluidInference/speaker-diarization-coreml/resolve/df2625ac79a7ac6b65ad868fee6d80f320da4232/FBank.mlmodelc/coremldata.bin?download=true",
+      "bytes": 853,
+      "source": "FluidInference/speaker-diarization-coreml@df2625ac79a7ac6b65ad868fee6d80f320da4232",
+      "sha256": "57ac436bb0671cbb5527a339134d695f752eb77f7a18966b93c6835335595759"
+    },
+    {
+      "path": "native/local-speaker-install/runtime-models/community-1/FBank.mlmodelc/metadata.json",
+      "url": "https://huggingface.co/FluidInference/speaker-diarization-coreml/resolve/df2625ac79a7ac6b65ad868fee6d80f320da4232/FBank.mlmodelc/metadata.json?download=true",
+      "bytes": 3409,
+      "source": "FluidInference/speaker-diarization-coreml@df2625ac79a7ac6b65ad868fee6d80f320da4232",
+      "sha256": "2623785f5d186893b82d01e84aa33a7704ef763c3309e02055f22dc9d871ce9a"
+    },
+    {
+      "path": "native/local-speaker-install/runtime-models/community-1/FBank.mlmodelc/model.mil",
+      "url": "https://huggingface.co/FluidInference/speaker-diarization-coreml/resolve/df2625ac79a7ac6b65ad868fee6d80f320da4232/FBank.mlmodelc/model.mil?download=true",
+      "bytes": 15667,
+      "source": "FluidInference/speaker-diarization-coreml@df2625ac79a7ac6b65ad868fee6d80f320da4232",
+      "sha256": "27aaeb21569e81bdbe2eef87789f50a37cfea800039bd134448a9417de2f30ed"
+    },
+    {
+      "path": "native/local-speaker-install/runtime-models/community-1/FBank.mlmodelc/weights/weight.bin",
+      "url": "https://huggingface.co/FluidInference/speaker-diarization-coreml/resolve/df2625ac79a7ac6b65ad868fee6d80f320da4232/FBank.mlmodelc/weights/weight.bin?download=true",
+      "bytes": 1776896,
+      "source": "FluidInference/speaker-diarization-coreml@df2625ac79a7ac6b65ad868fee6d80f320da4232",
+      "sha256": "9e83fdd3ea78064b078069e4d9141603c61c47a27fd19e7e3142ff7476f8db36"
+    },
+    {
+      "path": "native/local-speaker-install/runtime-models/community-1/PldaRho.mlmodelc/analytics/coremldata.bin",
+      "url": "https://huggingface.co/FluidInference/speaker-diarization-coreml/resolve/df2625ac79a7ac6b65ad868fee6d80f320da4232/PldaRho.mlmodelc/analytics/coremldata.bin?download=true",
+      "bytes": 243,
+      "source": "FluidInference/speaker-diarization-coreml@df2625ac79a7ac6b65ad868fee6d80f320da4232",
+      "sha256": "8940ea6044dbcbefa22da8cc41e0b485e1fb5ed89aecaf37c6e0c483a97ddcd7"
+    },
+    {
+      "path": "native/local-speaker-install/runtime-models/community-1/PldaRho.mlmodelc/coremldata.bin",
+      "url": "https://huggingface.co/FluidInference/speaker-diarization-coreml/resolve/df2625ac79a7ac6b65ad868fee6d80f320da4232/PldaRho.mlmodelc/coremldata.bin?download=true",
+      "bytes": 763,
+      "source": "FluidInference/speaker-diarization-coreml@df2625ac79a7ac6b65ad868fee6d80f320da4232",
+      "sha256": "4d9741477f721c79b09fcdfe455110c4b7d4272e2de3496bf1729d966d3ee418"
+    },
+    {
+      "path": "native/local-speaker-install/runtime-models/community-1/PldaRho.mlmodelc/metadata.json",
+      "url": "https://huggingface.co/FluidInference/speaker-diarization-coreml/resolve/df2625ac79a7ac6b65ad868fee6d80f320da4232/PldaRho.mlmodelc/metadata.json?download=true",
+      "bytes": 2749,
+      "source": "FluidInference/speaker-diarization-coreml@df2625ac79a7ac6b65ad868fee6d80f320da4232",
+      "sha256": "b314cf25a93e46b4076883a6f5a2f8848b73c3851bd9d36074d067f35a1c7945"
+    },
+    {
+      "path": "native/local-speaker-install/runtime-models/community-1/PldaRho.mlmodelc/model.mil",
+      "url": "https://huggingface.co/FluidInference/speaker-diarization-coreml/resolve/df2625ac79a7ac6b65ad868fee6d80f320da4232/PldaRho.mlmodelc/model.mil?download=true",
+      "bytes": 7613,
+      "source": "FluidInference/speaker-diarization-coreml@df2625ac79a7ac6b65ad868fee6d80f320da4232",
+      "sha256": "83aee2e5310d19b5f202aea97d07a0e12102556d1b32ef3ed08b36f7f9725041"
+    },
+    {
+      "path": "native/local-speaker-install/runtime-models/community-1/PldaRho.mlmodelc/weights/weight.bin",
+      "url": "https://huggingface.co/FluidInference/speaker-diarization-coreml/resolve/df2625ac79a7ac6b65ad868fee6d80f320da4232/PldaRho.mlmodelc/weights/weight.bin?download=true",
+      "bytes": 200192,
+      "source": "FluidInference/speaker-diarization-coreml@df2625ac79a7ac6b65ad868fee6d80f320da4232",
+      "sha256": "80f7d229202636d372428c90596f11a91545f07da77259f07153aaf225914a36"
+    },
+    {
+      "path": "native/local-speaker-install/runtime-models/community-1/Segmentation.mlmodelc/analytics/coremldata.bin",
+      "url": "https://huggingface.co/FluidInference/speaker-diarization-coreml/resolve/df2625ac79a7ac6b65ad868fee6d80f320da4232/Segmentation.mlmodelc/analytics/coremldata.bin?download=true",
+      "bytes": 243,
+      "source": "FluidInference/speaker-diarization-coreml@df2625ac79a7ac6b65ad868fee6d80f320da4232",
+      "sha256": "64265f8e7ad41a5f68d630c15288c2499cca5892ad49e20096819cdeac004cdb"
+    },
+    {
+      "path": "native/local-speaker-install/runtime-models/community-1/Segmentation.mlmodelc/coremldata.bin",
+      "url": "https://huggingface.co/FluidInference/speaker-diarization-coreml/resolve/df2625ac79a7ac6b65ad868fee6d80f320da4232/Segmentation.mlmodelc/coremldata.bin?download=true",
+      "bytes": 812,
+      "source": "FluidInference/speaker-diarization-coreml@df2625ac79a7ac6b65ad868fee6d80f320da4232",
+      "sha256": "ea51481b8bd3e496ad3cf16f066ddaa37f20e8772eaac76b3393c28de20e06bc"
+    },
+    {
+      "path": "native/local-speaker-install/runtime-models/community-1/Segmentation.mlmodelc/metadata.json",
+      "url": "https://huggingface.co/FluidInference/speaker-diarization-coreml/resolve/df2625ac79a7ac6b65ad868fee6d80f320da4232/Segmentation.mlmodelc/metadata.json?download=true",
+      "bytes": 3410,
+      "source": "FluidInference/speaker-diarization-coreml@df2625ac79a7ac6b65ad868fee6d80f320da4232",
+      "sha256": "88dbf0b07208fe142e1729c2b4c974ad3599fcb2ae5d5f18fce782b225384124"
+    },
+    {
+      "path": "native/local-speaker-install/runtime-models/community-1/Segmentation.mlmodelc/model.mil",
+      "url": "https://huggingface.co/FluidInference/speaker-diarization-coreml/resolve/df2625ac79a7ac6b65ad868fee6d80f320da4232/Segmentation.mlmodelc/model.mil?download=true",
+      "bytes": 43063,
+      "source": "FluidInference/speaker-diarization-coreml@df2625ac79a7ac6b65ad868fee6d80f320da4232",
+      "sha256": "d37e4ce30b406a6b34f765f769b9baed3178cc0c2b2e299c641daa43a052dd3f"
+    },
+    {
+      "path": "native/local-speaker-install/runtime-models/community-1/Segmentation.mlmodelc/weights/weight.bin",
+      "url": "https://huggingface.co/FluidInference/speaker-diarization-coreml/resolve/df2625ac79a7ac6b65ad868fee6d80f320da4232/Segmentation.mlmodelc/weights/weight.bin?download=true",
+      "bytes": 5959360,
+      "source": "FluidInference/speaker-diarization-coreml@df2625ac79a7ac6b65ad868fee6d80f320da4232",
+      "sha256": "c3189a64946c75bc24fcb98afe89ad78c52bdbadfdf65e857fb1b81e2cc9fbb2"
+    },
+    {
+      "path": "native/local-speaker-install/runtime-models/community-1/plda-parameters.json",
+      "url": "https://huggingface.co/FluidInference/speaker-diarization-coreml/resolve/df2625ac79a7ac6b65ad868fee6d80f320da4232/plda-parameters.json?download=true",
+      "bytes": 89416,
+      "source": "FluidInference/speaker-diarization-coreml@df2625ac79a7ac6b65ad868fee6d80f320da4232",
+      "sha256": "38ee28d4269c076cef254ee760bbd811f0738a92e0f01f9699ad372828c5de8f"
+    },
+    {
+      "path": "native/local-embedding-install/3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx",
+      "url": "https://huggingface.co/csukuangfj/speaker-embedding-models/resolve/8be2a75c9ed7a590538b268e46fbb65e1aa9d208/3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx",
+      "bytes": 28281138,
+      "source": "csukuangfj/speaker-embedding-models@8be2a75c9ed7a590538b268e46fbb65e1aa9d208",
+      "sha256": "f682b514c05d947ee3fa91cd6ec6c5c7543479a128373fa29b1faedccd21fd11"
+    },
+    {
+      "path": "native/local-speaker-install/runtime-models/community-1/UPSTREAM-LICENSE",
+      "url": "https://huggingface.co/FluidInference/speaker-diarization-coreml/resolve/df2625ac79a7ac6b65ad868fee6d80f320da4232/LICENSE?download=true",
+      "bytes": 19759,
+      "source": "FluidInference/speaker-diarization-coreml@df2625ac79a7ac6b65ad868fee6d80f320da4232",
+      "sha256": "736763bf08829e36266b8a3bebcc041ac68575424e976490671a7e6b43a525cf",
+      "git_blob_oid": "176bb6930255c9859428728b4b5bdeb2ee40ae21"
+    },
+    {
+      "path": "native/local-speaker-install/runtime-models/community-1/UPSTREAM-NOTICE.md",
+      "url": "https://huggingface.co/FluidInference/speaker-diarization-coreml/resolve/df2625ac79a7ac6b65ad868fee6d80f320da4232/NOTICE.md?download=true",
+      "bytes": 1925,
+      "source": "FluidInference/speaker-diarization-coreml@df2625ac79a7ac6b65ad868fee6d80f320da4232",
+      "sha256": "0964a66893fa5c3a574758257d30d2944669f44eeed5784b30ec3bab902012b3",
+      "git_blob_oid": "cdb9708dc53442725a9f23773851777327ec15f2"
+    },
+    {
+      "path": "native/local-speaker-install/runtime-models/community-1/UPSTREAM-PROVENANCE.md",
+      "url": "https://huggingface.co/FluidInference/speaker-diarization-coreml/resolve/df2625ac79a7ac6b65ad868fee6d80f320da4232/PROVENANCE.md?download=true",
+      "bytes": 3377,
+      "source": "FluidInference/speaker-diarization-coreml@df2625ac79a7ac6b65ad868fee6d80f320da4232",
+      "sha256": "0032bc1b7d01b6af2bb6eb8548a39c9a28fe5c1909f74166bc2ea2eb1cc27df6",
+      "git_blob_oid": "f29e592d324cdf6449c866b34bcb109e7dc06314"
+    },
+    {
+      "path": "native/local-speaker-install/runtime-models/community-1/UPSTREAM-README.md",
+      "url": "https://huggingface.co/FluidInference/speaker-diarization-coreml/resolve/df2625ac79a7ac6b65ad868fee6d80f320da4232/README.md?download=true",
+      "bytes": 4836,
+      "source": "FluidInference/speaker-diarization-coreml@df2625ac79a7ac6b65ad868fee6d80f320da4232",
+      "sha256": "d0488f898df6da6e9d36f28b0704a65a13578d598c8685a9c5af0f5f8af13978",
+      "git_blob_oid": "a3e887295eb987af31c90850584813c6e977f634"
+    },
+    {
+      "path": "native/local-embedding-install/c-api.h",
+      "url": "https://raw.githubusercontent.com/k2-fsa/sherpa-onnx/v1.13.8/sherpa-onnx/c-api/c-api.h",
+      "bytes": 167657,
+      "source": "k2-fsa/sherpa-onnx@v1.13.8",
+      "sha256": "2a1b95084be8fd1deb3228fcad2fd3f7f0258b64582f7402281ec174c7b7f4ce",
+      "git_blob_oid": "5fe0813c603dac768bce00fadd2e15b0a23b7b73"
+    }
+  ],
+  "archives": {
+    "fluid_audio": {
+      "path": ".runtime/dependencies/FluidAudio-0b1f462.tar.gz",
+      "url": "https://codeload.github.com/FluidInference/FluidAudio/tar.gz/0b1f46289fe27d95b5e66ad8be46e64f5ee02ae7",
+      "bytes": 6610275,
+      "sha256": "30aed87087499a8db69dd16ddc5f627c06254cf5414f118726fed059e58fd50b",
+      "source": "FluidInference/FluidAudio@0b1f46289fe27d95b5e66ad8be46e64f5ee02ae7"
+    },
+    "nemo_text_processing": {
+      "path": ".runtime/dependencies/NemoTextProcessing-0.3.1.zip",
+      "url": "https://github.com/FluidInference/text-processing-rs/releases/download/v0.3.1/NemoTextProcessing.xcframework.zip",
+      "bytes": 87267919,
+      "sha256": "5fa8c10d4ec26c1bb2413125f351a7222a4c68a23b74476680fbada7e26fc6aa",
+      "source": "FluidInference/text-processing-rs@v0.3.1"
+    },
+    "sherpa_onnx": {
+      "path": ".runtime/dependencies/sherpa-onnx-v1.13.8.tar.bz2",
+      "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.8/sherpa-onnx-v1.13.8-osx-arm64-shared-no-tts-lib.tar.bz2",
+      "bytes": 8292111,
+      "sha256": "f3e0cbd86cc3f38dad30c97921b40e9a8bcc6f2c943777eb76ad77176993e417",
+      "source": "k2-fsa/sherpa-onnx@v1.13.8"
+    }
+  },
+  "licensed_model": "https://openmdw.ai/license/1-1/",
+  "license_notes": {
+    "Nemotron3": "OpenMDW-1.1",
+    "Community-1": "CC-BY-4.0",
+    "FluidAudio": "Apache-2.0",
+    "LocalVQE": "Apache-2.0",
+    "CAM++": "Apache-2.0",
+    "Sherpa-ONNX": "Apache-2.0",
+    "NemoTextProcessing": "Apache-2.0"
+  }
+}
