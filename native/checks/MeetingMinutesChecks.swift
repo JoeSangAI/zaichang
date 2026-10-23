@@ -41,7 +41,23 @@ func meetingMinutesChecks() throws -> [String] {
     guard rejects(extraSection, transcript: transcript) else { throw MeetingMinutesError.invalidResponse }
     let headingInjection = response.replacingOccurrences(of: "会议讨论了试运行周期和后续检查安排。", with: "会议讨论了试运行周期。\n## 我的笔记")
     guard rejects(headingInjection, transcript: transcript) else { throw MeetingMinutesError.invalidResponse }
-    return ["minutes_request_separates_evidence_and_background", "minutes_valid_json_renders_fixed_template", "minutes_rejects_nonverbatim_quote", "minutes_rejects_proposal_as_decision", "minutes_rejects_extra_output_fields", "minutes_rejects_heading_injection"]
+    let company = "我们常规邀请的是甲公司和乙公司。他来过好多次，北京这次还在沟通。"
+    let falsePayment = #"{"overview":"常规支持两种支付渠道。","topics_and_conclusions":[],"decisions":[],"action_items":[],"open_questions":[],"key_quotes":[]}"#
+    let falseRefusal = #"{"overview":"对方拒绝合作，双方存在分歧。","topics_and_conclusions":[],"decisions":[],"action_items":[],"open_questions":[],"key_quotes":[]}"#
+    let negativeDecision = #"{"overview":"会议讨论活动安排。","topics_and_conclusions":[],"decisions":[{"text":"拒绝参加活动","evidence_quote":"不。"}],"action_items":[],"open_questions":[],"key_quotes":[]}"#
+    guard rejects(falsePayment, transcript: company),
+          rejects(falseRefusal, transcript: "不。好的，好的，没问题。谢谢大家。"),
+          rejects(negativeDecision, transcript: "不。") else { throw MeetingMinutesError.invalidResponse }
+    let payment = "我们支持信用卡支付。"
+    _ = try MeetingMinutes.validateAndRender(falsePayment.replacingOccurrences(of: "常规支持两种支付渠道。", with: payment), title: "支付讨论", finalTranscript: payment)
+    guard !MeetingMinutes.evidenceEligible(["final": true, "text": "不。"]),
+          !MeetingMinutes.evidenceEligible(["final": false, "text": company]),
+          !MeetingMinutes.evidenceEligible(["final": true, "text": company, "quality_flags": ["audio_corrupt"]]),
+          !MeetingMinutes.evidenceEligible(["final": true, "text": "本次会议讨论的是活动参加情况以及安排。ちちち。反复内容。にとる。"]),
+          MeetingMinutes.evidenceEligible(["final": true, "text": "不参加这次活动。"]),
+          MeetingMinutes.evidenceEligible(["final": true, "text": "こんにちは。次の会議では企業参加状況及び共同宣伝計画について確認します。"]),
+          MeetingMinutes.evidenceEligible(["final": true, "text": company]) else { throw MeetingMinutesError.invalidResponse }
+    return ["minutes_request_separates_evidence_and_background", "minutes_valid_json_renders_fixed_template", "minutes_rejects_nonverbatim_quote", "minutes_rejects_proposal_as_decision", "minutes_rejects_extra_output_fields", "minutes_rejects_heading_injection", "minutes_rejects_unsupported_payment_and_refusal", "minutes_filters_unreliable_evidence_preserving_explicit_negation_and_japanese"]
 }
 
 private func rejects(_ response: String, transcript: String) -> Bool {

@@ -1,19 +1,18 @@
 #!/bin/sh
 set -eu
 
-APP="${ZAICHANG_APP_PATH:-}"
-if [ -z "$APP" ]; then
-  for candidate in "/Applications/在场.app" "$HOME/Applications/在场.app" "$HOME/Desktop/在场.app"; do
-    if [ -d "$candidate" ] && [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$candidate/Contents/Info.plist" 2>/dev/null || true)" = "com.joesang.zaichang.standalone" ]; then APP="$candidate"; break; fi
-  done
+if [ -z "${ZAICHANG_EDITION:-}" ]; then
+  if [ -d "$HOME/Desktop/在场.app" ]; then
+    ZAICHANG_EDITION=joe
+  else
+    ZAICHANG_EDITION=standalone
+  fi
 fi
-if [ -z "$APP" ] && command -v mdfind >/dev/null 2>&1; then
-  APP="$(mdfind 'kMDItemCFBundleIdentifier == "com.joesang.zaichang.standalone"' | head -n 1 || true)"
-fi
-if [ -z "$APP" ]; then
-  printf '%s\n' '{"status":"unavailable","reason":"找不到在场应用；请设置 ZAICHANG_APP_PATH。"}'
-  exit 2
-fi
+export ZAICHANG_EDITION
+case "$ZAICHANG_EDITION" in
+  standalone) APP="$HOME/Applications/在场.app" ;;
+  *) APP="$HOME/Desktop/在场.app" ;;
+esac
 READER="$APP/Contents/Resources/Runtime/meeting_context.py"
 
 if [ ! -f "$READER" ]; then
@@ -25,14 +24,12 @@ PYTHON=""
 for candidate in \
   "$APP/Contents/Resources/Runtime/Python/bin/python3" \
   "$APP/Contents/Resources/Python/bin/python3" \
-  "/opt/homebrew/bin/python3" \
   "/usr/local/bin/python3" \
-  "/usr/bin/python3"; do
+  "/usr/bin/python3" \
+  "/opt/homebrew/bin/python3"; do
   if [ -x "$candidate" ]; then
-    if "$candidate" -I -c 'import sys; raise SystemExit(sys.version_info < (3, 12))' >/dev/null 2>&1; then
-      PYTHON="$candidate"
-      break
-    fi
+    PYTHON="$candidate"
+    break
   fi
 done
 

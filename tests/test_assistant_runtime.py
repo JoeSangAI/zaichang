@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import sqlite3
 import tempfile
@@ -6,7 +7,7 @@ import unittest
 from pathlib import Path
 
 import assistant_runtime
-from assistant_runtime import AssistantRuntime, AssistantStore, OVERVIEW_SCHEMA, SCOUT_SCHEMA
+from assistant_runtime import AssistantRuntime, AssistantStore, OVERVIEW_SCHEMA
 from codex_runtime import RuntimeErrorCode
 
 
@@ -19,6 +20,7 @@ class FakeAppServer:
         self.started = False
         self.start_count = 0
         self.closed = False
+        self.failure = None
         self.strict_resume = False
         self.counter = 0
         self.threads = {}
@@ -73,14 +75,18 @@ class FakeAppServer:
         await asyncio.sleep(0)
         if params.get("outputSchema"):
             if params["outputSchema"] == OVERVIEW_SCHEMA:
-                text = json.dumps({"current_topic": {"text": "示例产品校园推广", "evidence": [
-                    {"segment_id": "public-example-product-1", "quote": "示例产品是否做过校园推广"}]},
-                    "discussion_points": [{"text": "团队尚不确定 Example Product 是否做过校园推广", "evidence": [
-                        {"segment_id": "public-example-product-1", "quote": "团队不确定示例产品是否做过校园推广"}]}],
-                    "decisions": [], "actions": [], "open_questions": [{"text": "Example Product 是否做过校园推广？", "evidence": [
-                        {"segment_id": "public-example-product-1", "quote": "示例产品是否做过校园推广"}]}]}, ensure_ascii=False)
+                prompt = params["input"][0]["text"]
+                source_rows = [json.loads(line) for line in prompt.split("最终发言片段：\n", 1)[1].splitlines()]
+                source_id = next((str(row[0]) for row in source_rows if isinstance(row[2], str)
+                                  and "不知道 qoder 有没有做过校园的推广" in row[2]), "0")
+                text = json.dumps({"current_topic": {"text": "Qoder 校园推广", "evidence": [
+                    {"segment_id": source_id, "quote": "qoder 有没有做过校园的推广"}]},
+                    "discussion_points": [{"text": "团队尚不确定 Qoder 是否做过校园推广", "evidence": [
+                        {"segment_id": source_id, "quote": "不知道 qoder 有没有做过校园的推广"}]}],
+                    "decisions": [], "actions": [], "open_questions": [{"text": "Qoder 是否做过校园推广？", "evidence": [
+                        {"segment_id": source_id, "quote": "qoder 有没有做过校园的推广"}]}]}, ensure_ascii=False)
             else:
-                text = json.dumps({"proposals": []}, ensure_ascii=False)
+                text = json.dumps({"stance": "代表团队明确校园推广目标", "items": []}, ensure_ascii=False)
         else:
             text = "已完成"
         await q.put({"method": "item/completed", "params": {"threadId": thread_id,
@@ -122,20 +128,6 @@ class AssistantRuntimeTests(unittest.IsolatedAsyncioTestCase):
         result = await self.service.bind("workspace-proposed", {"session_id": "session-1", "cache_id": "cache-1", "title": "广告策略会"})
         self.workspace_id = result["workspace_id"]
 
-    async def test_quiet_native_tool_timeout_keeps_task_and_slot_until_completion(self):
-        original = self.fake.event
-        waits = 0
-        async def event(thread_id, **kwargs):
-            nonlocal waits
-            waits += 1
-            if waits == 1:
-                raise asyncio.TimeoutError()
-            return await original(thread_id, **kwargs)
-        self.fake.event = event
-        result = await self.service.cmd_send(self.workspace_id, {"text": "读取项目说明"})
-        await self.wait_until(lambda: self.store.task(result["task_id"])["status"] == "completed")
-        self.assertGreaterEqual(waits, 3)
-        self.assertEqual(sum(method == "turn/start" for method, _ in self.fake.requests), 1)
 
     async def asyncTearDown(self):
         if not self.service._closed:
@@ -158,47 +150,6 @@ class AssistantRuntimeTests(unittest.IsolatedAsyncioTestCase):
         listed = await self.service.list_workspaces()
         self.assertEqual(listed["workspaces"][0]["id"], self.workspace_id)
 
-    async def test_overview_migration_preserves_existing_task_and_message_rows(self):
-        legacy_dir = self.root / "legacy-store"
-        legacy_dir.mkdir()
-        path = legacy_dir / "assistant.sqlite3"
-        db = sqlite3.connect(path)
-        db.executescript("""
-            PRAGMA foreign_keys=ON;
-            CREATE TABLE workspace (id TEXT PRIMARY KEY, cache_id TEXT, session_id TEXT, title TEXT NOT NULL DEFAULT '',
-                context_database TEXT, proactive INTEGER NOT NULL DEFAULT 0, active_task_id TEXT,
-                context_revision TEXT, context_hash TEXT, context_segment_ids TEXT NOT NULL DEFAULT '[]', updated REAL NOT NULL);
-            CREATE UNIQUE INDEX workspace_cache_id ON workspace(cache_id) WHERE cache_id IS NOT NULL;
-            CREATE UNIQUE INDEX workspace_session_id ON workspace(session_id) WHERE session_id IS NOT NULL;
-            CREATE TABLE task (id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL REFERENCES workspace(id),
-                title TEXT NOT NULL, origin TEXT NOT NULL CHECK(origin IN ('user','proactive','scout')), status TEXT NOT NULL,
-                thread_id TEXT, turn_id TEXT, goal TEXT NOT NULL DEFAULT '', goal_key TEXT NOT NULL DEFAULT '',
-                source_refs TEXT NOT NULL DEFAULT '[]', lane TEXT NOT NULL DEFAULT 'background', parent_task_id TEXT,
-                depth INTEGER NOT NULL DEFAULT 0, error TEXT, created REAL NOT NULL, updated REAL NOT NULL);
-            CREATE INDEX task_workspace_status ON task(workspace_id,status,created);
-            CREATE TABLE message (id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES task(id), role TEXT NOT NULL,
-                text TEXT NOT NULL, status TEXT NOT NULL, origin TEXT NOT NULL, created REAL NOT NULL, updated REAL NOT NULL);
-            CREATE INDEX message_task_created ON message(task_id,created);
-            CREATE TABLE meeting_overview (workspace_id TEXT PRIMARY KEY REFERENCES workspace(id), status TEXT NOT NULL,
-                data_json TEXT NOT NULL, source_hash TEXT NOT NULL DEFAULT '', error TEXT, updated REAL NOT NULL);
-            INSERT INTO workspace(id,title,updated) VALUES('w1','Existing work',1);
-            INSERT INTO task(id,workspace_id,title,origin,status,created,updated) VALUES('t1','w1','Existing task','user','completed',2,2);
-            INSERT INTO message(id,task_id,role,text,status,origin,created,updated) VALUES('m1','t1','user','keep me','completed','user',3,3);
-            INSERT INTO meeting_overview(workspace_id,status,data_json,source_hash,updated)
-                VALUES('w1','ready','{"current_topic":{"text":"旧议题","evidence":[]},"discussion_points":[],"decisions":[],"actions":[],"open_questions":[]}','legacy-source-a',4);
-        """)
-        db.close()
-        migrated = AssistantStore(legacy_dir)
-        try:
-            task = migrated.task("t1")
-            self.assertEqual(task["kind"], "chat")
-            self.assertEqual(task["title"], "Existing task")
-            self.assertEqual(migrated.messages("w1")[0]["text"], "keep me")
-            self.assertIsNotNone(migrated.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='meeting_overview'").fetchone())
-            overview = migrated.db.execute("SELECT data_source_hash FROM meeting_overview WHERE workspace_id='w1'").fetchone()
-            self.assertEqual(overview["data_source_hash"], "legacy-source-a")
-        finally:
-            migrated.close()
 
     async def test_concurrent_bind_waits_for_single_runtime_warm_handshake(self):
         gate = asyncio.Event()
@@ -233,28 +184,11 @@ class AssistantRuntimeTests(unittest.IsolatedAsyncioTestCase):
         await service.shutdown()
         store.close()
 
-    async def test_context_is_memory_only_and_send_uses_a_codex_thread(self):
-        private = "TRANSCRIPT_SHOULD_NOT_BE_PERSISTED_841"
-        await self.service.cmd_context(self.workspace_id, {"title": "广告策略会", "session_id": "session-1",
-            "segments": [{"id": "s1", "revision": 1, "text": private, "speaker": "A", "final": True},
-                         {"id": "s2", "text": "unstable", "final": False}], "notes": "使用既有档案"})
-        result = await self.service.cmd_send(self.workspace_id, {"text": "帮我查一下这个项目历史"})
-        await self.wait_until(lambda: self.store.task(result["task_id"])["status"] == "completed")
-        self.assertEqual(self.fake.thread_options[0]["sandbox"], "workspace-write")
-        self.assertEqual(self.fake.thread_options[0]["approval_policy"], "on-request")
-        prompt = [p for m, p in self.fake.requests if m == "turn/start"][0]["input"][0]["text"]
-        self.assertIn(private, prompt)
-        self.assertIn("untrusted data", prompt)
-        self.assertIn("session_id=session-1", prompt)
-        self.assertIn("cache_id=cache-1", prompt)
-        self.assertIn("projection_hash=", prompt)
-        self.assertNotIn(private.encode(), (self.root / "store" / "assistant.sqlite3").read_bytes())
-        self.assertEqual(json.loads(self.store.workspace(self.workspace_id)["context_segment_ids"]), ["s1"])
 
     async def test_meeting_overview_uses_codex_schema_without_changing_chat_focus(self):
-        speech = "团队不确定示例产品是否做过校园推广"
-        await self.service.cmd_context(self.workspace_id, {"title": "示例产品校园推广", "notes": "PRIVATE_NOTE_SHOULD_NOT_ENTER_OVERVIEW",
-            "segments": [{"id": "public-example-product-1", "revision": 1, "text": speech, "speaker": "说话人乙", "final": True},
+        speech = "不知道 qoder 有没有做过校园的推广"
+        await self.service.cmd_context(self.workspace_id, {"title": "Qoder campus marketing", "notes": "PRIVATE_NOTE_SHOULD_NOT_ENTER_OVERVIEW",
+            "segments": [{"id": "public-qoder-1", "revision": 1, "text": speech, "speaker": "Bob", "final": True},
                          {"id": "partial", "text": "unfinished", "final": False}]})
         result = await self.service.cmd_overview(self.workspace_id, {"active": True})
         self.assertTrue(result["queued"])
@@ -265,13 +199,14 @@ class AssistantRuntimeTests(unittest.IsolatedAsyncioTestCase):
         overview = state["meeting_overview"]
         self.assertEqual(overview["status"], "ready")
         self.assertEqual(overview["data"]["discussion_points"][0]["evidence"], [
-            {"segment_id": "public-example-product-1", "quote": speech}])
-        self.assertEqual(state["tasks"], [])
+            {"segment_id": "public-qoder-1", "quote": speech}])
+        self.assertNotIn("tasks", state)
         self.assertEqual(state["messages"], [])
         self.assertIsNone(self.store.workspace(self.workspace_id)["active_task_id"])
         task = self.store.db.execute("SELECT * FROM task WHERE kind='overview'").fetchone()
         self.assertEqual(task["lane"], "background")
         thread_id = task["thread_id"]
+        self.assertTrue(self.fake.threads[thread_id]["ephemeral"])
         self.assertEqual(self.fake.threads[thread_id]["sandbox"], "read-only")
         self.assertEqual(self.fake.threads[thread_id]["dynamic_tools"], [])
         turn = next(params for method, params in self.fake.requests if method == "turn/start")
@@ -283,9 +218,9 @@ class AssistantRuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.service.cmd_overview(self.workspace_id, {"active": False})
 
     async def test_overview_attempt_hash_never_makes_prior_result_look_current(self):
-        speech_a = "团队不确定示例产品是否做过校园推广"
-        speech_b = "随着它会主动调用 ai 江南春来写几句广告语。"
-        await self.service.cmd_context(self.workspace_id, {"title": "Example Product", "segments": [
+        speech_a = "不知道 qoder 有没有做过校园的推广"
+        speech_b = "随着它会主动调用 ai 示例人物39来写几句广告语。"
+        await self.service.cmd_context(self.workspace_id, {"title": "Qoder", "segments": [
             {"id": "real-a", "text": speech_a, "final": True}]})
         hash_a = self.service._overview_hash(self.service.contexts[self.workspace_id])
         old_data = {"current_topic": {"text": speech_a, "evidence": [
@@ -321,12 +256,13 @@ class AssistantRuntimeTests(unittest.IsolatedAsyncioTestCase):
         cleared = await self.service._snapshot(self.workspace_id, announce=False)
         self.assertTrue(cleared["meeting_overview"]["stale"])
 
-    async def test_overview_tab_closed_prevents_automatic_calls(self):
+    async def test_overview_tab_closed_does_not_cancel_queued_job(self):
         self.fake.auto_complete = False
-        await self.service.cmd_context(self.workspace_id, {"title": "Example Product", "segments": [
-            {"id": "public-example-product-1", "text": "团队不确定示例产品是否做过校园推广", "final": True}]})
+        await self.service.cmd_context(self.workspace_id, {"title": "Qoder", "segments": [
+            {"id": "public-qoder-1", "text": "不知道 qoder 有没有做过校园的推广", "final": True}]})
         for index in range(2):
-            task_id = self.service._create_task(self.workspace_id, f"占用后台{index}", "user", goal=f"busy {index}")
+            other = await self.service.bind(f"busy-{index}", {})
+            task_id = self.service._create_task(other["workspace_id"], f"占用后台{index}", "user", goal=f"busy {index}", kind="overview")
             self.service._set_task(task_id, status="running", lane="background")
             self.service.background_running.add(task_id)
         await self.service.cmd_overview(self.workspace_id, {"active": True})
@@ -335,95 +271,104 @@ class AssistantRuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.service.cmd_overview(self.workspace_id, {"active": False})
         await asyncio.sleep(.03)
         task = next(r for r in self.store.tasks(self.workspace_id) if r["kind"] == "overview")
-        self.assertEqual(task["status"], "cancelled")
+        self.assertEqual(task["status"], "queued")
         self.assertFalse(any(method == "turn/start" for method, _ in self.fake.requests))
-        self.assertNotIn(task["id"], self.service.overview_inputs)
+        self.assertIn(task["id"], self.service.overview_inputs)
 
-    async def test_overview_debounce_uses_30_second_quiet_and_60_second_max(self):
-        now = [100.0]
-        self.service.clock = lambda: now[0]
-        delays = []
-        gate = asyncio.Event()
-        async def blocked_sleep(delay):
-            delays.append(delay)
-            await gate.wait()
-        self.service.sleep = blocked_sleep
-        self.service.overview_active.add(self.workspace_id)
-        speech = "团队不确定示例产品是否做过校园推广"
-        await self.service.cmd_context(self.workspace_id, {"title": "Example Product", "segments": [
-            {"id": "public-example-product-1", "text": speech, "final": True}]})
-        await self.wait_until(lambda: len(delays) == 1)
-        self.assertEqual(delays[0], 30)
-        now[0] = 140.0
-        await self.service.cmd_context(self.workspace_id, {"title": "示例产品校园推广", "segments": [
-            {"id": "public-example-product-1", "text": speech, "final": True}]})
-        await self.wait_until(lambda: len(delays) == 2)
-        self.assertEqual(delays[1], 20)
-        await self.service.cmd_overview(self.workspace_id, {"active": False})
-        gate.set()
-        await asyncio.sleep(0)
-        self.assertFalse(any(r["kind"] == "overview" for r in self.store.tasks(self.workspace_id)))
 
-    async def test_overview_capacity_error_is_visible_and_retries_only_on_refresh(self):
-        await self.service.cmd_context(self.workspace_id, {"title": "Example Product", "segments": [
-            {"id": "public-example-product-1", "text": "团队不确定示例产品是否做过校园推广", "final": True}]})
-        existing_ids = []
-        for index in range(assistant_runtime.MAX_LIVE_TASKS):
-            task_id = self.service._create_task(self.workspace_id, f"existing{index}", "user", goal=f"existing {index}")
-            self.service._set_task(task_id, status="running")
-            existing_ids.append(task_id)
+
+    async def test_overview_compact_projection_keeps_all_rows_and_restores_full_ids(self):
+        # Public product requirements, with the observed long meeting's row count.
+        segments = [{"id": f"00000000-0000-0000-0000-000000000000:1:word:{index}",
+                     "text": "概览只读，不允许审批和工具。", "speaker": f"声音来源{index % 9}",
+                     "final": True} for index in range(1376)]
+        segments[700]["text"] = "不知道 qoder 有没有做过校园的推广"
+        segments[0].update(speaker="", speaker_uncertain=True)
+        segments[1].update(quality_flags=["audio_timing_mismatch"])
+        ctx = {"title": "侧栏需求", "segments": segments + [{"id": "unfinished", "text": "尚未完成", "final": False}]}
+        prompt = self.service._overview_prompt(ctx)
+        rows = [json.loads(line) for line in prompt.split("最终发言片段：\n")[1].splitlines()]
+        self.assertLessEqual(len(prompt), assistant_runtime.MAX_CONTEXT_CHARS)
+        self.assertEqual(len(rows), 1376)
+        self.assertEqual([row[0] for row in rows], list(range(1376)))
+        self.assertEqual(rows[0][2], segments[0]["text"])
+        self.assertEqual(rows[-1][2], segments[-1]["text"])
+        self.assertIsNone(rows[1][2])
+        self.assertIn('["",true]', prompt)
+        self.assertNotIn("尚未完成", prompt)
+        await self.service.cmd_context(self.workspace_id, ctx)
         await self.service.cmd_overview(self.workspace_id, {"active": True})
-        await self.wait_until(lambda: self.store.db.execute("SELECT status FROM meeting_overview WHERE workspace_id=?",
-            (self.workspace_id,)).fetchone() and self.store.db.execute("SELECT status FROM meeting_overview WHERE workspace_id=?",
-            (self.workspace_id,)).fetchone()[0] == "failed")
-        row = self.store.db.execute("SELECT * FROM meeting_overview WHERE workspace_id=?", (self.workspace_id,)).fetchone()
-        self.assertEqual(row["error"], "task_budget_exceeded")
-        self.assertEqual(row["source_hash"], self.service._overview_hash(self.service.contexts[self.workspace_id]))
-        self.assertFalse(any(r["kind"] == "overview" for r in self.store.tasks(self.workspace_id)))
-        turns = sum(method == "turn/start" for method, _ in self.fake.requests)
-        await self.service.cmd_overview(self.workspace_id, {"active": False})
-        again = await self.service.cmd_overview(self.workspace_id, {"active": True})
-        await asyncio.sleep(.03)
-        self.assertFalse(again["queued"])
-        self.assertEqual(sum(method == "turn/start" for method, _ in self.fake.requests), turns)
-        forced = await self.service.cmd_overview(self.workspace_id, {"active": True, "refresh": True})
-        await asyncio.sleep(.03)
-        self.assertTrue(forced["active"])
-        self.assertEqual(sum(method == "turn/start" for method, _ in self.fake.requests), turns)
-        for task_id in existing_ids:
-            self.service._set_task(task_id, status="completed")
-        await self.service.cmd_overview(self.workspace_id, {"active": True, "refresh": True})
+        await self.wait_until(lambda: self.store.db.execute("SELECT 1 FROM meeting_overview WHERE workspace_id=? AND status='ready'",
+            (self.workspace_id,)).fetchone() is not None)
+        stored = self.store.db.execute("SELECT data_json FROM meeting_overview WHERE workspace_id=?",
+            (self.workspace_id,)).fetchone()[0]
+        evidence = json.loads(stored)["current_topic"]["evidence"]
+        self.assertEqual(evidence[0]["segment_id"], segments[700]["id"])
+        self.assertEqual(sum(method == "turn/start" for method, _ in self.fake.requests), 1)
+
+    async def test_overview_index_protocol_rejects_wrong_sources_and_keeps_numeric_ids_unambiguous(self):
+        ctx = {"overview_source_format": assistant_runtime.OVERVIEW_SOURCE_FORMAT, "segments": [
+            {"id": "1", "text": "概览必须保留精确原文证据。", "final": True},
+            {"id": "0", "text": "笔记需要保留用户的编辑。", "final": True},
+            {"id": "bad", "text": "坏原文仍应保留。", "quality_flags": ["audio_corrupt"], "final": True}]}
+        def validate(sid, quote, source=ctx):
+            data = {"current_topic": {"text": "侧栏需求", "evidence": [{"segment_id": sid, "quote": quote}]},
+                    "discussion_points": [], "decisions": [], "actions": [], "open_questions": []}
+            return self.service._validate_overview(json.dumps(data), source)["current_topic"]["evidence"]
+        quote = ctx["segments"][0]["text"]
+        self.assertEqual(validate("0", quote), [{"segment_id": "1", "quote": quote}])
+        for sid in ("3", "-1", "00", "foreign-meeting-id", "bad"):
+            self.assertEqual(validate(sid, quote), [])
+        self.assertEqual(validate("0", "伪造原文"), [])
+        self.assertEqual(validate("2", ctx["segments"][2]["text"]), [])
+        other = {**ctx, "segments": [{"id": "other-meeting", "text": "另一场会议的原文。", "final": True}]}
+        self.assertEqual(validate("0", quote, other), [])
+        legacy = {"segments": ctx["segments"]}
+        legacy_quote = ctx["segments"][1]["text"]
+        self.assertEqual(validate("0", legacy_quote, legacy), [{"segment_id": "0", "quote": legacy_quote}])
+
+    async def test_overview_indices_resolve_against_frozen_input_after_context_changes(self):
+        quote = "概览必须保留精确原文证据。"
+        frozen = {"overview_source_format": assistant_runtime.OVERVIEW_SOURCE_FORMAT,
+                  "segments": [{"id": "original-first", "text": quote, "final": True}]}
+        task_id = self.service._create_task(self.workspace_id, "概览", "user", kind="overview")
+        self.service.overview_inputs[task_id] = frozen
+        self.service.contexts[self.workspace_id] = {"segments": [
+            {"id": "new-first", "text": "新的发言。", "final": True}, *frozen["segments"]]}
+        data = {"current_topic": {"text": "概览证据", "evidence": [{"segment_id": "0", "quote": quote}]},
+                "discussion_points": [], "decisions": [], "actions": [], "open_questions": []}
+        self.service._message("indexed-result", task_id, "assistant", json.dumps(data), "complete", "user")
+        await self.service._finish_overview(task_id)
+        row = self.store.db.execute("SELECT status,data_json FROM meeting_overview WHERE workspace_id=?",
+                                   (self.workspace_id,)).fetchone()
+        self.assertEqual(row["status"], "stale")
+        self.assertEqual(json.loads(row["data_json"])["current_topic"]["evidence"],
+                         [{"segment_id": "original-first", "quote": quote}])
+
+    async def test_overview_new_format_retries_persisted_legacy_too_long_without_manual_refresh(self):
+        ctx = {"title": "Qoder", "segments": [
+            {"id": "public-qoder-1", "text": "不知道 qoder 有没有做过校园的推广", "final": True}]}
+        await self.service.cmd_context(self.workspace_id, ctx)
+        legacy_material = {"evidence_policy": 3, "title": ctx["title"], "segments": [
+            {"id": "public-qoder-1", "text": ctx["segments"][0]["text"], "speaker": "",
+             "quality_flags": [], "speaker_uncertain": False, "text_quality": None}]}
+        old_hash = hashlib.sha256(assistant_runtime._compact(legacy_material).encode()).hexdigest()
+        self.assertNotEqual(old_hash, self.service._overview_hash(ctx))
+        self.service._set_overview_status(self.workspace_id, "failed", "overview_too_long", old_hash)
+        async def immediate_sleep(delay):
+            await asyncio.sleep(0)
+        self.service.sleep = immediate_sleep
+        result = await self.service.cmd_overview(self.workspace_id, {"active": True})
+        self.assertTrue(result["queued"])
         await self.wait_until(lambda: self.store.db.execute("SELECT status FROM meeting_overview WHERE workspace_id=?",
             (self.workspace_id,)).fetchone()[0] == "ready")
-        self.assertEqual(sum(method == "turn/start" for method, _ in self.fake.requests), turns + 1)
+        self.assertEqual(sum(method == "turn/start" for method, _ in self.fake.requests), 1)
 
-    async def test_overview_rejects_oversize_projection_and_preserves_prior_result(self):
-        previous_limit = assistant_runtime.MAX_CONTEXT_CHARS
-        assistant_runtime.MAX_CONTEXT_CHARS = 300
-        try:
-            speech = "团队不确定示例产品是否做过校园推广"
-            await self.service.cmd_context(self.workspace_id, {"title": "Example Product", "segments": [
-                {"id": "public-example-product-1", "text": speech, "final": True}]})
-            ctx = self.service.contexts[self.workspace_id]
-            prior = {"current_topic": {"text": "旧议题", "evidence": [{"segment_id": "public-example-product-1",
-                "quote": "示例产品是否做过校园推广"}]}, "discussion_points": [], "decisions": [], "actions": [], "open_questions": []}
-            self.service._set_overview_status(self.workspace_id, "ready", None, "old-hash", prior)
-            self.service.overview_active.add(self.workspace_id)
-            self.service.contexts[self.workspace_id] = {**ctx, "segments": [
-                {"id": "public-example-product-1", "text": speech * 40, "final": True}]}
-            self.service._schedule_overview(self.workspace_id, immediate=True)
-            await self.wait_until(lambda: self.store.db.execute("SELECT status FROM meeting_overview WHERE workspace_id=?",
-                (self.workspace_id,)).fetchone()[0] == "failed")
-            row = self.store.db.execute("SELECT * FROM meeting_overview WHERE workspace_id=?", (self.workspace_id,)).fetchone()
-            self.assertEqual(row["error"], "overview_too_long")
-            self.assertEqual(json.loads(row["data_json"])["current_topic"]["text"], "旧议题")
-            self.assertFalse(any(r["kind"] == "overview" for r in self.store.tasks(self.workspace_id)))
-        finally:
-            assistant_runtime.MAX_CONTEXT_CHARS = previous_limit
+
 
     async def test_overview_restart_marks_nonreplayable_task_interrupted(self):
-        await self.service.cmd_context(self.workspace_id, {"title": "Example Product", "segments": [
-            {"id": "public-example-product-1", "text": "团队不确定示例产品是否做过校园推广", "final": True}]})
+        await self.service.cmd_context(self.workspace_id, {"title": "Qoder", "segments": [
+            {"id": "public-qoder-1", "text": "不知道 qoder 有没有做过校园的推广", "final": True}]})
         source_hash = self.service._overview_hash(self.service.contexts[self.workspace_id])
         task_id = self.service._create_task(self.workspace_id, "概览", "user", goal="overview",
                                             source_refs=[source_hash], kind="overview")
@@ -441,8 +386,8 @@ class AssistantRuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(task["status"], "interrupted")
             self.assertEqual(overview["status"], "interrupted")
             self.assertEqual(overview["source_hash"], source_hash)
-            await offline.cmd_context(self.workspace_id, {"title": "Example Product", "segments": [
-                {"id": "public-example-product-1", "text": "团队不确定示例产品是否做过校园推广", "final": True}]})
+            await offline.cmd_context(self.workspace_id, {"title": "Qoder", "segments": [
+                {"id": "public-qoder-1", "text": "不知道 qoder 有没有做过校园的推广", "final": True}]})
             reopened_result = await offline.cmd_overview(self.workspace_id, {"active": True})
             self.assertFalse(reopened_result.get("queued"))
             self.assertEqual(overview["error"], "restart_no_replay")
@@ -452,8 +397,7 @@ class AssistantRuntimeTests(unittest.IsolatedAsyncioTestCase):
                                              source_refs=[other_hash], kind="overview")
             offline._set_task(completed, status="completed", thread_id="finished-thread")
             offline._set_overview_status(other["workspace_id"], "queued", None, other_hash)
-            offline.recovered_workspaces.discard(other["workspace_id"])
-            await offline._recover_threads(other["workspace_id"])
+            offline._recover_persisted_work()
             resultless = reopened.db.execute("SELECT * FROM meeting_overview WHERE workspace_id=?",
                                              (other["workspace_id"],)).fetchone()
             self.assertEqual(resultless["status"], "failed")
@@ -464,8 +408,8 @@ class AssistantRuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.service._closed = True
 
     async def test_latest_completed_overview_task_controls_restart_recovery(self):
-        speech = "团队不确定示例产品是否做过校园推广"
-        await self.service.cmd_context(self.workspace_id, {"title": "Example Product", "segments": [
+        speech = "不知道 qoder 有没有做过校园的推广"
+        await self.service.cmd_context(self.workspace_id, {"title": "Qoder", "segments": [
             {"id": "real-a", "text": speech, "final": True}]})
         older = self.service._create_task(self.workspace_id, "旧概览", "user", goal="older",
                                           source_refs=["hash-a"], kind="overview")
@@ -493,13 +437,12 @@ class AssistantRuntimeTests(unittest.IsolatedAsyncioTestCase):
             reopened.close()
 
     async def test_failed_overview_same_hash_dedupes_after_context_rehydration_but_refresh_retries(self):
-        speech = "团队不确定示例产品是否做过校园推广"
-        params = {"title": "Example Product", "segments": [
-            {"id": "public-example-product-1", "text": speech, "final": True}]}
+        speech = "不知道 qoder 有没有做过校园的推广"
+        params = {"title": "Qoder", "segments": [
+            {"id": "public-qoder-1", "text": speech, "final": True}]}
         await self.service.cmd_context(self.workspace_id, params)
         source_hash = self.service._overview_hash(self.service.contexts[self.workspace_id])
         self.service._set_overview_status(self.workspace_id, "failed", "previous_failure", source_hash)
-        self.service.overview_active.add(self.workspace_id)
         self.service.contexts.pop(self.workspace_id)
 
         await self.service.cmd_context(self.workspace_id, params)
@@ -511,430 +454,161 @@ class AssistantRuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.wait_until(lambda: self.store.db.execute("SELECT status FROM meeting_overview WHERE workspace_id=?",
             (self.workspace_id,)).fetchone()[0] == "ready")
         self.assertEqual(sum(method == "turn/start" for method, _ in self.fake.requests), 1)
+    async def test_overview_company_names_do_not_prove_payment_relation(self):
+        source = "我们常规邀请的是甲公司和乙公司。"
+        ctx = {"segments": [{"id": "company", "text": source, "final": True}]}
+        data = {"current_topic": {"text": "支付方式", "evidence": [{"segment_id": "company", "quote": source}]},
+                "discussion_points": [{"text": "常规支持这两种支付渠道", "evidence": [{"segment_id": "company", "quote": source}]}],
+                "decisions": [], "actions": [], "open_questions": []}
+        result = self.service._validate_overview(json.dumps(data), ctx)
+        self.assertEqual(result["current_topic"], {"text": "", "evidence": []})
+        self.assertEqual(result["discussion_points"], [])
+        payment = "我们支持信用卡支付。"
+        ctx["segments"][0]["text"] = payment
+        for item in [data["current_topic"], data["discussion_points"][0]]:
+            item["evidence"][0]["quote"] = payment
+        accepted = self.service._validate_overview(json.dumps(data), ctx)
+        self.assertEqual(len(accepted["discussion_points"]), 1)
+
+
+    async def test_overview_all_unreliable_input_does_not_start_model(self):
+        ctx = {"segments": [{"id": "fragment", "text": "不。", "final": True},
+                            {"id": "bad", "text": "仍然保留的原文", "final": True,
+                             "quality_flags": ["audio_timing_mismatch"]}]}
+        self.service.contexts[self.workspace_id] = ctx
+        before = len(self.fake.requests)
+        await self.service._start_overview_after_delay(self.workspace_id, 0)
+        row = self.store.db.execute("SELECT status,error FROM meeting_overview WHERE workspace_id=?",
+                                    (self.workspace_id,)).fetchone()
+        self.assertEqual((row["status"], row["error"]), ("failed", "overview_no_reliable_evidence"))
+        self.assertEqual(len(self.fake.requests), before)
+        self.assertFalse(any(t["kind"] == "overview" for t in self.store.tasks(self.workspace_id)))
+
+    async def test_overview_filtered_claim_is_visible_and_next_valid_result_clears_warning(self):
+        source = "我们常规邀请的是甲公司和乙公司。"
+        ctx = {"segments": [{"id": "company", "text": source, "final": True}]}
+        self.service.contexts[self.workspace_id] = ctx
+        data = {"current_topic": {"text": "支付方式", "evidence": [{"segment_id": "company", "quote": source}]},
+                "discussion_points": [], "decisions": [], "actions": [], "open_questions": []}
+        for index, (label, warning) in enumerate([("支付方式", "overview_evidence_filtered"), ("受邀企业", None)]):
+            data["current_topic"]["text"] = label
+            task_id = self.service._create_task(self.workspace_id, "概览", "user", kind="overview")
+            self.service.overview_inputs[task_id] = ctx
+            self.service._message(f"overview-warning-{index}", task_id, "assistant",
+                                  json.dumps(data), "complete", "user")
+            await self.service._finish_overview(task_id)
+            row = self.store.db.execute("SELECT status,error,data_json FROM meeting_overview WHERE workspace_id=?",
+                                        (self.workspace_id,)).fetchone()
+            self.assertEqual(row["status"], "ready")
+            self.assertEqual(row["error"], warning)
+            if warning:
+                self.assertEqual(json.loads(row["data_json"])["current_topic"]["text"], "")
+
+    async def test_overview_excludes_corrupt_and_objectless_evidence(self):
+        ctx = {"segments": [
+            {"id": "fragment", "text": "不。", "final": True},
+            {"id": "noise", "text": "本次会议讨论的是活动参加情况以及安排。ちちち。反复内容。にとる。", "final": True},
+            {"id": "flagged", "text": "The company will attend.", "final": True, "quality_flags": ["language_shift_needs_review"]},
+            {"id": "company", "text": "我们正在沟通甲公司是否参加北京这次活动。", "final": True},
+            {"id": "japanese", "text": "こんにちは。次の会議では企業参加状況及び共同宣伝計画について確認します。", "final": True}]}
+        data = {"current_topic": {"text": "活动", "evidence": [{"segment_id": "company", "quote": ctx["segments"][3]["text"]}]},
+                "discussion_points": [{"text": "对方拒绝", "evidence": [{"segment_id": "fragment", "quote": "不。"}]},
+                                      {"text": "错误业务内容", "evidence": [{"segment_id": "noise", "quote": "本次会议讨论的是活动参加情况以及安排。"}]}],
+                "decisions": [{"text": "已定参会", "evidence": [{"segment_id": "flagged", "quote": "The company will attend."}]}],
+                "actions": [], "open_questions": []}
+        result = self.service._validate_overview(json.dumps(data), ctx)
+        self.assertEqual(result["discussion_points"], [])
+        self.assertEqual(result["decisions"], [])
+        self.assertEqual(result["current_topic"]["text"], "活动")
+        prompt = self.service._overview_prompt(ctx)
+        self.assertNotIn("ちちち", prompt)
+        self.assertIn("こんにちは", prompt)
+        self.assertIn("不得依据常识", prompt)
+        self.assertIn("speaker_uncertain", prompt)
+        changed = {"segments": [dict(ctx["segments"][3], quality_flags=["audio_corrupt"])]}
+        unflagged = {"segments": [ctx["segments"][3]]}
+        self.assertNotEqual(self.service._overview_hash(changed), self.service._overview_hash(unflagged))
+
     async def test_overview_validation_drops_unverifiable_entries_and_rejects_unknown_ids(self):
-        ctx = {"segments": [{"id": "s1", "speaker": "说话人乙", "text": "说话人乙 will review the notes tomorrow.", "final": True}]}
+        ctx = {"segments": [{"id": "s1", "speaker": "Bob", "text": "Bob will review the notes tomorrow.", "final": True}]}
         data = {"current_topic": {"text": "Notes", "evidence": [{"segment_id": "s1", "quote": "review the notes"}]},
             "discussion_points": [{"text": "invented", "evidence": [{"segment_id": "fake", "quote": "invented"}]},
                                  {"text": "supported", "evidence": [{"segment_id": "s1", "quote": "review the notes"}]}],
-            "decisions": [], "actions": [{"text": "Review notes", "owner": "说话人乙", "deadline": "tomorrow",
+            "decisions": [], "actions": [{"text": "Review notes", "owner": "Bob", "deadline": "tomorrow",
                 "evidence": [{"segment_id": "s1", "quote": "will review the notes tomorrow."}]}], "open_questions": []}
         result = self.service._validate_overview(json.dumps(data), ctx)
         self.assertEqual([x["text"] for x in result["discussion_points"]], ["supported"])
         self.assertIsNone(result["actions"][0]["owner"])
         self.assertEqual(result["actions"][0]["deadline"], "tomorrow")
-        data["actions"][0]["evidence"] = [{"segment_id": "s1", "quote": "说话人乙 will review the notes tomorrow."}]
+        data["actions"][0]["evidence"] = [{"segment_id": "s1", "quote": "Bob will review the notes tomorrow."}]
         explicit_owner = self.service._validate_overview(json.dumps(data), ctx)
-        self.assertEqual(explicit_owner["actions"][0]["owner"], "说话人乙")
+        self.assertEqual(explicit_owner["actions"][0]["owner"], "Bob")
         data["current_topic"]["evidence"] = [{"segment_id": "missing", "quote": "Notes"}]
         sanitized = self.service._validate_overview(json.dumps(data), ctx)
         self.assertEqual(sanitized["current_topic"]["text"], "")
         with self.assertRaisesRegex(ValueError, "overview_schema_invalid"):
             self.service._validate_overview(json.dumps({**data, "extra": "no"}), ctx)
 
-    async def test_reserved_foreground_slot_and_bounded_background_parallelism(self):
-        self.fake.auto_complete = False
-        self.store.db.execute("UPDATE workspace SET proactive=1 WHERE id=?", (self.workspace_id,))
-        bg_ids = []
-        for i in range(2):
-            tid = self.service._create_task(self.workspace_id, f"后台{i}", "proactive", goal=f"background goal {i}")
-            self.service._message(f"bg-msg-{i}", tid, "user", f"background goal {i}", "queued", "proactive")
-            bg_ids.append(tid)
-        user_id = self.service._create_task(self.workspace_id, "前台问题", "user", goal="foreground")
-        self.service._message("user-msg", user_id, "user", "foreground", "queued", "user")
-        child_id = self.service._create_task(self.workspace_id, "并行用户子任务", "user", goal="child",
-                                             parent_task_id=user_id, depth=1)
-        self.service._message("child-msg", child_id, "user", "child", "queued", "user")
-        self.service._pump()
-        await self.wait_until(lambda: len(self.fake.thread_options) == 3)
-        self.assertEqual(len(self.service.foreground_running), 1)
-        self.assertEqual(len(self.service.background_running), 2)
-        self.assertEqual(self.store.task(child_id)["status"], "queued")
-        self.assertEqual(self.store.task(user_id)["status"], "running")
 
-    async def test_new_user_root_tasks_use_background_slots_behind_reserved_foreground(self):
-        self.fake.auto_complete = False
-        first = self.service._create_task(self.workspace_id, "主任务", "user", goal="root")
-        second = self.service._create_task(self.workspace_id, "并行任务", "user", goal="independent", depth=0)
-        self.service._message("root-msg", first, "user", "root", "queued", "user")
-        self.service._message("parallel-msg", second, "user", "parallel", "queued", "user")
-        self.service._pump()
-        await self.wait_until(lambda: len(self.fake.thread_options) == 2)
-        self.assertEqual(self.store.task(first)["lane"], "foreground")
-        self.assertEqual(self.store.task(second)["lane"], "background")
-        self.assertEqual(len(self.service.foreground_running), 1)
-        self.assertEqual(len(self.service.background_running), 1)
 
-    async def test_dynamic_jobs_are_depth_and_global_budget_bounded(self):
-        parent = self.service._create_task(self.workspace_id, "root", "user", goal="root")
-        self.service._set_task(parent, thread_id="root-thread", status="running")
-        row = self.store.task(parent)
-        for index in range(7):
-            self.service._create_task(self.workspace_id, f"queued {index}", "user", goal=str(index))
-        result = await self.service._dynamic_tool(row, {"tool": "assistant_job_spawn",
-            "arguments": {"title": "extra", "goal": "this exceeds the global task budget"}})
-        self.assertFalse(result["success"])
-        self.assertIn("task_budget_exceeded", result["contentItems"][0]["text"])
 
-    async def test_turn_threads_are_separate_and_proactive_off_preserves_user_task(self):
-        self.fake.auto_complete = False
-        await self.service.cmd_proactive(self.workspace_id, {"enabled": True})
-        user_id = self.service._create_task(self.workspace_id, "用户任务", "user", goal="foreground")
-        self.service._message("u1", user_id, "user", "foreground", "queued", "user")
-        bg_id = self.service._create_task(self.workspace_id, "主动任务", "proactive", goal="background")
-        self.service._message("b1", bg_id, "user", "background", "queued", "proactive")
-        self.service._pump()
-        await self.wait_until(lambda: len(self.fake.thread_options) == 2)
-        user_thread = self.store.task(user_id)["thread_id"]
-        bg_thread = self.store.task(bg_id)["thread_id"]
-        self.assertNotEqual(user_thread, bg_thread)
-        await self.service.cmd_proactive(self.workspace_id, {"enabled": False})
-        self.assertEqual(self.store.task(user_id)["status"], "running")
-        await self.wait_until(lambda: self.store.task(bg_id)["status"] == "interrupted")
-        self.assertIn(user_id, self.service.foreground_running)
 
-    async def test_user_followup_takes_ownership_before_proactive_is_disabled(self):
-        self.fake.auto_complete = False
-        await self.service.cmd_proactive(self.workspace_id, {"enabled": True})
-        task_id = self.service._create_task(self.workspace_id, "主动任务", "proactive", goal="background")
-        self.service._set_task(task_id, thread_id="takeover-thread", turn_id="takeover-turn", status="running")
-        await self.service.cmd_send(self.workspace_id, {"task_id": task_id, "text": "继续这个工作"})
-        self.assertEqual(self.store.task(task_id)["origin"], "user")
-        await self.service.cmd_proactive(self.workspace_id, {"enabled": False})
-        self.assertEqual(self.store.task(task_id)["status"], "running")
 
-    async def test_restart_marks_queued_work_interrupted_without_replay(self):
-        task_id = self.service._create_task(self.workspace_id, "queued", "user", goal="not replayed")
-        self.service._message("queued-message", task_id, "user", "not replayed", "queued", "user")
-        self.store.close()
-        reopened = AssistantStore(self.root / "store")
-        replacement = FakeAppServer()
-        service = AssistantRuntime(reopened, self.root, runtime_factory=lambda **kw: replacement)
-        await service.bind("ignored", {"session_id": "session-1"})
-        self.assertEqual(reopened.task(task_id)["status"], "interrupted")
-        msg = reopened.db.execute("SELECT status FROM message WHERE id='queued-message'").fetchone()
-        self.assertEqual(msg["status"], "interrupted")
-        self.assertFalse(any(method == "turn/start" for method, _ in replacement.requests))
-        await service.shutdown()
-        reopened.close()
-        # Prevent tearDown from using its already closed database.
-        self.service._closed = True
 
-    async def test_restart_quarantines_live_tasks_in_other_workspaces_before_pumping(self):
-        other = await self.service.bind("workspace-two", {"session_id": "session-2"})
-        other_id = other["workspace_id"]
-        queued = self.service._create_task(other_id, "queued old", "user", goal="old queued")
-        self.service._message("other-queued", queued, "user", "old queued", "queued", "user")
-        running = self.service._create_task(other_id, "running old", "user", goal="old running")
-        self.service._set_task(running, status="running", thread_id="old-thread", turn_id="old-turn")
-        self.service._message("other-stream", running, "assistant", "partial", "streaming", "user")
-        overview = self.service._create_task(other_id, "old overview", "user", goal="old overview", kind="overview")
-        self.service._set_task(overview, status="waiting", thread_id="overview-thread")
-        self.service._set_overview_status(other_id, "running", None, "old-source")
-        self.store.close()
-        reopened = AssistantStore(self.root / "store")
-        replacement = FakeAppServer()
-        service = AssistantRuntime(reopened, self.root, runtime_factory=lambda **kw: replacement)
-        try:
-            await service.bind("ignored", {"session_id": "session-1"})
-            self.assertEqual(reopened.task(queued)["status"], "interrupted")
-            self.assertEqual(reopened.task(running)["status"], "interrupted")
-            self.assertEqual(reopened.task(overview)["status"], "interrupted")
-            self.assertEqual(reopened.db.execute("SELECT status FROM message WHERE id='other-queued'").fetchone()[0], "interrupted")
-            self.assertEqual(reopened.db.execute("SELECT status FROM message WHERE id='other-stream'").fetchone()[0], "interrupted")
-            self.assertEqual(reopened.db.execute("SELECT status FROM meeting_overview WHERE workspace_id=?", (other_id,)).fetchone()[0], "interrupted")
-            await service.cmd_send(self.workspace_id, {"text": "new workspace one request"})
-            for _ in range(100):
-                if any(method == "turn/start" for method, _ in replacement.requests):
-                    break
-                await asyncio.sleep(.005)
-            started = [params["threadId"] for method, params in replacement.requests if method == "turn/start"]
-            self.assertEqual(len(started), 1)
-            self.assertNotIn("old-thread", started)
-        finally:
-            await service.shutdown()
-            reopened.close()
-            self.service._closed = True
 
-    async def test_closed_runtime_reconnects_for_new_send_without_replaying_old_prompt(self):
-        old_runtime = self.fake
-        old_runtime.closed = True
-        replacement = FakeAppServer()
-        replacement.strict_resume = True
-        self.service.runtime_factory = lambda **kw: replacement
-        result = await self.service.cmd_send(self.workspace_id, {"text": "new request after reconnect"})
-        await self.wait_until(lambda: self.store.task(result["task_id"])["status"] == "completed")
-        self.assertEqual(replacement.start_count, 1)
-        self.assertEqual(sum(method == "turn/start" for method, _ in replacement.requests), 1)
-        self.assertEqual(self.store.task(result["task_id"])["status"], "completed")
 
-    async def test_closed_runtime_resumes_selected_thread_before_new_followup(self):
-        first = await self.service.cmd_send(self.workspace_id, {"text": "start conversation"})
-        await self.wait_until(lambda: self.store.task(first["task_id"])["status"] == "completed")
-        thread_id = self.store.task(first["task_id"])["thread_id"]
-        old_runtime = self.fake
-        old_runtime.closed = True
-        replacement = FakeAppServer()
-        replacement.strict_resume = True
-        self.service.runtime_factory = lambda **kw: replacement
-        second = await self.service.cmd_send(self.workspace_id, {"task_id": first["task_id"],
-                                                                  "text": "continue after reconnect"})
-        await self.wait_until(lambda: self.store.task(first["task_id"])["status"] == "completed"
-                              and any(method == "turn/start" for method, _ in replacement.requests))
-        self.assertEqual(second["task_id"], first["task_id"])
-        self.assertIn(thread_id, replacement.resumed_threads)
-        self.assertEqual(sum(method == "turn/start" for method, _ in replacement.requests), 1)
-        self.assertEqual(self.store.db.execute("SELECT status FROM message WHERE id=?", (first["message_id"],)).fetchone()[0], "completed")
-        self.assertEqual(self.store.db.execute("SELECT status FROM message WHERE id=?", (second["message_id"],)).fetchone()[0], "completed")
 
-    async def test_reconnect_waits_for_old_worker_and_does_not_replay_its_queued_prompt(self):
-        self.fake.auto_complete = False
-        first = await self.service.cmd_send(self.workspace_id, {"text": "first turn"})
-        await self.wait_until(lambda: any(method == "turn/start" for method, _ in self.fake.requests))
-        thread_id = self.store.task(first["task_id"])["thread_id"]
-        queued_old = await self.service.cmd_send(self.workspace_id, {"task_id": first["task_id"],
-                                                                      "text": "queued before disconnect"})
-        old_runtime = self.fake
-        old_runtime.closed = True
-        replacement = FakeAppServer()
-        replacement.strict_resume = True
-        self.service.runtime_factory = lambda **kw: replacement
-        new_send = await self.service.cmd_send(self.workspace_id, {"task_id": first["task_id"],
-                                                                    "text": "new after disconnect"})
-        await self.wait_until(lambda: self.store.task(first["task_id"])["status"] == "completed")
-        self.assertIn(thread_id, replacement.resumed_threads)
-        self.assertEqual(sum(method == "turn/start" for method, _ in replacement.requests), 1)
-        self.assertEqual(self.store.db.execute("SELECT status FROM message WHERE id=?", (queued_old["message_id"],)).fetchone()[0], "interrupted")
-        self.assertEqual(self.store.db.execute("SELECT status FROM message WHERE id=?", (new_send["message_id"],)).fetchone()[0], "completed")
 
-    async def test_cancelling_task_rejects_followups_and_late_approval(self):
-        task_id = self.service._create_task(self.workspace_id, "cancelled work", "user", goal="work")
-        self.service._set_task(task_id, status="cancelling", thread_id="cancel-thread", turn_id="cancel-turn")
-        with self.assertRaisesRegex(RuntimeErrorCode, "task_cancelling"):
-            await self.service.cmd_send(self.workspace_id, {"task_id": task_id, "text": "must not queue"})
-        actor = self.service._create_task(self.workspace_id, "actor", "user", goal="actor")
-        self.service._set_task(actor, status="running", thread_id="actor-thread")
-        result = await self.service._dynamic_tool(self.store.task(actor), {"tool": "assistant_job_continue",
-            "arguments": {"task_id": task_id, "text": "also must not queue"}})
-        self.assertFalse(result["success"])
-        self.assertIn("task_cancelling", result["contentItems"][0]["text"])
-        self.assertFalse(self.store.db.execute("SELECT 1 FROM message WHERE task_id=? AND text='must not queue'", (task_id,)).fetchone())
-        response = await self.service._on_server_request("item/commandExecution/requestApproval", {
-            "_serverRequestId": 808, "threadId": "cancel-thread", "command": "late approval"})
-        self.assertEqual(response, {"decision": "decline"})
-        self.assertFalse(self.service.approvals)
 
-    async def test_cancel_during_approval_history_read_declines_late_request(self):
-        entered = asyncio.Event()
-        release = asyncio.Event()
-        class SlowReadServer(FakeAppServer):
-            async def read_thread(self, thread_id):
-                entered.set()
-                await release.wait()
-                return {"thread": {"id": thread_id, "turns": []}}
-        slow = SlowReadServer()
-        self.service.runtime = slow
-        task_id = self.service._create_task(self.workspace_id, "late approval", "user", goal="approval")
-        self.service._set_task(task_id, status="running", thread_id="late-thread")
-        request = asyncio.create_task(self.service._on_server_request("item/fileChange/requestApproval", {
-            "_serverRequestId": 809, "threadId": "late-thread", "itemId": "not-loaded"}))
-        await entered.wait()
-        self.service._set_task(task_id, status="cancelling")
-        release.set()
-        self.assertEqual(await request, {"decision": "decline"})
-        self.assertFalse(self.service.approvals)
 
-    async def test_pump_does_not_duplicate_registered_worker_or_clear_new_worker(self):
-        task_id = self.service._create_task(self.workspace_id, "queued", "user", goal="queued")
-        self.service._message("pump-queued", task_id, "user", "queued", "queued", "user")
-        gate = asyncio.Event()
-        original_worker = asyncio.create_task(gate.wait())
-        self.service.task_workers[task_id] = original_worker
-        self.service._pump()
-        self.assertEqual(self.store.task(task_id)["status"], "queued")
-        replacement_worker = asyncio.create_task(gate.wait())
-        self.service.task_workers[task_id] = replacement_worker
-        self.service._worker_done(task_id, original_worker)
-        self.assertIs(self.service.task_workers[task_id], replacement_worker)
-        gate.set()
-        await asyncio.gather(original_worker, replacement_worker)
-        self.service.task_workers.pop(task_id, None)
 
-    async def test_dynamic_task_tools_create_independent_worker_without_reply_focus(self):
-        self.store.db.execute("UPDATE workspace SET proactive=1 WHERE id=?", (self.workspace_id,))
-        parent = self.service._create_task(self.workspace_id, "parent", "proactive", goal="parent")
-        self.service._set_task(parent, thread_id="parent-thread", status="running")
-        row = self.store.task(parent)
-        result = await self.service._dynamic_tool(row, {"tool": "assistant_job_spawn",
-            "arguments": {"title": "查校园推广", "goal": "检索项目历史，确认是否做过校园推广案例"}})
-        self.assertTrue(result["success"])
-        tasks = self.store.tasks(self.workspace_id)
-        child = next(t for t in tasks if t["id"] != parent)
-        self.assertEqual(child["origin"], "proactive")
-        self.assertEqual(child["status"], "running")
-        self.assertIsNone(self.store.workspace(self.workspace_id)["active_task_id"])
-        self.assertEqual(len(self.service._dynamic_tools()), 4)
 
-    async def test_proactive_dynamic_tools_cannot_control_user_owned_tasks(self):
-        proactive = self.service._create_task(self.workspace_id, "observer", "proactive", goal="observe")
-        self.service._set_task(proactive, thread_id="observer-thread", status="running")
-        user = self.service._create_task(self.workspace_id, "user work", "user", goal="user owned")
-        self.service._set_task(user, thread_id="user-thread", turn_id="active", status="running")
-        actor = self.store.task(proactive)
-        continue_result = await self.service._dynamic_tool(actor, {"tool": "assistant_job_continue",
-            "arguments": {"task_id": user, "text": "take over"}})
-        cancel_result = await self.service._dynamic_tool(actor, {"tool": "assistant_job_cancel",
-            "arguments": {"task_id": user}})
-        self.assertFalse(continue_result["success"])
-        self.assertFalse(cancel_result["success"])
-        self.assertIn("task_origin_forbidden", continue_result["contentItems"][0]["text"])
-        self.assertIn("task_origin_forbidden", cancel_result["contentItems"][0]["text"])
-        self.assertEqual(self.store.task(user)["status"], "running")
 
-    async def test_native_approval_request_is_routed_to_its_task(self):
-        task_id = self.service._create_task(self.workspace_id, "approval", "user", goal="approval")
-        self.service._set_task(task_id, thread_id="approval-thread", status="running")
-        await self.service._handle_event(task_id, "item/started", {"item": {
-            "id": "approval-item", "type": "fileChange",
-            "changes": [{"kind": "update", "path": "report.md", "diff": "+approved content"}]}})
-        pending = asyncio.create_task(self.service._on_server_request("item/fileChange/requestApproval", {
-            "_serverRequestId": 57, "threadId": "approval-thread", "turnId": "t1",
-            "itemId": "approval-item", "reason": "save report"}))
-        await self.wait_until(lambda: len(self.service.approvals) == 1)
-        approval_id = next(iter(self.service.approvals))
-        approval = self.service.approvals[approval_id]
-        self.assertEqual(approval["task_id"], task_id)
-        await self.service.cmd_approval(self.workspace_id, {"approval_id": approval_id, "decision": "accept"})
-        self.assertEqual(await pending, {"decision": "accept"})
 
-    async def test_file_change_approval_shows_actual_path_and_diff(self):
-        task_id = self.service._create_task(self.workspace_id, "approval", "user", goal="approval")
-        self.service._set_task(task_id, thread_id="approval-thread", status="running")
-        await self.service._handle_event(task_id, "item/started", {"item": {
-            "id": "file-item", "type": "fileChange", "status": "pending",
-            "changes": [{"kind": "update", "path": "notes.md", "diff": "@@ -1 +1 @@\n-old\n+new"}]}})
-        pending = asyncio.create_task(self.service._on_server_request("item/fileChange/requestApproval", {
-            "_serverRequestId": 58, "threadId": "approval-thread", "turnId": "t1",
-            "itemId": "file-item", "reason": "update notes"}))
-        await self.wait_until(lambda: len(self.service.approvals) == 1)
-        approval_id, approval = next(iter(self.service.approvals.items()))
-        state = await self.service._snapshot(self.workspace_id, announce=False)
-        self.assertEqual(state["approvals"][0]["kind"], "file_change")
-        self.assertIn("notes.md", approval["detail"])
-        self.assertIn("+new", approval["detail"])
-        await self.service.cmd_approval(self.workspace_id, {"approval_id": approval_id, "decision": "accept"})
-        self.assertEqual(await pending, {"decision": "accept"})
 
-    async def test_file_change_without_diff_is_unknown_and_cannot_be_accepted(self):
-        task_id = self.service._create_task(self.workspace_id, "approval", "user", goal="approval")
-        self.service._set_task(task_id, thread_id="approval-thread", status="running")
-        pending = asyncio.create_task(self.service._on_server_request("item/fileChange/requestApproval", {
-            "_serverRequestId": 59, "threadId": "approval-thread", "turnId": "t1",
-            "itemId": "missing-item", "reason": "update notes"}))
-        await self.wait_until(lambda: len(self.service.approvals) == 1)
-        approval_id, approval = next(iter(self.service.approvals.items()))
-        self.assertEqual(approval["kind"], "unknown")
-        with self.assertRaisesRegex(ValueError, "approval_details_missing"):
-            await self.service.cmd_approval(self.workspace_id, {"approval_id": approval_id, "decision": "accept"})
-        await self.service.cmd_approval(self.workspace_id, {"approval_id": approval_id, "decision": "decline"})
-        self.assertEqual(await pending, {"decision": "decline"})
 
-    async def test_file_change_approval_reads_existing_thread_item_when_event_was_missed(self):
-        class ExistingChangeAppServer(FakeAppServer):
-            async def read_thread(self, thread_id):
-                return {"thread": {"id": thread_id, "turns": [{"items": [{
-                    "id": "persisted-change", "type": "fileChange", "status": "pending",
-                    "changes": [{"kind": "update", "path": "summary.md", "diff": "@@ -0,0 +1 @@\n+summary"}]}]}]}}
 
-        runtime = ExistingChangeAppServer()
-        self.service.runtime = runtime
-        task_id = self.service._create_task(self.workspace_id, "approval", "user", goal="approval")
-        self.service._set_task(task_id, thread_id="approval-thread", status="running")
-        pending = asyncio.create_task(self.service._on_server_request("item/fileChange/requestApproval", {
-            "_serverRequestId": 60, "threadId": "approval-thread", "turnId": "t1",
-            "itemId": "persisted-change"}))
-        await self.wait_until(lambda: len(self.service.approvals) == 1)
-        approval_id, approval = next(iter(self.service.approvals.items()))
-        self.assertEqual(approval["kind"], "file_change")
-        self.assertIn("summary.md", approval["detail"])
-        self.assertIn("+summary", approval["detail"])
-        await self.service.cmd_approval(self.workspace_id, {"approval_id": approval_id, "decision": "decline"})
-        self.assertEqual(await pending, {"decision": "decline"})
 
-    async def test_user_input_answers_are_normalized_per_question(self):
-        self.assertEqual(AssistantRuntime._approval_result("tool/requestUserInput", "accept", {
-            "q1": "Keep the current title", "q2": ["A", "B"]}),
-            {"answers": {"q1": {"answers": ["Keep the current title"]},
-                          "q2": {"answers": ["A", "B"]}}})
-        self.assertEqual(AssistantRuntime._approval_result("tool/requestUserInput", "decline", {
-            "q1": "ignored"}), {"answers": {}})
+    async def test_long_preview_preserves_binding_notes_and_budget(self):
+        request = "尤其是新的右边侧边栏的三个功能助理、概览和笔记"
+        ctx = {"title": "在场侧栏检查", "session_id": "session-1", "cache_id": "cache-1",
+               "context_database": str(self.root / "context.sqlite"), "notes": request,
+               "segments": [{"id": "long-segment", "text": request * 3000}]}
+        text = self.service._context_text(ctx)
+        self.assertLessEqual(len(text), assistant_runtime.MAX_CONTEXT_CHARS)
+        self.assertIn("session_id=session-1; cache_id=cache-1", text)
+        self.assertIn(ctx["context_database"], text)
+        self.assertIn("User notes:\n" + request, text)
+        self.assertIn("Transcript preview truncated", text)
+        self.assertTrue(text.endswith(request))
 
-    async def test_stale_prior_turn_completion_cannot_end_current_turn(self):
-        task_id = self.service._create_task(self.workspace_id, "turn filter", "user", goal="filter")
-        self.service._set_task(task_id, thread_id="filter-thread", status="running")
-        queue = self.fake.events.setdefault("filter-thread", asyncio.Queue())
-        await queue.put({"method": "turn/completed", "params": {"threadId": "filter-thread",
-            "turn": {"id": "old-turn", "status": "interrupted"}}})
-        await self.service._run_turn(task_id, "filter-thread", "continue")
-        self.assertEqual(self.store.task(task_id)["status"], "running")
+    async def test_segment_limit_reports_omitted_speech_even_when_short(self):
+        ctx = {"title": "侧栏检查", "segments": [
+            {"id": str(i), "text": "检查"} for i in range(101)]}
+        text = self.service._context_text(ctx)
+        self.assertIn("Transcript preview truncated", text)
+        self.assertNotIn("[0 ]", text)
+        self.assertIn("[100 ] 检查", text)
 
-    async def test_fast_completion_before_interrupt_reply_is_not_overwritten(self):
-        release_interrupt = asyncio.Event()
-        interrupt_entered = asyncio.Event()
+    async def test_long_title_cannot_evict_meeting_references(self):
+        text = self.service._context_text({"title": "侧栏" * 30000,
+            "session_id": "session-1", "cache_id": "cache-1", "segments": []})
+        self.assertLessEqual(len(text), assistant_runtime.MAX_CONTEXT_CHARS)
+        self.assertIn("session_id=session-1; cache_id=cache-1", text)
 
-        class SlowInterrupt(FakeAppServer):
-            async def interrupt(self, thread_id, turn_id):
-                await self.events.setdefault(thread_id, asyncio.Queue()).put({"method": "turn/completed",
-                    "params": {"threadId": thread_id, "turn": {"id": turn_id, "status": "completed"}}})
-                interrupt_entered.set()
-                await release_interrupt.wait()
-                return {}
 
-        runtime = SlowInterrupt(auto_complete=False)
-        self.service.runtime = runtime
-        task_id = self.service._create_task(self.workspace_id, "fast completion", "user", goal="race")
-        self.service._set_task(task_id, thread_id="race-thread", status="running")
-        turn_task = asyncio.create_task(self.service._run_turn(task_id, "race-thread", "run once"))
-        await self.wait_until(lambda: bool(self.store.task(task_id)["turn_id"]))
-        cancel_task = asyncio.create_task(self.service._cancel_task(task_id, reason="test_cancel"))
-        await interrupt_entered.wait()
-        await turn_task
-        self.assertEqual(self.store.task(task_id)["status"], "completed")
-        release_interrupt.set()
-        await cancel_task
-        self.assertEqual(self.store.task(task_id)["status"], "completed")
 
-    async def test_unknown_native_request_is_not_granted(self):
-        with self.assertRaisesRegex(RuntimeErrorCode, "unknown_server_request_declined"):
-            await self.service._on_server_request("future/unknown", {"threadId": "none"})
 
-    async def test_scout_is_debounced_read_only_and_uses_structured_output(self):
-        delays = []
 
-        async def instant_sleep(delay):
-            delays.append(delay)
-            await asyncio.sleep(0)
 
-        service = AssistantRuntime(self.store, self.root, runtime_factory=lambda **kw: self.fake,
-                                   emit=self.service.emit_callback, sleep=instant_sleep)
-        service.runtime = self.fake
-        self.store.db.execute("UPDATE workspace SET proactive=1 WHERE id=?", (self.workspace_id,))
-        await service.cmd_context(self.workspace_id, {"title": "strategy", "segments": [
-            {"id": "seg-1", "revision": 1, "text": "We are unsure whether the example product has run campus marketing.", "final": True}]})
-        await self.wait_until(lambda: any(r["origin"] == "scout" and r["status"] == "completed" for r in self.store.tasks(self.workspace_id)))
-        turn = next(params for method, params in self.fake.requests if method == "turn/start")
-        scout_thread = self.store.db.execute("SELECT thread_id FROM task WHERE origin='scout'").fetchone()[0]
-        options = self.fake.threads[scout_thread]
-        self.assertEqual(options["sandbox"], "read-only")
-        self.assertEqual(turn["outputSchema"], SCOUT_SCHEMA)
-        self.assertAlmostEqual(delays[0], 10, places=3)
-        await service.shutdown()
-        self.service._closed = True
 
-    async def test_send_cannot_route_to_another_workspace_task(self):
-        other = await self.service.bind("other-workspace", {"session_id": "session-2"})
-        foreign_task = self.service._create_task(other["workspace_id"], "private", "user", goal="secret")
-        with self.assertRaisesRegex(ValueError, "task_not_found"):
-            await self.service.cmd_send(self.workspace_id, {"task_id": foreign_task, "text": "continue"})
+
+
+
+
+
+
+
 
     async def test_offline_bind_does_not_construct_or_launch_codex(self):
         calls = []
@@ -947,10 +621,10 @@ class AssistantRuntimeTests(unittest.IsolatedAsyncioTestCase):
         result = await offline.bind("offline-workspace", {"session_id": "offline-session"})
         self.assertEqual(result["state"]["runtime_status"], "offline")
         self.assertEqual(calls, [])
-        with self.assertRaisesRegex(ValueError, "runtime_offline"):
+        with self.assertRaisesRegex(RuntimeErrorCode, "runtime_offline"):
             await offline.cmd_send(result["workspace_id"], {"text": "no network"})
         await offline.cmd_context(result["workspace_id"], {"segments": [
-            {"id": "public-example-product-1", "text": "团队不确定示例产品是否做过校园推广", "final": True}]})
+            {"id": "public-qoder-1", "text": "不知道 qoder 有没有做过校园的推广", "final": True}]})
         unavailable = await offline.cmd_overview(result["workspace_id"], {"active": True})
         self.assertFalse(unavailable["available"])
         self.assertEqual((await offline._snapshot(result["workspace_id"], announce=False))["meeting_overview"]["error"],

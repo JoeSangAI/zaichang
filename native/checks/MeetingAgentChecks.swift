@@ -1,4 +1,5 @@
 import AppKit
+import SQLite3
 
 @MainActor func meetingAgentChecks(directory: URL, live: Bool, overviewOnly: Bool = false) throws -> [String: Any] {
     guard Credential.offline, let root = Bundle.main.object(forInfoDictionaryKey: "AdapterRoot") as? String,
@@ -15,6 +16,9 @@ import AppKit
     }
     _ = NSApplication.shared; NSApp.setActivationPolicy(.prohibited)
     var checks: [String] = []
+    checks += try meetingMarkdownChecks()
+    checks += try meetingListenerPanelChecks(directory: directory)
+    checks += try meetingAssistantReminderExportChecks(directory: directory)
     func check(_ value: Bool, _ name: String) throws { if !value { throw Failure(code: name) }; checks.append(name) }
     func wait(_ seconds: Double = 15, _ predicate: () -> Bool) throws {
         let end = Date().addingTimeInterval(seconds)
@@ -48,26 +52,25 @@ import AppKit
     var missingError: String?
     missing.onOpened = { missingError = $0 }; missing.openButton.performClick(nil)
     try check(missingError?.contains("文件已移动或不存在") == true, "missing_reference_explained_on_click")
-    let commandHandler=controller.panel.onCommand
-    var submitted:[String:Any] = [:]
-    controller.panel.onCommand={ method,params in if method == "approval" {submitted=params} }
-    var approvalState=controller.state
-    approvalState["approvals"]=[["id":"command-check","kind":"command","title":"运行只读命令","detail":"pwd","task_id":"check"]]
-    controller.panel.apply(approvalState)
-    let accept=descendants(controller.panel).compactMap{$0 as? NSButton}.first{$0.title == "允许" && !$0.isHidden}
-    try check(accept != nil,"native_command_approval_action_available")
-    accept?.performClick(nil)
-    try check(submitted["decision"] as? String == "accept","native_approval_submission")
-    approvalState["approvals"]=[["id":"question-check","kind":"question","title":"选择资料范围","detail":"","task_id":"check","questions":[["id":"scope","question":"资料范围"]]]]
-    controller.panel.apply(approvalState)
-    let answer=descendants(controller.panel).compactMap{$0 as? NSTextField}.first{$0.placeholderString == "资料范围"}
-    answer?.stringValue="公开资料"
-    controller.panel.apply(approvalState)
-    try check(answer?.stringValue == "公开资料","approval_answer_survives_streaming_snapshot")
-    descendants(controller.panel).compactMap{$0 as? NSButton}.first{$0.title == "提交回答" && !$0.isHidden}?.performClick(nil)
-    let answers=submitted["answers"] as? [String:[String:[String]]]
-    try check(answers?["scope"]?["answers"] == ["公开资料"],"native_codex_question_answer_shape")
-    controller.panel.onCommand=commandHandler;controller.panel.apply(controller.state)
+    let firstReply="布局检查：短回复。",secondReply="布局检查：这是一段较长的助理回复，用来检查不同文字长度都从同一条左边线开始，内容能够正常换行。",userReply="查看方案"
+    var layoutState=controller.state
+    layoutState["messages"]=[
+        ["id":"layout-user","role":"user","text":userReply,"status":"completed"],
+        ["id":"layout-first","role":"assistant","text":firstReply,"status":"completed"],
+        ["id":"layout-second","role":"assistant","text":secondReply,"status":"completed"]]
+    // The live controller can publish another snapshot during RunLoop settling.
+    // Isolate the visual fixture while exercising the same production panel.
+    let layoutWindow=NSWindow(contentRect:NSRect(x:0,y:0,width:370,height:643),styleMask:[.titled],backing:.buffered,defer:false)
+    layoutWindow.isReleasedWhenClosed=false
+    let layoutPanel=MeetingAgentPanel();let layoutHost=layoutWindow.contentView!;layoutHost.addSubview(layoutPanel)
+    NSLayoutConstraint.activate([layoutPanel.leadingAnchor.constraint(equalTo:layoutHost.leadingAnchor),layoutPanel.trailingAnchor.constraint(equalTo:layoutHost.trailingAnchor),layoutPanel.topAnchor.constraint(equalTo:layoutHost.topAnchor),layoutPanel.bottomAnchor.constraint(equalTo:layoutHost.bottomAnchor)])
+    layoutHost.layoutSubtreeIfNeeded();layoutPanel.apply(layoutState);settle();layoutHost.layoutSubtreeIfNeeded()
+    let labels=descendants(layoutPanel).compactMap{$0 as? MeetingMarkdownTextView}
+    guard let firstLabel=labels.first(where:{$0.string.trimmingCharacters(in: .whitespacesAndNewlines)==firstReply}),let secondLabel=labels.first(where:{$0.string.trimmingCharacters(in: .whitespacesAndNewlines)==secondReply}),let userLabel=labels.first(where:{$0.string.trimmingCharacters(in: .whitespacesAndNewlines)==userReply}) else {throw Failure(code:"chat_layout_labels_missing")}
+    let firstFrame=firstLabel.convert(firstLabel.bounds,to:layoutPanel),secondFrame=secondLabel.convert(secondLabel.bounds,to:layoutPanel),userFrame=userLabel.convert(userLabel.bounds,to:layoutPanel)
+    try check(abs(firstFrame.minX-secondFrame.minX)<1 && firstFrame.minX>=14 && firstFrame.minX<=26,"assistant_short_and_long_replies_share_left_margin")
+    try check(userFrame.width>20 && userFrame.minX>firstFrame.minX+20 && userFrame.maxX<layoutPanel.bounds.width-12,"short_user_message_visible_and_right_aligned")
+    layoutWindow.orderOut(nil)
     let first = controller.workspaceID
     controller.panel.chooseTab("笔记"); settle()
     try check(controller.panel.selectedTab == "笔记" && app.notesController?.panel.isHidden == false, "notes_tab_visible")
@@ -77,27 +80,26 @@ import AppKit
     if live && !overviewOnly {
         controller.panel.submit(text: "请读取 \(root)/README.md，用两句话说明这个项目做什么、当前开发源码在哪里。这是接入验收，只读这份文件，不修改文件，不发消息，不调用其他模型。")
         try wait(180) {
-            let tasks = controller.state["tasks"] as? [[String: Any]] ?? []
-            return tasks.contains { $0["status"] as? String == "completed" || $0["status"] as? String == "failed" }
+            return ["completed", "failed"].contains(controller.state["conversation_status"] as? String ?? "")
         }
-        let tasks = controller.state["tasks"] as? [[String: Any]] ?? []
-        try check(tasks.contains { $0["status"] as? String == "completed" }, "native_composer_to_real_codex_completion")
+        try check(controller.state["conversation_status"] as? String == "completed", "native_composer_to_real_codex_completion")
         let messages = controller.state["messages"] as? [[String: Any]] ?? []
         try check(messages.contains { $0["role"] as? String == "assistant" && !($0["text"] as? String ?? "").isEmpty }, "real_reply_in_native_panel")
     }
     if overviewOnly {
-        // Synthetic project discussion; no customer or user meeting material.
-        let source = ["团队讨论项目目标，并确认先处理最紧急的问题。",
-                      "助理需要把主动跟进作为聊天消息展示，不能混入固定会议概览。",
-                      "不同任务可以并行执行，但应共享会议和项目上下文。",
-                      "下一步先验证多任务运行，再检查转写整理和说话人归并。"]
+        // Public synthetic requirements, used only by the explicit live probe.
+        let source = ["旁听功能默认关闭，用户有需要时再打开。",
+                      "助理的研究结果留在对话中，概览只总结本场原话。独立任务共享会议背景，分别显示进展。",
+                      "助理可以查用户已授权的项目目录，但引用资料时必须给出真实来源。",
+                      "先验证本机连接与任务恢复，再检查转写、整理和人物纠错是否保留原始记录。"]
+        app.activeSession = "requirements-review"
         app.segments = [:]
         for (index, text) in source.enumerated() {
-            let id = "synthetic-review-\(index)"
+            let id = "user-confirmed-\(index)"
             app.segments[id] = ["segment_id": id, "session": "requirements-review", "source_id": "mic", "track": "mic", "epoch": "review", "start": Double(index * 30), "end": Double(index * 30 + 20), "text": text, "revision": 1, "final": true,
                                 "speaker": ["basis": "anonymous_cluster", "cluster_id": 0, "source_id": "mic", "epoch": "review"]]
         }
-        app.sequence = source.indices.map { "synthetic-review-\($0)" }
+        app.sequence = source.indices.map { "user-confirmed-\($0)" }
         app.markAllTranscriptParentsDirty(); app.renderText(); controller.invalidateContext()
         controller.panel.chooseTab("概览")
         try wait(240) { ["ready", "failed", "interrupted"].contains((controller.state["meeting_overview"] as? [String: Any])?["status"] as? String ?? "") }
@@ -201,4 +203,66 @@ import AppKit
     var stopped = false; controller.shutdown { stopped = true }; try wait { stopped }
     return ["status": "passed", "checks": checks, "live_subscription": live, "capture": false, "keychain": false,
             "state": controller.state, "images": ["assistant.png", "overview.png", "narrow.png"].map { directory.appendingPathComponent($0).path }]
+}
+
+@MainActor func meetingListenerPanelChecks(directory: URL) throws -> [String] {
+    func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(descendants) }
+    let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 370, height: 643), styleMask: [.titled], backing: .buffered, defer: false)
+    window.isReleasedWhenClosed = false
+    defer { window.orderOut(nil) }
+    let panel = MeetingAgentPanel(), host = window.contentView!
+    host.addSubview(panel)
+    NSLayoutConstraint.activate([panel.leadingAnchor.constraint(equalTo: host.leadingAnchor), panel.trailingAnchor.constraint(equalTo: host.trailingAnchor), panel.topAnchor.constraint(equalTo: host.topAnchor), panel.bottomAnchor.constraint(equalTo: host.bottomAnchor)])
+    host.layoutSubtreeIfNeeded()
+    panel.apply(["workspace_id": "listener", "runtime_status": "ready", "proactive": true, "listening": true,
+                 "messages": [["id": "u", "role": "user", "text": "请看项目背景", "status": "completed"],
+                              ["id": "a", "role": "assistant", "text": "这项前提需要核实", "origin": "say", "status": "completed"]]])
+    let labels = descendants(panel).compactMap { $0 as? NSTextField }.map { $0.stringValue }
+    guard labels.contains("旁听"), labels.contains("正在旁听") else { throw Failure(code: "listener_labels") }
+    let texts = descendants(panel).compactMap { $0 as? NSTextView }.map { $0.string.trimmingCharacters(in: .whitespacesAndNewlines) }
+    guard texts.contains("请看项目背景"), texts.contains("这项前提需要核实") else { throw Failure(code: "single_conversation_text") }
+    guard !descendants(panel).compactMap({ $0 as? NSButton }).contains(where: { $0.title.contains("任务") }) else { throw Failure(code: "task_list_removed") }
+    panel.chooseTab("概览")
+    guard !descendants(panel).compactMap({ $0 as? NSTextView }).contains(where: { $0.string.contains("这项前提需要核实") && !$0.isHiddenOrHasHiddenAncestor }) else { throw Failure(code: "overview_excludes_reminders") }
+    panel.chooseTab("助理"); host.layoutSubtreeIfNeeded()
+    guard let reminder = descendants(panel).compactMap({ $0 as? MeetingMarkdownTextView }).first(where: { $0.string.trimmingCharacters(in: .whitespacesAndNewlines) == "这项前提需要核实" }),
+          reminder.bounds.height > 0, !reminder.isHiddenOrHasHiddenAncestor,
+          reminder.convert(reminder.bounds, to: panel).maxY <= panel.bounds.maxY else { throw Failure(code: "say_visible_in_panel") }
+    if let bitmap = panel.bitmapImageRepForCachingDisplay(in: panel.bounds) {
+        panel.cacheDisplay(in: panel.bounds, to: bitmap)
+        try bitmap.representation(using: .png, properties: [:])?.write(to: directory.appendingPathComponent("listener-panel.png"))
+    }
+    return ["listener_switch_label", "listening_hint", "single_conversation", "no_task_list", "overview_excludes_reminders", "say_visible_in_panel"]
+}
+
+func meetingAssistantReminderExportChecks(directory: URL) throws -> [String] {
+    let fm = FileManager.default, root = directory.appendingPathComponent("reminder-export-" + UUID().uuidString)
+    let cache = root.appendingPathComponent("SessionCache"), assistant = root.appendingPathComponent("Assistant")
+    let id = UUID().uuidString, session = UUID().uuidString, folder = cache.appendingPathComponent(id)
+    try fm.createDirectory(at: folder, withIntermediateDirectories: true)
+    try fm.createDirectory(at: assistant, withIntermediateDirectories: true)
+    try JSONSerialization.data(withJSONObject: ["schema": 1, "cache_id": id, "session": session]).write(to: folder.appendingPathComponent("meeting.json"))
+    var db: OpaquePointer?
+    guard sqlite3_open(assistant.appendingPathComponent("assistant.sqlite3").path, &db) == SQLITE_OK else { throw Failure(code: "reminder_export_fixture") }
+    defer { sqlite3_close(db) }
+    func sql(_ text: String) throws { guard sqlite3_exec(db, text, nil, nil, nil) == SQLITE_OK else { throw Failure(code: "reminder_export_fixture_sql") } }
+    try sql("CREATE TABLE workspace(id,cache_id); CREATE TABLE task(id,workspace_id,kind); CREATE TABLE message(text,task_id,role,created,id,origin);")
+    try sql("INSERT INTO workspace VALUES('w','\(id)'); INSERT INTO task VALUES('t','w','chat');")
+    for index in 0..<2 {
+        try sql("INSERT INTO message VALUES('第\(index)条助理提醒','t','assistant',\(1792700000 + index),'m\(index)','say');")
+    }
+    try sql("INSERT INTO message VALUES('用户回答不导出','t','assistant',1792700002,'answer','user');")
+    let originalDB = try Data(contentsOf: assistant.appendingPathComponent("assistant.sqlite3"))
+    let text = try meetingAssistantReminderExport(cacheID: id, assistantDirectory: assistant)
+    guard text.contains("第0条助理提醒"), text.contains("第1条助理提醒"), text.contains("2026-"), !text.contains("用户回答不导出") else { throw Failure(code: "reminder_export_all_evidence") }
+    guard try meetingAssistantReminderExport(cacheID: "other", assistantDirectory: assistant).isEmpty else { throw Failure(code: "reminder_export_cross_meeting") }
+    guard try Data(contentsOf: assistant.appendingPathComponent("assistant.sqlite3")) == originalDB else { throw Failure(code: "reminder_export_wrote_database") }
+    var item = CachedMeeting(id: id, directory: folder, date: Date(), writtenBytes: 0, pendingBytes: 0, occupiedBytes: 0, tracks: [], audioCleaned: false, warning: true, retiredBytes: 0)
+    item.customTitle = "助理导出验证"
+    let library = try MeetingLibraryFiles.read(item, root: cache)
+    let result = try MeetingFilesExportStore(cacheRoot: cache).build(item, library: library, audioStore: MeetingAudioAssetsStore(cacheRoot: cache))
+    let exported = try String(contentsOf: result.folder.appendingPathComponent("助理导出验证－转写原文.txt"), encoding: .utf8)
+    guard exported.components(separatedBy: "\n").filter({ $0 == "助理提醒" }).count == 1, exported.contains("第1条助理提醒") else { throw Failure(code: "reminder_export_actual_text_path") }
+    guard !fm.fileExists(atPath: result.folder.appendingPathComponent("助理导出验证－AI整理稿.txt").path) else { throw Failure(code: "reminder_export_no_spurious_cleanup_file") }
+    return ["reminder_export_now_later_with_evidence", "reminder_export_exact_meeting", "reminder_export_database_read_only", "reminder_export_actual_file_path", "reminder_export_no_extra_cleanup_file"]
 }

@@ -77,7 +77,7 @@ enum SavedVoiceRecognition {
                   abs(row.sample.vector.reduce(0,{$0+$1*$1})-1)<0.001 else{throw Failure(code:"saved_voice_result_invalid")}
         }
     }
-    private static func readPrefix(_ file:URL,bytes:Int)throws->Data {
+    static func readPrefix(_ file:URL,bytes:Int)throws->Data {
         let attrs=try file.resourceValues(forKeys:[.isRegularFileKey,.isSymbolicLinkKey,.fileSizeKey])
         guard attrs.isRegularFile==true,attrs.isSymbolicLink != true,(attrs.fileSize ?? 0)>=bytes else{throw Failure(code:"saved_voice_audio_missing")}
         let handle=try FileHandle(forReadingFrom:file);defer{try? handle.close()}
@@ -96,13 +96,21 @@ enum SavedVoiceRecognition {
             let file=directory.appendingPathComponent(name)
             hashes[name]=FileManager.default.fileExists(atPath:file.path) ? historicalVoiceHash(try read(file,limit:32*1024*1024)):"absent"
         }
-        let events=try meeting.events()
+        // Text cleanup may infer a different speaker, including across audio
+        // sources. Feeding those inferred groups back into voice recognition
+        // lets microphone echo contaminate a previously consistent voice.
+        // Extract from the acoustic segmentation, before text cleanup. Keep
+        // projection hashes above so an in-flight result still expires safely.
+        let events=try meeting.events(includeCoarseRefinement:false)
         var groups:[SessionSpeakerKey:[(String,[String:Any])]]=[:]
         for event in events {
             guard let parent=event["segment_id"] as? String else{continue}
             let runs=TranscriptTimeline.speakerRuns(event)
             for item in runs.isEmpty ? [event]:runs {
                 guard let key=SessionSpeakerKey.from(item),request.keys.contains(key),item["final"] as? Bool==true,item["end_time_known"] as? Bool==true,
+                      (item["speaker"] as? [String:Any])?["echo_of"] == nil,
+                      (item["speaker"] as? [String:Any])?["slot_continuity"] as? Bool != true,
+                      audioSourceCoreID(item["source_id"] as? String ?? "") != "mic" || audioSourceCoreID(key.source)=="mic",
                       (item["quality_flags"] as? [String] ?? []).isEmpty,
                       let start=item["start"] as? Double,let end=item["end"] as? Double,start.isFinite,end.isFinite,start>=0,end-start>=2,end<=86400,
                       item["coarse_refinement_approximate_window"] as? Bool != true else{continue}

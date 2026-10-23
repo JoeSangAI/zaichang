@@ -20,7 +20,7 @@ import AppKit
             view.phase=UIState();view.segments=[:];view.sequence=[];view.naming.reset();view.empty.stringValue="会议文字会出现在这里";view.renderText();view.updateUI();try save(view.window.contentView!,prefix+"-ready")
             view.receive(["type":"started","session":"review"])
             for i in 0..<18 {let mic=i%3==1;view.receive(["type":"segment","segment_id":"r-\(i)","session":"review","track":mic ? "mic":"remote","text":i%3==0 ? "这次先把品牌主张讲清楚。广告需要让观众听完一句，就知道我们解决的是什么问题。":"先保留两个创意方向，下一步比较用户反馈与预算，再确认执行方案。","final":i != 17,"revision":1,"speaker":["basis":"anonymous_cluster","cluster_id":i%2]])}
-            view.naming.set(segment:"r-0",name:"合成说话人甲 · 产品负责人");view.phase.elapsed=123;view.phase.estimated=0.12;view.renderText();view.updateUI();try save(view.window.contentView!,prefix+"-transcript")
+            view.naming.set(segment:"r-0",name:"张宇 · 品牌策略与增长运营负责人");view.phase.elapsed=123;view.phase.estimated=0.12;view.renderText();view.updateUI();try save(view.window.contentView!,prefix+"-transcript")
             view.balanceState.cash="1234567890.12";view.balanceState.currency="CNY";view.phase.estimated=99999.99;view.updateUI();view.window.contentView!.layoutSubtreeIfNeeded();precondition(view.meter.frame.maxX<=view.window.contentView!.bounds.maxX-72);checks+=1;try save(view.window.contentView!,prefix+"-long-amount")
             view.balanceState=BalanceSnapshotState();view.phase.phase = .failed;view.phase.error="连接中断，请重新开始";view.updateUI();try save(view.window.contentView!,prefix+"-error")
             view.phase.phase = .recording;view.phase.error=nil;view.segments=[:];view.sequence=[];view.output.string="";view.empty.stringValue="还没听到声音";view.empty.isHidden=false;view.updateUI();try save(view.window.contentView!,prefix+"-silence")
@@ -28,18 +28,19 @@ import AppKit
         }
         view.editing=true;view.refreshSettings();try save(view.sheet.contentView!,theme+"-settings-new")
         try view.vault.save("fake-review-key");view.editing=false;view.refreshSettings();precondition(view.key.stringValue.isEmpty && view.key.isHidden);checks+=1;try save(view.sheet.contentView!,theme+"-settings-saved")
-        view.segments["person"]=["text":"合成标注界面","final":true];view.naming.set(segment:"person",name:"合成说话人甲");view.beginInlineName("person");try save(view.inlinePopover!.contentViewController!.view,theme+"-person")
+        view.segments["person"]=["text":"合成标注界面","final":true];view.naming.set(segment:"person",name:"张宇");view.beginInlineName("person");try save(view.inlinePopover!.contentViewController!.view,theme+"-person")
     }
     return ["type":"native_view_render_review","files":files,"checks":checks,"window_opened":false,"desktop_capture":false,"actual_keyboard_mouse_QA":false,"keychain":false,"network":false,"capture":false,"render_basis":"actual_product_AppKit_views_offscreen"]
 }
 
 // Read-only evaluation of the explicitly selected saved recording. Never opens
 // recording devices or ASR, and never writes back to the session cache.
-@MainActor func renderSavedSpeakerReview(cacheID:String,directory:URL)throws->[String:Any] {
+@MainActor func renderSavedSpeakerReview(cacheID:String,directory:URL,cacheRoot:URL=meetingCacheRoot())throws->[String:Any] {
     guard Credential.offline,Bundle.main.object(forInfoDictionaryKey:"DevelopmentWorkspace") as? Bool==true,
           let root=Bundle.main.object(forInfoDictionaryKey:"AdapterRoot") as? String,
           UUID(uuidString:cacheID) != nil,directory.standardizedFileURL.path.hasPrefix(root+"/.runtime/") else{throw Failure(code:"saved_review_scope")}
-    guard let meeting=try cachedMeetings(in:meetingCacheRoot()).first(where:{$0.id==cacheID}) else{throw Failure(code:"saved_review_missing")}
+    guard cacheRoot==meetingCacheRoot() || cacheRoot.standardizedFileURL.path.hasPrefix(root+"/.runtime/") else{throw Failure(code:"saved_review_scope")}
+    guard let meeting=try cachedMeetings(in:cacheRoot,recoverInterrupted:false).first(where:{$0.id==cacheID}) else{throw Failure(code:"saved_review_missing")}
     let events=try meeting.events();let metadata=try meeting.metadata()
     guard let session=metadata["session"] as? String else{throw Failure(code:"saved_review_session")}
     try FileManager.default.createDirectory(at:directory,withIntermediateDirectories:true,attributes:[.posixPermissions:0o700])
@@ -56,7 +57,7 @@ import AppKit
     view.meetingTitle=meeting.customTitle ?? MeetingLibraryInfo.defaultTitle(meeting.date);view.phase.elapsed=meeting.durationSeconds
     view.deferPresentation=false;view.window.title="在场 · 已保存记录";view.diagnostic.stringValue="已保存";view.window.setContentSize(NSSize(width:1050,height:780));view.window.contentView!.layoutSubtreeIfNeeded();view.renderText();try view.settleTranscriptForOfflineReview();view.updateUI();view.scroll.contentView.scroll(to:.zero)
     let output=directory.appendingPathComponent("saved-speaker-turns.txt");try view.transcriptExport().write(to:output,atomically:true,encoding:.utf8)
-    if let marker=view.readingTurns().first(where:{TranscriptTimeline.start($0.item)>=37}),let range=view.textRanges[marker.id],let layout=view.output.layoutManager,let container=view.output.textContainer {
+    if let marker=view.readingTurns().first,let range=view.textRanges[marker.id],let layout=view.output.layoutManager,let container=view.output.textContainer {
         let rect=layout.boundingRect(forGlyphRange:layout.glyphRange(forCharacterRange:NSRange(location:range.location,length:1),actualCharacterRange:nil),in:container)
         view.scroll.contentView.scroll(to:NSPoint(x:0,y:rect.minY+view.output.textContainerInset.height));view.scroll.reflectScrolledClipView(view.scroll.contentView)
     }

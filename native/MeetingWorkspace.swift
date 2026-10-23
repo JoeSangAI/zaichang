@@ -92,7 +92,7 @@ extension Delegate {
     // its visible document still follows the real workspace interaction mode.
     var documentIsPreview:Bool {(workspaceOwner ?? self).previewRenderOnly}
     func buildWorkspace() {
-        window=NSWindow(contentRect:NSRect(x:0,y:0,width:1040,height:720),styleMask:[.titled,.closable,.miniaturizable,.resizable],backing:.buffered,defer:false)
+        window=NSWindow(contentRect:NSRect(x:0,y:0,width:1280,height:820),styleMask:[.titled,.closable,.miniaturizable,.resizable],backing:.buffered,defer:false)
         window.isReleasedWhenClosed=false;window.title="在场";window.minSize=NSSize(width:640,height:480);window.backgroundColor = MeetingVisualStyle.surface;window.titleVisibility = .hidden;window.titlebarAppearsTransparent=true;window.delegate=self
         let root=window.contentView!
         sidebar=NSView();sidebar.translatesAutoresizingMaskIntoConstraints=false;root.addSubview(sidebar)
@@ -127,25 +127,21 @@ extension Delegate {
         NSLayoutConstraint.activate([main.leadingAnchor.constraint(equalTo:view.leadingAnchor,constant:26),main.trailingAnchor.constraint(equalTo:view.trailingAnchor,constant:-26),main.topAnchor.constraint(equalTo:view.topAnchor,constant:22),main.bottomAnchor.constraint(equalTo:view.bottomAnchor,constant:-12)])
         let header=stack(.horizontal,spacing:16);header.alignment = .centerY;header.distribution = .fill
         let words=stack(.vertical,spacing:7);words.alignment = .leading;words.distribution = .fill;words.setContentHuggingPriority(.defaultLow,for:.horizontal)
-        meetingTitleField=NSTextField();meetingTitleField.isBordered=false;meetingTitleField.drawsBackground=false;meetingTitleField.focusRingType = .none;meetingTitleField.font = .systemFont(ofSize:22,weight:.semibold);meetingTitleField.textColor=MeetingVisualStyle.ink;meetingTitleField.stringValue=meetingTitle;meetingTitleField.placeholderString="会议名称";meetingTitleField.delegate=self;meetingTitleField.lineBreakMode = .byTruncatingTail;meetingTitleField.setAccessibilityLabel("会议名称");words.addArrangedSubview(meetingTitleField)
-        heading=label("准备就绪",size:12);heading.textColor = MeetingVisualStyle.muted;words.addArrangedSubview(heading);header.addArrangedSubview(words)
+        meetingTitleField=NSTextField();meetingTitleField.isBordered=false;meetingTitleField.drawsBackground=false;meetingTitleField.focusRingType = .none;meetingTitleField.font = .systemFont(ofSize:20,weight:.semibold);meetingTitleField.textColor=MeetingVisualStyle.ink;meetingTitleField.stringValue=meetingTitle;meetingTitleField.placeholderString="会议名称";meetingTitleField.delegate=self;meetingTitleField.lineBreakMode = .byTruncatingTail;meetingTitleField.setAccessibilityLabel("会议名称");words.addArrangedSubview(meetingTitleField)
+        heading=label("准备就绪",size:12);heading.textColor = MeetingVisualStyle.muted;heading.lineBreakMode = .byTruncatingTail;heading.setContentCompressionResistancePriority(.defaultLow,for:.horizontal);header.addArrangedSubview(words)
         action=RecordingPrimaryButton(title:"开始录音",target:self,action:#selector(primaryWorkspaceAction));action.bezelStyle = .rounded;action.controlSize = .large;action.isBordered=false;action.wantsLayer=true;action.layer?.cornerRadius=12;action.widthAnchor.constraint(equalToConstant:48).isActive=true;action.heightAnchor.constraint(equalToConstant:48).isActive=true;action.font = .systemFont(ofSize:14,weight:.semibold);action.setAccessibilityLabel("开始录音或继续录音");(action as? RecordingPrimaryButton)?.circularTransport=true
         main.addArrangedSubview(header)
-        main.addArrangedSubview(makeRecordingDashboard())
         historyLiveButton=ImmediateButton(title:"返回当前记录",target:self,action:#selector(returnFromHistory));historyLiveButton.bezelStyle = .inline;historyLiveButton.lineBreakMode = .byTruncatingTail;historyLiveButton.isHidden=true;main.addArrangedSubview(historyLiveButton)
-        let tools=stack(.horizontal,spacing:10);tools.distribution = .fill
+        let tools=stack(.horizontal,spacing:10);tools.distribution = .fill;tools.alignment = .centerY
+        tools.addArrangedSubview(heading)
+        let statusSpacer=NSView();statusSpacer.setContentHuggingPriority(.defaultLow,for:.horizontal);tools.addArrangedSubview(statusSpacer)
+        tools.addArrangedSubview(makeTranslationControl())
         timelineToggle=ImmediateButton(checkboxWithTitle:"人物时间线",target:self,action:#selector(toggleSpeakerRanges));timelineToggle.controlSize = .small;timelineToggle.isHidden=true
-        let peopleButton=ImmediateButton(title:"发言人",target:self,action:#selector(showSpeakerReview));speakerReviewButton=peopleButton;peopleButton.bezelStyle = .texturedRounded;peopleButton.controlSize = .small;peopleButton.contentTintColor=MeetingVisualStyle.ink;peopleButton.image=NSImage(systemSymbolName:"person.2",accessibilityDescription:"按发言人查看与修改");peopleButton.imagePosition = .imageLeading;peopleButton.setAccessibilityLabel("按发言人查看与修改");tools.addArrangedSubview(peopleButton)
-        if RuntimeConfiguration.standalone {
-            let translation=stack(.horizontal,spacing:5);let title=label("中文翻译",size:11);title.textColor=MeetingVisualStyle.muted
-            let toggle=NSSwitch();toggle.controlSize = .mini;toggle.target=self;toggle.action=#selector(toggleTranslation);toggle.toolTip="逐句译成中文；仅在开启后请求翻译";toggle.setAccessibilityLabel("中文翻译");translation.addArrangedSubview(title);translation.addArrangedSubview(toggle);translationSwitch=toggle
-            translationService.onChange={[weak self] in guard let self else{return};self.translationSwitch?.state=self.translationService.enabled ? .on:.off;self.renderText()}
-            translationService.onStatus={[weak self] status in self?.diagnostic?.stringValue=status};tools.addArrangedSubview(translation)
-        }
+        let peopleButton=ImmediateButton(title:"发言人",target:self,action:#selector(showSpeakerReview));speakerReviewButton=peopleButton;peopleButton.bezelStyle = .inline;peopleButton.font = .systemFont(ofSize:12);peopleButton.controlSize = .small;peopleButton.contentTintColor=MeetingVisualStyle.ink;peopleButton.image=NSImage(systemSymbolName:"person.2",accessibilityDescription:"按发言人查看与修改");peopleButton.imagePosition = .imageLeading;peopleButton.setAccessibilityLabel("按发言人查看与修改");tools.addArrangedSubview(peopleButton)
         let voice=ImmediateButton(title:"",target:self,action:#selector(showQuickVoiceConfirmation));voice.bezelStyle = .inline;voice.controlSize = .small;voice.contentTintColor=MeetingVisualStyle.muted;voice.isHidden=true;voice.lineBreakMode = .byTruncatingTail;voice.widthAnchor.constraint(lessThanOrEqualToConstant:180).isActive=true;voiceCandidateButton=voice;tools.addArrangedSubview(voice)
-        let archive=makeMeetingArchiveButton();archive.controlSize = .small;archiveButton=archive;tools.addArrangedSubview(archive)
-        let spacer=NSView();spacer.setContentHuggingPriority(.defaultLow,for:.horizontal);tools.addArrangedSubview(spacer)
+        let archive=makeMeetingArchiveButton();archive.controlSize = .small;archiveButton=archive
         latest=ImmediateButton(title:"回到最新",target:self,action:#selector(goLatest));latest.bezelStyle = .inline;latest.isHidden=true;tools.addArrangedSubview(latest);main.addArrangedSubview(tools)
+        main.addArrangedSubview(makeRecordingDashboard())
         let doc=NSView();doc.translatesAutoresizingMaskIntoConstraints=false
         let transcriptScroll=MeetingTranscriptScroll();transcriptScroll.manualScroll={ [weak self] in self?.cancelTranscriptReadingRestore() };scroll=transcriptScroll;scroll.automaticallyAdjustsContentInsets=false;scroll.hasVerticalScroller=true;scroll.autohidesScrollers=true;scroll.drawsBackground=true;scroll.backgroundColor = MeetingVisualStyle.surface;scroll.findBarPosition = .aboveContent;doc.addSubview(scroll);pin(scroll,to:doc)
         let transcriptView=MeetingTranscriptTextView(frame:NSRect(x:0,y:0,width:700,height:400));transcriptView.manualNavigation={ [weak self] in self?.cancelTranscriptReadingRestore() };output=transcriptView;output.backgroundColor=MeetingVisualStyle.surface;output.textColor=MeetingVisualStyle.ink;output.isEditable=false;output.isSelectable=true;output.isRichText=true;output.delegate=self;output.isVerticallyResizable=true;output.isHorizontallyResizable=false;output.autoresizingMask=[.width];output.textContainerInset=NSSize(width:0,height:12);output.textContainer?.widthTracksTextView=true;output.textContainer?.containerSize=NSSize(width:700,height:CGFloat.greatestFiniteMagnitude);output.maxSize=NSSize(width:CGFloat.greatestFiniteMagnitude,height:CGFloat.greatestFiniteMagnitude);output.usesFindBar=true;output.isIncrementalSearchingEnabled=true;output.linkTextAttributes=[.underlineStyle:0];output.setAccessibilityLabel("会议原文");scroll.documentView=output
@@ -164,6 +160,7 @@ extension Delegate {
         let separator=NSBox();separator.boxType = .separator;separator.isHidden=true
         let footer=stack(.horizontal,spacing:10)
         diagnostic=label("",size:11);diagnostic.textColor = .secondaryLabelColor;diagnostic.lineBreakMode = .byTruncatingTail;diagnostic.maximumNumberOfLines=1;diagnostic.setContentHuggingPriority(.defaultLow,for:.horizontal);diagnostic.setContentCompressionResistancePriority(.defaultLow,for:.horizontal);footer.addArrangedSubview(diagnostic)
+        let translationStatus=label("",size:11);translationStatus.textColor=MeetingVisualStyle.muted;translationStatus.lineBreakMode = .byTruncatingTail;translationStatus.setContentCompressionResistancePriority(.defaultLow,for:.horizontal);translationStatus.isHidden=true;translationStatusLabel=translationStatus;footer.addArrangedSubview(translationStatus)
         let undoFeedback=NSButton(title:"撤销",target:self,action:#selector(undoName));undoFeedback.bezelStyle = .inline;undoFeedback.isHidden=true;undoFeedback.setAccessibilityLabel("撤销上次发言人修改及对应声音学习");feedbackUndoButton=undoFeedback;footer.addArrangedSubview(undoFeedback)
         meter=label("",size:11);meter.textColor = .secondaryLabelColor;meter.font = .monospacedDigitSystemFont(ofSize:11,weight:.regular);meter.isHidden=true
         footerDetails=ImmediateButton(title:"会议详情",target:self,action:#selector(showDetails));footerDetails.bezelStyle = .inline;footerDetails.isHidden=true;main.addArrangedSubview(footer)
@@ -219,7 +216,7 @@ extension Delegate {
             exportButton?.isEnabled = !(displayedDocument.sequence.isEmpty && displayedDocument.recoveredArchiveText==nil && displayedDocument.currentCacheID==nil)
             exportButton?.toolTip="导出正在查看的已有文字，保持录音状态"
         }
-        heading.font = .systemFont(ofSize:12)
+        heading.font = .systemFont(ofSize:12,weight:.regular)
         if phase.error==nil {
             let stateText:[RecordingPhase:String]=[.idle:"",.recording:"录音中",.paused:"已暂停",.connecting:"正在连接",.stopping:"正在整理",.stopped:"已保存",.ended:"已保存",.failed:"已停止"]
             var status=stateText[phase.phase] ?? ""
@@ -227,10 +224,11 @@ extension Delegate {
             if phase.phase == .stopped,currentCacheID != nil,!cachedTranscriptionComplete {status="已保存 · 待转写"}
             heading.stringValue=status+(currentCacheID==nil ? "":" · "+phase.time)
         }
+        translationSwitch?.isEnabled=currentCacheID != nil && !translationCredentialJob.busy
         speakerReviewButton?.isHidden=sequence.isEmpty;meter.isHidden=true;footerDetails.isHidden=true
         refreshQuickVoiceCandidate()
         refreshMeetingArchiveButtonState()
-        diagnostic.isHidden=speakerRefinementToken==nil && Date()>=feedbackExpiresAt && phase.error==nil && !diagnostic.stringValue.contains("失败") && !diagnostic.stringValue.contains("无法") && !diagnostic.stringValue.contains("请")
+        diagnostic.isHidden = !showsMissingCredentialHint && speakerRefinementToken==nil && Date()>=feedbackExpiresAt && phase.error==nil && !diagnostic.stringValue.contains("失败") && !diagnostic.stringValue.contains("无法") && !diagnostic.stringValue.contains("请")
         feedbackUndoButton?.isHidden=Date()>=feedbackExpiresAt || !feedbackAllowsNameUndo || !naming.canUndo
         if [.stopped,.ended].contains(phase.phase),currentCacheID != nil,cachedTranscriptionComplete {heading.stringValue="已保存 · "+phase.time}
         source.toolTip=source.stringValue
@@ -327,15 +325,6 @@ extension Delegate {
     @objc func undoVisibleName(){displayedDocument.undoName()}
     @objc func exportVisibleDocument(){displayedDocument.exportTranscript()}
     @objc func toggleSpeakerRanges(){showsSpeakerRanges=timelineToggle.state == .on;renderText()}
-    @objc func toggleTranslation(){
-        let enabled=translationSwitch?.state == .on
-        guard enabled else {try? translationService.setEnabled(false,apiKey:nil);return}
-        do {
-            guard currentCacheID != nil,let key=try Credential.load(),!key.isEmpty else {throw Failure(code:"translation_credential_unavailable")}
-            try translationService.setEnabled(true,apiKey:key)
-            translationService.enqueueExisting(readingTurns())
-        } catch {translationSwitch?.state = .off;diagnostic?.stringValue="无法开启中文翻译；请先完成服务设置"}
-    }
     func handleWorkspaceTextChange(_ notification:Notification)->Bool {
         if notification.object as? NSSearchField === librarySearch {filterLibrary();return true}
         if notification.object as? NSTextField === meetingTitleField {return true}
@@ -491,12 +480,12 @@ extension Delegate {
             guard self.historyReader?.notesController?.flushForClosing() != false else { return }
             let reader=Delegate();reader.previewRenderOnly=true;reader.isHistoryReader=true;reader.workspaceOwner=self;reader.applicationDidFinishLaunching(Notification(name:NSApplication.didFinishLaunchingNotification));reader.recoveryRootOverride=self.recoveryBase();try reader.applyRecovery(item,payload:payload)
             reader.meetingTitle=item.displayTitle;reader.updateUI();let ownWindow=reader.window;reader.window=self.window
-            self.historyReader?.confirmationController?.cancelQuickInteraction();self.historyReader?.savedVoiceRecognitionJob.cancel();self.historyReader?.detachSavedCoarseRefinement();self.historyReader?.currentDocument.removeFromSuperview();self.historyReader=reader;self.historyReaderShell=ownWindow;self.currentDocument.isHidden=true
-            reader.currentDocument.removeFromSuperview();self.documentHost.addSubview(reader.currentDocument);self.pin(reader.currentDocument,to:self.documentHost);self.documentHost.layoutSubtreeIfNeeded();reader.resizeTranscript();reader.renderText();self.updateWorkspacePresentation();self.renderLibraryList();self.installMenus()
+            self.historyReader?.agentController?.suspend();self.historyReader?.confirmationController?.cancelQuickInteraction();self.historyReader?.savedVoiceRecognitionJob.cancel();self.historyReader?.detachSavedCoarseRefinement();self.historyReader?.currentDocument.removeFromSuperview();self.historyReader=reader;self.historyReaderShell=ownWindow;self.currentDocument.isHidden=true
+            reader.currentDocument.removeFromSuperview();self.documentHost.addSubview(reader.currentDocument);self.pin(reader.currentDocument,to:self.documentHost);self.documentHost.layoutSubtreeIfNeeded();reader.resizeTranscript();reader.renderText();reader.agentController?.layout();self.updateWorkspacePresentation();self.renderLibraryList();self.installMenus()
         }catch{self.libraryStatus.stringValue="无法打开会议，请重试"}}
         }
     }
-    @objc func returnToCurrent(){guard historyReader?.notesController?.flushForClosing() != false else {return};pendingLibraryOpen=nil;libraryOpenJob.cancel();historyReader?.confirmationController?.cancelQuickInteraction();historyReader?.savedVoiceRecognitionJob.cancel();historyReader?.detachSavedCoarseRefinement();historyReader?.currentDocument.removeFromSuperview();historyReader=nil;historyReaderShell=nil;currentDocument?.isHidden=false;resizeTranscript();updateWorkspacePresentation();if libraryTable != nil {renderLibraryList()}}
+    @objc func returnToCurrent(){guard historyReader?.notesController?.flushForClosing() != false else {return};pendingLibraryOpen=nil;libraryOpenJob.cancel();historyReader?.agentController?.suspend();historyReader?.confirmationController?.cancelQuickInteraction();historyReader?.savedVoiceRecognitionJob.cancel();historyReader?.detachSavedCoarseRefinement();historyReader?.currentDocument.removeFromSuperview();historyReader=nil;historyReaderShell=nil;currentDocument?.isHidden=false;resizeTranscript();updateWorkspacePresentation();if libraryTable != nil {renderLibraryList()}}
     @objc func resumeViewedMeeting(){
         guard !meetingDeletionBusy,!newMeetingRequested,let id=displayedDocument.currentCacheID else{
             NSLog("zaichang-append: click ignored deletion=%d newRequested=%d hasCache=%d",meetingDeletionBusy ? 1:0,newMeetingRequested ? 1:0,displayedDocument.currentCacheID==nil ? 0:1)

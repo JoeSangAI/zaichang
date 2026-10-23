@@ -1,4 +1,4 @@
-import AppKit
+import Foundation
 
 func sharedPersonIdentityChecks() throws->[String:Any] {
     let reference=SharedPersonReference(id:"person:0123456789abcdef0123",name:"合成人物",evidence:["/tmp/synthetic/people.md"])
@@ -30,14 +30,43 @@ func sharedPersonIdentityChecks() throws->[String:Any] {
     return ["checks":checks,"count":checks.count,"synthetic_only":true]
 }
 
-// The standalone build has no global identity adapter or query side effect.
-@MainActor func sharedPersonIdentityServiceChecks(directory:URL) throws->[String:Any] {
-    _ = NSApplication.shared; NSApp.setActivationPolicy(.prohibited)
-    let service=SharedPersonIdentityService(root:directory.path)
-    var result:Result<[SharedPersonCandidate],Error>?
-    service.search(query:"synthetic"){result=$0}
-    let deadline=Date().addingTimeInterval(2)
-    while result == nil && Date()<deadline {_ = RunLoop.current.run(mode:.default,before:Date().addingTimeInterval(0.01))}
-    guard let result,case .failure(let error)=result,case SharedPersonIdentityError.unavailable=error else {throw SharedPersonIdentityError.invalidData}
-    return ["count":1,"synthetic_only":true,"checks":["portable_edition_has_no_global_shared_person_lookup"]]
+// Caller supplies an isolated temporary directory. No real people, audio or
+// external service is used by these process/cancellation checks.
+func sharedPersonIdentityServiceChecks(directory:URL) throws->[String:Any] {
+    let target=directory.standardizedFileURL.resolvingSymlinksInPath()
+    let temporary=URL(fileURLWithPath:NSTemporaryDirectory()).resolvingSymlinksInPath().path
+    guard target.path.hasPrefix(temporary+"/") || target.path.hasPrefix("/private/tmp/") else{throw SharedPersonIdentityError.invalidData}
+    try FileManager.default.createDirectory(at:target,withIntermediateDirectories:true)
+    let script="""
+    import json,sys,time
+    query=sys.argv[-1]
+    if query=='slow': time.sleep(10)
+    if query=='delay': time.sleep(.2)
+    print(json.dumps({'schema':1,'status':'ok','requires_confirmation':True,'candidates':[{'reference':{'id':'person:0123456789abcdef0123','name':'synthetic','evidence':['/tmp/synthetic/people.md']},'organization':'fixture','role':'fixture'}]}))
+    """
+    try script.write(to:target.appendingPathComponent("shared_people.py"),atomically:true,encoding:.utf8)
+    func wait(_ predicate:()->Bool,seconds:Double=5) throws {
+        let deadline=Date().addingTimeInterval(seconds)
+        while !predicate(),Date()<deadline {_=RunLoop.current.run(mode:.default,before:Date().addingTimeInterval(0.01))}
+        guard predicate() else{throw SharedPersonIdentityError.timeout}
+    }
+    let service=SharedPersonIdentityService(root:target.path)
+    var result:Result<[SharedPersonCandidate],Error>?,callbacks=0
+    service.search(query:"delay"){_ in callbacks+=100}
+    service.search(query:"normal"){result=$0;callbacks+=1}
+    try wait{result != nil}
+    let candidates=try result!.get();precondition(callbacks==1 && candidates.first?.reference.name=="synthetic")
+    let settle=Date().addingTimeInterval(0.3)
+    while Date()<settle {_=RunLoop.current.run(mode:.default,before:Date().addingTimeInterval(0.01))}
+    precondition(callbacks==1)
+    result=nil
+    service.search(query:"slow"){result=$0}
+    try wait{result != nil}
+    guard case .failure(let error)=result!,case SharedPersonIdentityError.timeout=error else{throw SharedPersonIdentityError.invalidData}
+    result=nil
+    let missing=SharedPersonIdentityService(root:target.appendingPathComponent("missing").path)
+    missing.search(query:"normal"){result=$0}
+    try wait{result != nil}
+    guard case .failure=result! else{throw SharedPersonIdentityError.invalidData}
+    return ["count":3,"synthetic_only":true,"checks":["superseded_query_cannot_deliver_or_bind","hung_helper_has_bounded_timeout","missing_query_adapter_is_explicitly_unavailable"]]
 }

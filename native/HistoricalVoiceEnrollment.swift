@@ -52,7 +52,8 @@ func enrollSavedVoiceReferences(result:SavedVoiceRecognitionResult,folder:URL,st
         if createConfirmationIfMissing,let existing=record,
            let prior=try store.load()?.learning?.contributions.first(where:{$0.confirmationID==existing.id}),
            !prior.samples.allSatisfy({old in cohort.allSatisfy{row in zip(old.vector,row.sample.vector).reduce(0.0,{$0+$1.0*$1.1})>=0.60}}) {
-            // Preserve earlier pending evidence by keeping this cohort separate.
+            // Preserve earlier pending evidence; the standing authorization can
+            // add a separate coherent cohort, rather than corrupt its old record.
             record=nil
         }
         if record==nil {

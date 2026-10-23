@@ -103,15 +103,15 @@ func meetingCoarseRefinementChecks(directory:URL)->[String] {
     do {try FileManager.default.createDirectory(at:cache,withIntermediateDirectories:true)} catch {fail("fixture cache")}
     defer {try? FileManager.default.removeItem(at:root)}
 
-    let anchorText="顾问甲甲说明。"
-    let cleanAnchorText="顾问甲说明。"
+    let anchorText="小小章说明。"
+    let cleanAnchorText="小张说明。"
     let events:[[String:Any]]=[
         ["session":"fixture-session","segment_id":"plain","source_id":"mic","track":"mic","epoch":"epoch-1","start":100.0,"end":102.0,"end_time_known":true,"final":true,"text":"原始文字需要纠正。","speaker":["basis":"unknown"],"word_spans":[["start":100.0,"end":102.0,"text":"原始文字需要纠正。"]]],
         ["session":"fixture-session","segment_id":"runs","source_id":"mic","track":"mic","epoch":"epoch-1","start":110.0,"end":112.0,"end_time_known":true,"final":true,"text":"待改内容。\(anchorText)","speaker":["basis":"unknown"],"speaker_runs":[
             ["start":110.0,"end":111.0,"text":"待改内容。","speaker":["basis":"unknown"]],
             ["start":111.0,"end":112.0,"text":anchorText,"speaker":speaker(0)]],
           "word_spans":[["start":110.0,"end":111.0,"text":"待改内容。"],["start":111.0,"end":112.0,"text":anchorText]]],
-        ["session":"fixture-session","segment_id":"roster0","source_id":"mic","track":"mic","epoch":"epoch-1","start":120.0,"end":121.0,"end_time_known":true,"final":true,"text":"顾问甲发言。","speaker":speaker(0)],
+        ["session":"fixture-session","segment_id":"roster0","source_id":"mic","track":"mic","epoch":"epoch-1","start":120.0,"end":121.0,"end_time_known":true,"final":true,"text":"张三发言。","speaker":speaker(0)],
         ["session":"fixture-session","segment_id":"roster1","source_id":"mic","track":"mic","epoch":"epoch-1","start":121.2,"end":121.8,"end_time_known":true,"final":true,"text":"另一个人发言。","speaker":speaker(1)],
         ["session":"fixture-session","segment_id":"tail","source_id":"mic","track":"mic","epoch":"epoch-1","start":122.0,"end_time_known":false,"final":false,"text":"尾部短句需要识别。","speaker":["basis":"unknown"]],
         ["session":"fixture-session","segment_id":"missing-epoch-final","source_id":"mic","track":"mic","start":123.0,"end":124.0,"end_time_known":true,"final":true,"text":"缺少epoch的可靠终句。","speaker":["basis":"unknown"]],
@@ -129,8 +129,7 @@ func meetingCoarseRefinementChecks(directory:URL)->[String] {
     ]
 
     // Real meetings persist microphone/source diagnostics in meeting.json;
-    // the current user cache is 25 KB. Vocabulary validation must still allow
-    // coarse preparation when that optional dictionary is not enabled.
+    // the current user cache is 25 KB; coarse preparation must accept it.
     let metadata:[String:Any]=["schema":1,"session":"fixture-session","capture_origin_uptime":100.0,
                               "diagnostic_fixture_padding":String(repeating:"x",count:18_000)]
     let manifest:[String:Any]=["schema":1,"track":"mic","format":"pcm_s16le","sample_rate":16000,"channels":1,
@@ -145,7 +144,7 @@ func meetingCoarseRefinementChecks(directory:URL)->[String] {
     let keyData=try! JSONSerialization.jsonObject(with:JSONEncoder().encode(key(0)))
     let anchor:[String:Any]=["id":"runs:word:111000","parent":"runs","session":"fixture-session","source":"mic","epoch":"epoch-1","start":111.0,"end":112.0,"textSHA256":textHash(anchorText)]
     let names:[String:Any]=["schema":2,"session":"fixture-session","sentences":["whole-parent":"整句人工标注"],
-                            "speakers":[["key":keyData,"name":"顾问甲"]],"assignments":[],"runAnchors":[anchor]]
+                            "speakers":[["key":keyData,"name":"张三"]],"assignments":[],"runAnchors":[anchor]]
     do {
         try JSONSerialization.data(withJSONObject:metadata,options:[.sortedKeys]).write(to:cache.appendingPathComponent("meeting.json"),options:.atomic)
         try JSONSerialization.data(withJSONObject:manifest,options:[.sortedKeys]).write(to:cache.appendingPathComponent("mic-manifest.json"),options:.atomic)
@@ -156,7 +155,7 @@ func meetingCoarseRefinementChecks(directory:URL)->[String] {
     let hashes=["mic-transcript.jsonl":hash(transcript)]
     let metadataAttributes=try! cache.appendingPathComponent("meeting.json").resourceValues(forKeys:[.fileSizeKey])
     let metadataSize=metadataAttributes.fileSize ?? 0
-    precondition(metadataSize>16_384 && metadataSize<=ASRTermVocabulary.meetingMetadataLimit)
+    precondition(metadataSize>16_384 && metadataSize<=64*1024)
     let payload:MeetingCoarseRefinement.RequestPayload
     do {payload=try MeetingCoarseRefinement.prepareRequest(directory:cache,session:"fixture-session",cacheID:cacheID,events:events,transcriptHashes:hashes)}
     catch {fail("prepare request: \(error)")}
@@ -169,7 +168,7 @@ func meetingCoarseRefinementChecks(directory:URL)->[String] {
     catch {fail("large metadata title scope: \(error)")}
     guard let partial=payload.units.first(where:{$0.unit_id=="tail"}),partial.approximate_window,
           partial.start==122.0,partial.end==126.0,
-          let named=payload.units.first(where:{$0.unit_id=="roster0"}),named.speaker_name=="顾问甲",
+          let named=payload.units.first(where:{$0.unit_id=="roster0"}),named.speaker_name=="张三",
           !named.manual,named.speaker_locked,
           let missingEpochFinal=payload.units.first(where:{$0.unit_id=="missing-epoch-final"}),!missingEpochFinal.approximate_window,
           missingEpochFinal.start==123.0,missingEpochFinal.end==124.0,missingEpochFinal.speaker_key==nil,
@@ -215,6 +214,8 @@ func meetingCoarseRefinementChecks(directory:URL)->[String] {
         partialVariants.append(("ended_clean_asr_lag",cleanTruncated))
         var checkpointFault=cleanTruncated;checkpointFault["processing_error"]="cache_checkpoint_write_failed"
         partialVariants.append(("processing_checkpoint_fault",checkpointFault))
+        var pausedFault=checkpointFault;pausedFault["ended"]=false
+        partialVariants.append(("paused_unsealed_processing_fault",pausedFault))
         var writerBackpressure=cleanTruncated;writerBackpressure["error"]="cache_writer_backpressure"
         partialVariants.append(("capture_writer_backpressure",writerBackpressure))
         for (label,candidate) in partialVariants {
@@ -267,7 +268,7 @@ func meetingCoarseRefinementChecks(directory:URL)->[String] {
         case "plain":text="修正后的完整内容。";speaker=key1
         case "runs:word:110000":text="已经修改内容。";speaker=key1
         case "runs:word:111000":text=cleanAnchorText;speaker=key1
-        case "roster0":text="顾问甲的内容已纠字。";speaker=key1
+        case "roster0":text="张三的内容已纠字。";speaker=key1
         case "tail":text="尾部内容已补齐。";speaker=key0
         case "missing-epoch-final":text="缺少epoch的可靠终句已校正。";speaker=key0
         case "missing-epoch-tail":text="缺少epoch的尾句已校正。";speaker=key1
@@ -277,6 +278,9 @@ func meetingCoarseRefinementChecks(directory:URL)->[String] {
         }
         var row:[String:Any]=["unit_id":unit.unit_id,"original_text_sha256":unit.original_text_sha256,"text":text]
         if let speaker {row["speaker_key"]=speaker}
+        if unit.unit_id=="runs:word:111000" {
+            row["name_changes"]=[["unit_id":unit.unit_id,"old":"小小章","new":"小张"]]
+        }
         records.append(row)
     }
     let projection:MeetingCoarseRefinement.Projection
@@ -301,8 +305,20 @@ func meetingCoarseRefinementChecks(directory:URL)->[String] {
           (try? SpeakerRefinementArtifact.protectedIDs(directory:cache,session:"fixture-session",events:projection.events))?.contains("runs:word:111000")==true else {
         fail("manual run anchor survives nearby edit")
     }
+    guard (runEvent["coarse_name_changes"] as? [[String:String]]) ==
+        [["unit_id":"runs:word:111000","old":"小小章","new":"小张"]] else{fail("name changes survive projection")}
+    let exportRows=projection.events.compactMap { event -> (id:String,parent:String,item:[String:Any])? in
+        guard let id=event["segment_id"] as? String else{return nil}
+        return (id:id,parent:id,item:event)
+    }
+    let exportTurns=TranscriptTimeline.readingTurns(exportRows){_,_ in nil}
+    let exported=TranscriptExportSnapshot(turns:exportTurns,names:SessionNames(),meetingTitle:"术语回归",
+        sessionSource:"麦克风",phase:.stopped,incomplete:false,observedTracks:["mic"],applicationNames:[],
+        recoveredArchiveText:nil,absoluteTime:nil).text()
+    guard exported.components(separatedBy:"· 小小章 → 小张").count==2,
+          exported.contains("专名改动：") else{fail("export lists complete name change once")}
     guard let named=projection.events.first(where:{$0["segment_id"] as? String=="roster0"}),
-          named["text"] as? String=="顾问甲的内容已纠字。",SessionSpeakerKey.from(named)==key(0) else{fail("speaker name locks identity only")}
+          named["text"] as? String=="张三的内容已纠字。",SessionSpeakerKey.from(named)==key(0) else{fail("speaker name locks identity only")}
     guard let wholeParent=projection.events.first(where:{$0["segment_id"] as? String=="whole-parent"}),
           wholeParent["text"] as? String=="整句已确认姓名。仍然保留两段。",
           let wholeRuns=wholeParent["speaker_runs"] as? [[String:Any]],wholeRuns.count==2,
@@ -338,6 +354,21 @@ func meetingCoarseRefinementChecks(directory:URL)->[String] {
         }
     }
     precondition(try! Data(contentsOf:transcriptFile)==transcript)
+
+    var uncertainRecords=records
+    for i in uncertainRecords.indices where ["roster0","roster1"].contains(uncertainRecords[i]["unit_id"] as? String ?? "") {
+        uncertainRecords[i]["speaker_key"]=NSNull()
+    }
+    let uncertain=try! MeetingCoarseRefinement.project(events:events,session:"fixture-session",cacheID:cacheID,
+        sourceSHA256:payload.source_sha256,snapshotSHA256:payload.snapshot_sha256,records:uncertainRecords,
+        directory:cache,transcriptHashes:hashes)
+    guard let unresolved=uncertain.events.first(where:{$0["segment_id"] as? String=="roster1"}),
+          SessionSpeakerKey.from(unresolved)==nil,
+          (unresolved["speaker"] as? [String:Any])?["reason"] as? String=="refinement_unassigned",
+          uncertain.artifact["records"] is [[String:Any]],
+          uncertain.events.first(where:{$0["segment_id"] as? String=="roster0"}).flatMap(SessionSpeakerKey.from)==key(0) else {
+        fail("explicit uncertainty clears unconfirmed slot without erasing manual identity")
+    }
 
     func rejected(_ candidate:[[String:Any]],_ candidateEvents:[[String:Any]]=events)->Bool {
         (try? MeetingCoarseRefinement.project(events:candidateEvents,session:"fixture-session",cacheID:cacheID,
@@ -416,7 +447,7 @@ func meetingCoarseRefinementChecks(directory:URL)->[String] {
     try! MeetingCoarseRefinement.save(completedBatch,directory:cache,cacheID:cacheID)
     let appendedReload=MeetingCoarseRefinement.loadApply(events:currentEvents,directory:cache,session:"fixture-session",
         cacheID:cacheID,transcriptHashes:currentHashes)
-    guard appendedReload.first(where:{$0["segment_id"] as? String=="roster0"})?["text"] as? String=="顾问甲的内容已纠字。",
+    guard appendedReload.first(where:{$0["segment_id"] as? String=="roster0"})?["text"] as? String=="张三的内容已纠字。",
           appendedReload.first(where:{$0["segment_id"] as? String=="runs"})?["text"] as? String=="已经修改内容。\(cleanAnchorText)",
           appendedReload.first(where:{$0["segment_id"] as? String=="appended-during-refinement"})?["text"] as? String=="恢复录音后的新内容。" else {
         fail("load after append must retain matching old records and leave the new unit raw")
@@ -484,5 +515,6 @@ func meetingCoarseRefinementChecks(directory:URL)->[String] {
           original.first(where:{$0["segment_id"] as? String=="plain"})?["coarse_refinement_applied"] == nil else{fail("original transcript preference")}
     checks.append("preference restores the unprojected transcript")
     checks.append("archive-only text stays outside acoustic refinement while new speech remains eligible")
+    checks.append("name changes survive projection and text export")
     return checks
 }

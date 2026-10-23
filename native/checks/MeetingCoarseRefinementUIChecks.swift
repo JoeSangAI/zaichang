@@ -24,7 +24,7 @@ func meetingCoarseRefinementUIChecks(directory:URL)throws->[String] {
     // toggles, including anchors created by the previous clean-text-only build.
     let anchorFolder=root.appendingPathComponent(UUID().uuidString,isDirectory:true)
     try FileManager.default.createDirectory(at:anchorFolder,withIntermediateDirectories:true)
-    let rawText="顾问甲甲说明会议安排。",cleanText="顾问甲说明会议安排。",anchorID="named:word:10000"
+    let rawText="小小章说明会议安排。",cleanText="小张说明会议安排。",anchorID="named:word:10000"
     let sourceWords:[[String:Any]]=[["start":10.0,"end":11.0,"text":rawText],["start":11.0,"end":12.0,"text":"好的。"]]
     let nextRun:[String:Any]=["start":11.0,"end":12.0,"text":"好的。","speaker":["basis":"anonymous_cluster","cluster_id":1,"source_id":"mic","epoch":"anchor-epoch"]]
     let rawAnchorEvent:[String:Any]=["type":"segment","segment_id":"named","session":"anchor-session","source_id":"mic","epoch":"anchor-epoch","start":10.0,"end":12.0,"end_time_known":true,"text":rawText+"好的。","word_spans":sourceWords,"speaker_runs":[["start":10.0,"end":11.0,"text":rawText,"speaker":["basis":"unknown"]],nextRun]]
@@ -34,10 +34,10 @@ func meetingCoarseRefinementUIChecks(directory:URL)throws->[String] {
     cleanAnchorEvent["speaker_runs"]=[["start":10.0,"end":11.0,"text":cleanText,"speaker":["basis":"unknown"]],nextRun]
     var named=SessionNames()
     for run in TranscriptTimeline.speakerRuns(cleanAnchorEvent) where run["start"] as? Double==10 {named.register(segment:anchorID,item:run)}
-    named.set(segment:anchorID,name:"顾问甲")
+    named.set(segment:anchorID,name:"小张")
     let anchored=try named.snapshot(session:"anchor-session")
     var reopened=SessionNames();try reopened.restore(anchored,session:"anchor-session")
-    try check(reopened.manualRunOverrides(parent:"named",item:rawAnchorEvent).first?.text==rawText && reopened.manualRunOverrides(parent:"named",item:cleanAnchorEvent).first?.text==cleanText && reopened.name(segment:anchorID)=="顾问甲","cleaned_name_anchor_survives_reload_and_raw_clean_toggle")
+    try check(reopened.manualRunOverrides(parent:"named",item:rawAnchorEvent).first?.text==rawText && reopened.manualRunOverrides(parent:"named",item:cleanAnchorEvent).first?.text==cleanText && reopened.name(segment:anchorID)=="小张","cleaned_name_anchor_survives_reload_and_raw_clean_toggle")
     var legacy=try JSONSerialization.jsonObject(with:anchored) as! [String:Any]
     var legacyAnchors=legacy["runAnchors"] as! [[String:Any]]
     legacyAnchors[0]["textSHA256"]=MeetingSpeakerReconciliation.hash(Data(cleanText.utf8));legacy["runAnchors"]=legacyAnchors
@@ -79,7 +79,7 @@ func meetingCoarseRefinementUIChecks(directory:URL)throws->[String] {
     view.segments=Dictionary(uniqueKeysWithValues:originalEvents.compactMap{event in (event["segment_id"] as? String).map{($0,event)}})
     view.sequence=originalEvents.compactMap{$0["segment_id"] as? String}
     for event in originalEvents {view.naming.register(segment:event["segment_id"] as! String,item:event)}
-    view.naming.set(segment:"known",name:"人工确认的顾问甲")
+    view.naming.set(segment:"known",name:"人工确认的张三")
     let fixtureItem=CachedMeeting(id:cacheID,directory:folder,date:Date(),writtenBytes:98304,pendingBytes:0,occupiedBytes:0,tracks:["mic"],audioCleaned:false,warning:false,retiredBytes:0)
     _=try MeetingCoarseRefinement.prepareRequest(directory:folder,session:session,cacheID:cacheID,events:originalEvents,transcriptHashes:fixtureItem.transcriptHashes())
     _=try MeetingCoarseAudioInput.tracks(meeting:fixtureItem,events:originalEvents,allowUnsealed:false)
@@ -151,7 +151,7 @@ func meetingCoarseRefinementUIChecks(directory:URL)throws->[String] {
     var contextReaderFailures:[String]=[]
     func readPublished(_ publisher:MeetingContextPublisher,directory:URL,_ arguments:[String])throws->[String:Any] {
         publisher.flushForChecks()
-        let task=Process(),pipe=Pipe(),errorPipe=Pipe();task.executableURL=PythonRuntime.executable()!
+        let task=Process(),pipe=Pipe(),errorPipe=Pipe();task.executableURL=URL(fileURLWithPath:"/usr/local/bin/python3")
         task.arguments=[view.root+"/meeting_context.py","--database",directory.appendingPathComponent("context.sqlite").path]+arguments
         task.standardOutput=pipe;task.standardError=errorPipe
         do {try task.run()} catch {contextReaderFailures.append(String(describing:error));throw error}
@@ -164,17 +164,22 @@ func meetingCoarseRefinementUIChecks(directory:URL)throws->[String] {
         return value
     }
 
-    // The first pause owns an explicit monotonic cutoff. A draining ASR tail
-    // must not delay dispatch of work over the transcript already on disk.
+    // The first pause owns an explicit monotonic cutoff. The gate ACK precedes
+    // hardware/journal teardown, so wait for its tail inventory before taking
+    // the immutable acoustic snapshot (including raw/reference manifests).
     view.phase.elapsed=1.72
-    view.receive(["type":"recording_paused","session":session,"control_revision":4,"draining_tracks":["mic"]])
+    view.recordingControlInFlight="pause"
+    view.receive(["type":"recording_paused","session":session,"control_revision":4,"reason":"input_device_changed","draining_tracks":["mic"]])
+    guard view.deviceAutoResumeTimes.isEmpty else{throw Failure(code:"coarse_ui_user_pause_auto_resumed")}
+    guard takeRequest(until:Date().addingTimeInterval(0.1))==nil else{throw Failure(code:"coarse_ui_started_before_pause_boundary")}
+    view.receive(["type":"recording_pause_tail","session":session,"pause_revision":4,"track":"mic","state":"complete"])
     guard let first=takeRequest(until:Date().addingTimeInterval(5)) else{throw Failure(code:"coarse_ui_pause_trigger_missing:"+(view.speakerRefinementFailureCode ?? String(describing:view.phase.phase)))}
     guard let inputUnits=first.request["units"] as? [[String:Any]],
           (inputUnits.first{$0["unit_id"] as? String=="known"}?["manual"] as? Bool)==false,
           (inputUnits.first{$0["unit_id"] as? String=="known"}?["speaker_locked"] as? Bool)==true,
           (inputUnits.first{$0["unit_id"] as? String=="target"}? ["manual"] as? Bool)==false,
           let audio=first.request["audio_tracks"] as? [[String:Any]],audio.count==1,
-          first.request["term_hints"] as? [String]==["简知"],
+          first.request["term_hints"] == nil,
           let offset=audio.first?["origin_seconds"] as? Double,abs(offset + 0.05)<0.000001,
           let firstAudioBytes=audio.first?["written_bytes"] as? Int,firstAudioBytes==56640,
           inputUnits.allSatisfy({($0["end"] as? Double ?? .infinity)<=1.72}) else{
@@ -208,7 +213,7 @@ func meetingCoarseRefinementUIChecks(directory:URL)throws->[String] {
     let projected=try CachedMeeting(id:cacheID,directory:folder,date:Date(),writtenBytes:98304,pendingBytes:0,occupiedBytes:0,tracks:["mic"],audioCleaned:false,warning:false,retiredBytes:0).events()
     guard let projectedTarget=projected.first(where:{$0["segment_id"] as? String=="target"}) else{throw Failure(code:"coarse_ui_projected_target_missing")}
     try check(projectedTarget["text"] as? String=="这是已经校正的转写。" && projectedTarget["coarse_refinement_applied"] as? Bool==true,"saved_projection_reloads_corrected_text")
-    try check(view.naming.name(segment:"known")=="人工确认的顾问甲" && view.naming.sentenceName(segment:"known")=="人工确认的顾问甲","manual_sentence_label_survives_ai_projection")
+    try check(view.naming.name(segment:"known")=="人工确认的张三" && view.naming.sentenceName(segment:"known")=="人工确认的张三","manual_sentence_label_survives_ai_projection")
     try check(try Data(contentsOf:transcript)==originalTranscript,"provider_transcript_remains_byte_identical")
 
     view.toggleCoarseProjection()
@@ -311,7 +316,7 @@ func meetingCoarseRefinementUIChecks(directory:URL)throws->[String] {
     resumedContext.flushForChecks()
     resumedPublished=try readPublished(resumedContext,directory:root.appendingPathComponent("resumed-agent-context"),["read","--session",session])
     resumedJSON=String(data:try JSONSerialization.data(withJSONObject:resumedPublished,options:[.sortedKeys]),encoding:.utf8) ?? ""
-    try check(resumedJSON.contains("恢复后人工姓名") && !resumedJSON.contains("人工确认的顾问甲"),
+    try check(resumedJSON.contains("恢复后人工姓名") && !resumedJSON.contains("人工确认的张三"),
               "late_resumed_result_does_not_revert_published_manual_name")
     guard let followup=takeRequest(until:Date().addingTimeInterval(5)) else{throw Failure(code:"coarse_ui_append_followup_missing")}
     let followupUnits=followup.request["units"] as? [[String:Any]] ?? []
@@ -376,7 +381,7 @@ func meetingCoarseRefinementUIChecks(directory:URL)throws->[String] {
         view.sequence=originalEvents.compactMap{$0["segment_id"] as? String}
         view.naming.reset()
         for event in originalEvents {view.naming.register(segment:event["segment_id"] as! String,item:event)}
-        view.naming.set(segment:"known",name:"人工确认的顾问甲")
+        view.naming.set(segment:"known",name:"人工确认的张三")
     }
     restoreOldMeetingInPrimaryView()
     let contextPublisher=MeetingContextPublisher(directory:root.appendingPathComponent("agent-context",isDirectory:true))

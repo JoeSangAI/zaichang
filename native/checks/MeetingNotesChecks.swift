@@ -255,7 +255,7 @@ private final class NotesDragFixture: NSObject, NSDraggingInfo {
     let folder = try cache(), view = makeView(folder), controller = view.notesController!, uiStore = controller.store!
     try check(controller.store?.directory.standardizedFileURL.path == folder.standardizedFileURL.path, "UI_fixture_bound_to_synthetic_cache")
     try check(!controller.expanded && controller.panel.isHidden && controller.toggle.title == "笔记", "notebook_default_collapsed_single_plain_toggle")
-    try check(controller.transportRow?.arrangedSubviews.compactMap { $0 as? NSButton }.count == 1 && !descendants(controller.panel).contains { $0 is NSButton }, "notebook_has_one_transport_switch_and_no_panel_buttons")
+    try check(controller.transportRow?.arrangedSubviews.compactMap { $0 as? NSButton }.count == 1 && !descendants(controller.panel).contains { $0 is NSButton && !$0.isHidden }, "notebook_has_one_transport_switch_and_no_visible_panel_buttons")
     try check(descendants(controller.panel).compactMap { $0 as? NSTextView }.count == 1 && controller.status.isHidden && controller.editor.isPlaceholderVisible && controller.editor.placeholder == "记点什么…可直接粘贴截图", "notebook_single_text_view_empty_placeholder_no_status")
     try check(try fm.contentsOfDirectory(atPath: folder.path).isEmpty, "opening_empty_notebook_creates_no_files")
     controller.toggle.performClick(nil)
@@ -380,6 +380,40 @@ private final class NotesDragFixture: NSObject, NSDraggingInfo {
     try malformedStore.saveDraft("旧草稿"); try Data("{broken".utf8).write(to: malformedStore.notes.appendingPathComponent("draft.json"))
     let malformedView = makeView(malformed)
     try check(malformedView.notesController!.lastError == nil && malformedView.notesController!.editor.isEditable, "malformed_legacy_draft_does_not_block_notebook")
+    // A damaged attachment must not make otherwise durable text disappear.
+    // The degraded view stays read-only; its placeholder never becomes a note.
+    for damage in ["missing", "corrupt"] {
+        let damagedFolder = try cache(), damagedStore = MeetingNotesStore(directory: damagedFolder)
+        damagedStore.recognize = { _ in throw Failure(code: "synthetic_ocr_failure") }
+        let savedNote = try MeetingNotesStore.queue.sync { () throws -> MeetingNote in
+            let note = try damagedStore.create(text: "图片前的有效文字", images: [png], anchor: nil)
+            _ = try damagedStore.create(text: "图片后的有效文字", anchor: nil)
+            return note
+        }
+        let asset = damagedStore.notes.appendingPathComponent(savedNote.images[0].file)
+        let original = try Data(contentsOf: asset)
+        let journal = damagedStore.notes.appendingPathComponent("notes.jsonl")
+        let durableBefore = try Data(contentsOf: journal)
+        if damage == "missing" { try fm.removeItem(at: asset) }
+        else { try Data("invalid image bytes".utf8).write(to: asset, options: .atomic) }
+        let damagedView = makeView(damagedFolder), damaged = damagedView.notesController!
+        try check(damaged.editor.string.contains("图片前的有效文字") && damaged.editor.string.contains("图片后的有效文字") && damaged.editor.string.contains("[图片无法读取]"), "\(damage)_image_keeps_all_note_text_visible")
+        try check(!damaged.editor.isEditable && !damaged.retryLoadButton.isHidden && damaged.status.stringValue.contains("只读"), "\(damage)_image_has_readonly_state_and_retry")
+        try check(damaged.flushPendingChanges() && damaged.flushForClosing() && (try Data(contentsOf: journal)) == durableBefore, "\(damage)_image_placeholder_never_overwrites_durable_notes")
+        try check(!damaged.status.isHidden, "\(damage)_image_close_flush_preserves_load_warning")
+        let export = run.appendingPathComponent("damaged-image-export-" + UUID().uuidString)
+        try fm.createDirectory(at: export, withIntermediateDirectories: false)
+        var exportRejected = false
+        do { try damagedStore.export(to: export, absolute: absolute) } catch { exportRejected = true }
+        try check(exportRejected && (try Data(contentsOf: journal)) == durableBefore, "\(damage)_image_export_fails_without_dropping_original_reference")
+        try original.write(to: asset, options: .atomic)
+        damaged.retryLoadButton.performClick(nil)
+        try check(damaged.editor.isEditable && damaged.retryLoadButton.isHidden && damaged.status.isHidden && !damaged.editor.string.contains("[图片无法读取]"), "\(damage)_image_retry_recovers_editable_notebook")
+        try check((try Data(contentsOf: journal)) == durableBefore && damaged.snapshot.visible.first?.images == savedNote.images, "\(damage)_image_retry_preserves_revisions_and_original_image_reference")
+        edit(damaged, "\n恢复后的新输入"); try flush(damaged)
+        try check((try damagedStore.snapshot()).visible.contains { $0.text == "恢复后的新输入" }, "\(damage)_image_recovery_can_save_again")
+        damagedView.window.orderOut(nil)
+    }
     let failedFolder = try cache(), failureView = makeView(failedFolder), failedController = failureView.notesController!
     try Data("blocking file".utf8).write(to: failedFolder.appendingPathComponent("notes"))
     edit(failedController, "失败时保留我的文字")
@@ -422,6 +456,15 @@ private final class NotesDragFixture: NSObject, NSDraggingInfo {
         management.audioStoreOverride = MeetingAudioAssetsStore(cacheRoot:run,exportsRoot:directory.appendingPathComponent("UI-exports-" + run.lastPathComponent))
         var opened: URL?
         management.revealOverride = { opened = $0; return true }
+        if withNotes {
+            // No flush or run-loop tick: export must include an unexpired edit
+            // and pasted image through the real editor/handler boundary.
+            edit(exportView.notesController!, "导出前最后输入")
+            let exportBoard = NSPasteboard.withUniqueName()
+            exportBoard.declareTypes([.png], owner: nil); exportBoard.setData(png, forType: .png)
+            exportView.notesController!.editor.pasteboardOverride = exportBoard
+            exportView.notesController!.editor.paste(nil)
+        }
         management.openMeetingFiles(target)
         exportView.cacheWriteQueue.sync {}
         let deadline = Date().addingTimeInterval(5)
@@ -429,6 +472,29 @@ private final class NotesDragFixture: NSObject, NSDraggingInfo {
         guard let opened else { throw Failure(code:"UI_meeting_files_export_failed: " + management.status.stringValue) }
         let contents = try fm.contentsOfDirectory(atPath:opened.path)
         try check(contents.contains("会中笔记.md") == withNotes && contents.contains("会中笔记.assets") == withNotes && contents.contains(".meeting-notes-export.json") == withNotes, withNotes ? "UI_meeting_files_action_exports_notes_and_images" : "UI_meeting_files_action_without_notes_creates_no_note_files")
+        if withNotes {
+            let exported = try String(contentsOf: opened.appendingPathComponent("会中笔记.md"), encoding: .utf8)
+            try check(exported.contains("导出前最后输入") && exportView.notesController!.snapshot.visible.contains { $0.text == "导出前最后输入" && !$0.images.isEmpty }, "export_flushes_pending_editor_text_and_image_before_reading_store")
+            let source = exportView.notesController!.store!.notes
+            let held = folder.appendingPathComponent("notes-held-for-failure-check")
+            try fm.moveItem(at: source, to: held)
+            try Data("blocked notes directory".utf8).write(to: source)
+            edit(exportView.notesController!, "保存失败不导出旧稿")
+            var failedExportOpened = false
+            management.revealOverride = { _ in failedExportOpened = true; return true }
+            management.openMeetingFiles(target)
+            exportView.cacheWriteQueue.sync {}
+            let failureDeadline = Date().addingTimeInterval(5)
+            while management.busy && Date() < failureDeadline { RunLoop.current.run(until:Date().addingTimeInterval(0.01)) }
+            try check(!failedExportOpened && !management.busy && exportView.notesController!.lastError != nil, "export_stops_if_current_note_revision_cannot_be_saved")
+            try fm.removeItem(at: source); try fm.moveItem(at: held, to: source)
+            management.openMeetingFiles(target)
+            exportView.cacheWriteQueue.sync {}
+            let retryDeadline = Date().addingTimeInterval(5)
+            while management.busy && Date() < retryDeadline { RunLoop.current.run(until:Date().addingTimeInterval(0.01)) }
+            let retried = try String(contentsOf: opened.appendingPathComponent("会中笔记.md"), encoding: .utf8)
+            try check(failedExportOpened && retried.contains("保存失败不导出旧稿"), "export_retries_saved_editor_after_storage_recovers")
+        }
         management.readJob.cancel()
     }
     // Actual AppKit views rendered offscreen; no desktop screenshot or capture.
@@ -448,7 +514,10 @@ private final class NotesDragFixture: NSObject, NSDraggingInfo {
             try check(name.hasPrefix("05") ? notes.panel.bounds.width >= MeetingNotesController.minimumWidth && visual.scroll.bounds.width >= MeetingNotesController.minimumTranscriptWidth - 1 : notes.panel.bounds.width >= 280 && notes.panel.bounds.width <= 360 && visual.scroll.bounds.width > 200, "panel_transcript_fit_\(name)")
             let panelRect = notes.panel.convert(notes.panel.bounds, to: target), transcriptRect = visual.scroll.convert(visual.scroll.bounds, to: target)
             try check(abs(panelRect.maxY - transcriptRect.maxY) <= 1, "notebook_top_aligns_with_transcript_\(name)")
-            try check(!descendants(notes.panel).contains { $0 is NSButton } && notes.status.isHidden, "notebook_clean_panel_\(name)")
+            // Recovery is available only for a failed load. A hidden retry button
+            // must not invalidate the normal notebook's clean visual contract.
+            let panelButtons = descendants(notes.panel).compactMap { $0 as? NSButton }
+            try check(panelButtons.allSatisfy { $0 === notes.retryLoadButton && $0.isHidden } && notes.retryLoadButton.isHidden && notes.status.isHidden, "notebook_clean_panel_\(name)")
             var fits = true
             notes.editor.textStorage!.enumerateAttribute(.attachment, in: NSRange(location: 0, length: notes.editor.textStorage!.length)) { value, _, _ in
                 if let image = value as? NSTextAttachment { fits = fits && image.bounds.width > 0 && image.bounds.width <= notes.editor.bounds.width - 12 }

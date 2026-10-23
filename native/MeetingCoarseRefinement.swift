@@ -52,7 +52,6 @@ enum MeetingCoarseRefinement {
         let source_sha256:String
         let snapshot_sha256:String
         let roster:[RosterEntry]
-        let term_hints:[String]
         let units:[RequestUnit]
         /// True when the journal contains saved audio beyond the last durable
         /// ASR cursor. The model may process only the committed prefix; the UI
@@ -406,7 +405,6 @@ enum MeetingCoarseRefinement {
                                transcriptHashes:[String:String])throws->RequestPayload {
         let source=try sourceSHA256(transcriptHashes:transcriptHashes)
         let snapshot=try snapshotSHA256(directory:directory,cacheID:cacheID,session:session,events:events,transcriptHashes:transcriptHashes)
-        let termHints=try ASRTermVocabulary.confirmedVocabulary(in:directory,session:session)
         let coverage=try verifiedAudioEnds(directory:directory,session:session,events:events)
         let (available,roster)=try units(events:events,session:session,sourceAudioEnds:coverage.ends,strictAudioTracks:coverage.incompleteTracks)
         let labels=try manualSpeakerLabels(directory:directory,session:session)
@@ -426,7 +424,7 @@ enum MeetingCoarseRefinement {
                                speaker_name:labels.segments[unit.id] ?? key.flatMap{labels.speakers[$0]})
         }
         return RequestPayload(schema:1,method:method,cache_id:cacheID,session:session,source_sha256:source,
-                              snapshot_sha256:snapshot,roster:roster.sorted{($0.source+$0.epoch+$0.identity)<($1.source+$1.epoch+$1.identity)}.map{RosterEntry(key:$0,name:labels.speakers[$0])},term_hints:termHints,units:rows,
+                              snapshot_sha256:snapshot,roster:roster.sorted{($0.source+$0.epoch+$0.identity)<($1.source+$1.epoch+$1.identity)}.map{RosterEntry(key:$0,name:labels.speakers[$0])},units:rows,
                               incomplete_audio:!coverage.incompleteTracks.isEmpty)
     }
     static func inputUnits(directory:URL,session:String,cacheID:String,events:[[String:Any]],
@@ -468,9 +466,15 @@ enum MeetingCoarseRefinement {
             return unit.id
         })
         var seen=Set<String>(),accepted:[[String:Any]]=[],textChanges:[String:String]=[:],speakerChanges:[String:SessionSpeakerKey]=[:]
+        var unassignedSpeakers=Set<String>()
+        // A meeting-level acoustic pass owns identity for the whole snapshot.
+        // Old text artifacts can reference slots retired by that pass, including
+        // in uncertain/unmodified parents. Keep their text without reviving the
+        // retired identity or rejecting the entire clean transcript.
+        let acousticIdentity=events.contains{$0["acoustic_refinement_applied"] as? Bool==true}
         var skippedStaleSourceUnits=false
         for record in records {
-            let allowed=Set(["unit_id","original_text_sha256","text","speaker_key","notes"])
+            let allowed=Set(["unit_id","original_text_sha256","text","speaker_key","notes","name_changes"])
             guard Set(record.keys).isSubset(of:allowed),
                   let id=record["unit_id"] as? String,!id.isEmpty,id.count<=256,seen.insert(id).inserted,
                   let originalHash=record["original_text_sha256"] as? String,validDigest(originalHash),
@@ -503,10 +507,24 @@ enum MeetingCoarseRefinement {
             try validateNewText(normalized,original:unit.text)
             var row:[String:Any]=["unit_id":id,"original_text_sha256":originalHash,"text":normalized]
             if let notesValue {row["notes"]=notesValue}
-            if let key=proposedKey {
+            if let key=proposedKey,!acousticIdentity {
                 guard knownKeys.contains(key) else{throw MeetingCoarseRefinementError.unknownSpeaker}
                 row["speaker_key"]=try JSONSerialization.jsonObject(with:JSONEncoder().encode(key))
                 speakerChanges[id]=key
+            } else if record["speaker_key"] is NSNull,!acousticIdentity {
+                // Explicit uncertainty must clear an unreliable model slot.
+                // An omitted field still means "keep the original attribution".
+                row["speaker_key"]=NSNull()
+                unassignedSpeakers.insert(id)
+            }
+            if !textProtected.contains(id),normalized != unit.text,
+               let changes=record["name_changes"] as? [[String:String]] {
+                let valid=changes.filter {
+                    Set($0.keys)==Set(["unit_id","old","new"]) && $0["unit_id"]==id &&
+                    $0["old"] != $0["new"] && !($0["old"] ?? "").isEmpty &&
+                    unit.text.contains($0["old"]!) && normalized.contains($0["new"] ?? "")
+                }
+                if !valid.isEmpty {row["name_changes"]=valid}
             }
             accepted.append(row)
             if !textProtected.contains(id) {
@@ -540,11 +558,23 @@ enum MeetingCoarseRefinement {
         }
         for (id,key) in speakerChanges where !protected.contains(id) && !speakerLocked.contains(id) {
             guard let unit=available[id],let index=indexByParent[unit.parent] else{throw MeetingCoarseRefinementError.eventChanged}
+            guard events[index]["acoustic_refinement_applied"] as? Bool != true else{continue}
             var event=projected[index]
             if let runIndex=unit.runIndex {
                 guard var runs=event["speaker_runs"] as? [[String:Any]],runs.indices.contains(runIndex) else{throw MeetingCoarseRefinementError.eventChanged}
                 runs[runIndex]["speaker"]=targetSpeaker(key,event:event);event["speaker_runs"]=runs
             } else {event["speaker"]=targetSpeaker(key,event:event)}
+            changedByParent.insert(unit.parent);projected[index]=event
+        }
+        for id in unassignedSpeakers where !protected.contains(id) && !speakerLocked.contains(id) {
+            guard let unit=available[id],let index=indexByParent[unit.parent] else{throw MeetingCoarseRefinementError.eventChanged}
+            guard events[index]["acoustic_refinement_applied"] as? Bool != true else{continue}
+            var event=projected[index]
+            let unknown:[String:Any]=["basis":"unknown","reason":"refinement_unassigned"]
+            if let runIndex=unit.runIndex {
+                guard var runs=event["speaker_runs"] as? [[String:Any]],runs.indices.contains(runIndex) else{throw MeetingCoarseRefinementError.eventChanged}
+                runs[runIndex]["speaker"]=unknown;event["speaker_runs"]=runs
+            } else {event["speaker"]=unknown}
             changedByParent.insert(unit.parent);projected[index]=event
         }
         for parent in changedByParent {
@@ -554,6 +584,13 @@ enum MeetingCoarseRefinement {
             projected[index]["text"]=joined
             if projected[index]["word_spans"] is [[String:Any]] {
                 projected[index]["word_spans"]=try rebasedWordSpans(event:events[indexByParent[parent]!],runs:eventRuns,changedUnitIDs:Set(textChanges.keys.filter{available[$0]?.parent==parent}),available:available)
+            }
+        }
+        for row in accepted {
+            if let id=row["unit_id"] as? String,let unit=available[id],let index=indexByParent[unit.parent],
+               let changes=row["name_changes"] as? [[String:String]] {
+                let previous=projected[index]["coarse_name_changes"] as? [[String:String]] ?? []
+                projected[index]["coarse_name_changes"]=previous+changes
             }
         }
         for parent in changedByParent {
@@ -609,7 +646,7 @@ enum MeetingCoarseRefinement {
               response["source_sha256"] as? String==request.source_sha256,
               response["snapshot_sha256"] as? String==request.snapshot_sha256,
               response["model"] is String,
-              let incoming=response["records"] as? [[String:Any]] else {
+              let incomingRecords=response["records"] as? [[String:Any]] else {
             throw MeetingCoarseRefinementError.invalidArtifact
         }
         var requestHashes:[String:String]=[:]
@@ -619,6 +656,7 @@ enum MeetingCoarseRefinement {
             requestHashes[unit.unit_id]=unit.original_text_sha256
         }
         var seen=Set<String>()
+        let incoming=recordsWithNameChanges(incomingRecords,response:response)
         guard incoming.count<=maximumRecords,incoming.allSatisfy({
                   guard let id=$0["unit_id"] as? String,
                         let hash=$0["original_text_sha256"] as? String,seen.insert(id).inserted else{return false}
@@ -636,6 +674,16 @@ enum MeetingCoarseRefinement {
         return try project(response:rebased,events:events,directory:directory,transcriptHashes:transcriptHashes)
     }
 
+    private static func recordsWithNameChanges(_ records:[[String:Any]],response:[String:Any])->[[String:Any]] {
+        guard let changes=response["name_changes"] as? [[String:String]] else{return records}
+        let grouped=Dictionary(grouping:changes,by:{$0["unit_id"] ?? ""})
+        return records.map { record in
+            var row=record
+            if let id=record["unit_id"] as? String,let values=grouped[id] {row["name_changes"]=values}
+            return row
+        }
+    }
+
     static func project(response:[String:Any],events:[[String:Any]],directory:URL,
                         transcriptHashes:[String:String])throws->Projection {
         guard response["schema"] as? Int==1,response["method"] as? String==method,
@@ -645,7 +693,7 @@ enum MeetingCoarseRefinement {
               let records=response["records"] as? [[String:Any]],
               response["model"] is String else{throw MeetingCoarseRefinementError.invalidArtifact}
         var result=try project(events:events,session:session,cacheID:cacheID,sourceSHA256:source,
-                               snapshotSHA256:snapshot,records:records,directory:directory,
+                               snapshotSHA256:snapshot,records:recordsWithNameChanges(records,response:response),directory:directory,
                                transcriptHashes:transcriptHashes,allowPartial:true)
         var artifact=result.artifact
         artifact["model"]=response["model"]
@@ -729,7 +777,7 @@ enum MeetingCoarseRefinement {
     static func loadApply(events:[[String:Any]],directory:URL,session:String,cacheID:String,
                           sourceSHA256:String,snapshotSHA256:String)->[[String:Any]] {
         do {
-            if try isDisabled(directory:directory,session:session) {return events}
+            if try isDisabled(directory:directory,session:session) {return TranscriptTimeline.revealReadingEchoes(events)}
             let file=directory.appendingPathComponent(filename,isDirectory:false)
             guard FileManager.default.fileExists(atPath:file.path) else{return events}
             let attrs=try file.resourceValues(forKeys:[.isRegularFileKey,.isSymbolicLinkKey,.fileSizeKey])
@@ -742,7 +790,7 @@ enum MeetingCoarseRefinement {
                   let records=object["records"] as? [[String:Any]] else{throw MeetingCoarseRefinementError.sourceChanged}
             let result=try project(events:events,session:session,cacheID:cacheID,sourceSHA256:sourceSHA256,
                                    snapshotSHA256:snapshotSHA256,records:records,directory:directory,allowPartial:true)
-            return try readingProjection(original:events,projected:eventsWithStatus(result.events,object.merging(result.artifact){_,current in current}),directory:directory,session:session)
+            return try readingProjection(original:events,projected:eventsWithStatus(result.events,object.merging(result.artifact){_,current in current}),directory:directory,session:session,reviewed:result.artifact["records"] as? [[String:Any]] ?? [])
         } catch {
             guard !events.isEmpty else{return events}
             var result=events;result[0]["coarse_refinement_warning"]="自动整理已跳过，原始会议记录可继续查看";return result
@@ -752,7 +800,7 @@ enum MeetingCoarseRefinement {
     static func loadApply(events:[[String:Any]],directory:URL,session:String,cacheID:String,
                           transcriptHashes:[String:String])->[[String:Any]] {
         do {
-            if try isDisabled(directory:directory,session:session) {return events}
+            if try isDisabled(directory:directory,session:session) {return TranscriptTimeline.revealReadingEchoes(events)}
             let file=directory.appendingPathComponent(filename,isDirectory:false)
             // Most sessions have no coarse artifact. Avoid hashing the entire
             // transcript and audio manifest on every normal recovery refresh.
@@ -770,21 +818,33 @@ enum MeetingCoarseRefinement {
             let projection=try project(events:events,session:session,cacheID:cacheID,sourceSHA256:source,
                                snapshotSHA256:snapshot,records:records,directory:directory,
                                transcriptHashes:transcriptHashes,allowPartial:true)
-            return try readingProjection(original:events,projected:eventsWithStatus(projection.events,object.merging(projection.artifact){_,current in current}),directory:directory,session:session)
+            return try readingProjection(original:events,projected:eventsWithStatus(projection.events,object.merging(projection.artifact){_,current in current}),directory:directory,session:session,reviewed:projection.artifact["records"] as? [[String:Any]] ?? [])
         } catch {
             guard !events.isEmpty else{return events}
             var result=events;result[0]["coarse_refinement_warning"]="自动整理已跳过，原始会议记录可继续查看";return result
         }
     }
 
-    private static func readingProjection(original:[[String:Any]],projected:[[String:Any]],directory:URL,session:String)throws->[[String:Any]] {
+    private static func readingProjection(original:[[String:Any]],projected:[[String:Any]],directory:URL,session:String,reviewed:[[String:Any]])throws->[[String:Any]] {
         let labels=try manualSpeakerLabels(directory:directory,session:session)
         var protected=Set(labels.segments.keys).union(labels.sentenceIDs)
         protected.formUnion(labels.anchors.compactMap{$0["parent"] as? String})
         for event in original {
             if let key=SessionSpeakerKey.from(event),labels.speakers[key] != nil,let id=event["segment_id"] as? String {protected.insert(id)}
         }
-        return TranscriptTimeline.markReadingEchoes(original:original,projected:projected,protected:protected)
+        let reviewedIDs=Set(reviewed.compactMap{$0["unit_id"] as? String})
+        // Closed but unfinished ASR hypotheses are not finished utterances.
+        // Once reviewed, keep them in the original view rather than inventing
+        // a speaker for a zero-duration fragment on the clean reading surface.
+        var result=TranscriptTimeline.markReadingEchoes(original:original,projected:projected,protected:protected)
+        var drafts=0
+        for i in result.indices {
+            guard let id=result[i]["segment_id"] as? String,reviewedIDs.contains(id),!protected.contains(id),
+                  result[i]["final"] as? Bool != true else{continue}
+            result[i]["reading_draft"]=true;drafts+=1
+        }
+        if drafts>0 {result[0]["reading_projection_notice"]="\(drafts)段未定稿转写保留在原稿中"}
+        return result
     }
 
     private static func isDisabled(directory:URL,session:String)throws->Bool {

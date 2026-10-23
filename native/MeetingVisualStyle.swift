@@ -15,8 +15,8 @@ enum MeetingVisualStyle {
     }
 
     // Warm paper reading surface (2026-10-15 visual pass); dark mode stays neutral.
-    static let surface=color(0xFBFAF8,0x1D1D20)
-    static let sidebar=color(0xF3F1ED,0x232327)
+    static let surface=color(0xFDFCFA,0x1D1D20)
+    static let sidebar=color(0xF6F5F2,0x232327)
     static let ink=color(0x23252B,0xECEDEF)
     static let muted=color(0x676B75,0xA7AAB3)
     static let selection=color(0xE9E6E1,0x2E2E33)

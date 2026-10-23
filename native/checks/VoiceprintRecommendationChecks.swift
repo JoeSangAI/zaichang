@@ -12,7 +12,7 @@ import AppKit
     checks+=try voiceprintGroupCentroidChecks()
     func check(_ ok:Bool,_ name:String)throws {guard ok else{throw Failure(code:name)};checks.append(name)}
     func vector(_ position:Int)->[Double] {var v=[Double](repeating:0,count:192);v[position]=1;return v}
-    let people=(0..<3).map{i in VoiceprintPerson(id:UUID().uuidString,name:["合成说话人甲","合成说话人乙","合成说话人丙"][i],authorizedAt:"2026-10-05T12:00:00Z",enabled:true,samples:(0..<3).map{j in VoiceprintSample(session:"past",source:"remote",epoch:"past-epoch",start:Double(j*5),end:Double(j*5+2),vector:vector(i))})}
+    let people=(0..<3).map{i in VoiceprintPerson(id:UUID().uuidString,name:["测试甲方","测试乙方","测试Bob"][i],authorizedAt:"2026-10-05T12:00:00Z",enabled:true,samples:(0..<3).map{j in VoiceprintSample(session:"past",source:"remote",epoch:"past-epoch",start:Double(j*5),end:Double(j*5+2),vector:vector(i))})}
     let archive=VoiceprintArchive(schema:1,partition:SpeakerEmbeddingBackend.partition,inputKind:"synthetic_model_output",revision:1,people:people)
     _ = try archive.validated(domain:"synthetic_model_output")
     let key=SessionSpeakerKey(session:"voice-fixture",source:"mic",epoch:"live-epoch",identity:"slot:0")
@@ -124,8 +124,8 @@ import AppKit
     for _ in 0..<100 {if view.naming.displayName(speaker:key)?.origin == .voiceprint {break};try await Task.sleep(nanoseconds:10_000_000)}
     try view.settleTranscriptForOfflineReview()
     try check(view.sequence.count==3 && view.naming.displayName(speaker:key)?.origin == .voiceprint,"stdout_jsonl_drain_triggers_automatic_name")
-    try check(view.output.string.contains("合成说话人甲"),"native_live_header_marks_automatic_name")
-    try check(view.naming.name(speaker:key)==nil && view.naming.displayName(speaker:key)?.origin == .voiceprint && view.transcriptExport().contains("合成说话人甲"),"automatic_name_exports_with_provenance_without_manual_confirmation")
+    try check(view.output.string.contains("测试甲方"),"native_live_header_marks_automatic_name")
+    try check(view.naming.name(speaker:key)==nil && view.naming.displayName(speaker:key)?.origin == .voiceprint && view.transcriptExport().contains("测试甲方"),"automatic_name_exports_with_provenance_without_manual_confirmation")
     view.cacheWriteQueue.sync{}
     try check(FileManager.default.fileExists(atPath:namesFile.path) && String(decoding:try Data(contentsOf:namesFile),as:UTF8.self).contains("autoNames"),"automatic_name_is_saved_to_session_cache")
     let revisionCacheID=UUID().uuidString
@@ -148,21 +148,21 @@ import AppKit
     var reopenedRevision=SessionNames()
     for i in 0..<3 {reopenedRevision.register(segment:"voice-\(i)",item:i==0 ? revised:event(i))}
     try reopenedRevision.restore(Data(contentsOf:revisionNamesFile),session:key.session)
-    try check(revisionView.naming.displayName(speaker:key)==nil && !revisionView.output.string.contains("合成说话人甲") && !revisionView.transcriptExport().contains("合成说话人甲") && !reopenedRevision.autoNameIsSuppressed(key),"temporary_revision_withdraws_without_permanent_suppression")
+    try check(revisionView.naming.displayName(speaker:key)==nil && !revisionView.output.string.contains("测试甲方") && !revisionView.transcriptExport().contains("测试甲方") && !reopenedRevision.autoNameIsSuppressed(key),"temporary_revision_withdraws_without_permanent_suppression")
     revised["revision"]=3;revised["identity_features"]=event(0)["identity_features"]
     revisionView.receive(revised)
     for _ in 0..<100 {if revisionView.naming.displayName(speaker:key)?.origin == .voiceprint {break};try await Task.sleep(nanoseconds:10_000_000)}
     try check(revisionView.naming.displayName(speaker:key)?.origin == .voiceprint,"voice_name_returns_when_temporary_evidence_recovers")
     var semantic=SessionNames()
     func intro(_ i:Int,_ text:String)->[String:Any] {var value=event(i);value["text"]=text;value.removeValue(forKey:"identity_features");return value}
-    let firstIntro=intro(20,"大家好，我叫林虚构。"),secondIntro=intro(21,"我的名字是林虚构。")
+    let firstIntro=intro(20,"大家好，我叫张三。"),secondIntro=intro(21,"我的名字是张三。")
     semantic.register(segment:"voice-20",item:firstIntro);_=semantic.observeSemanticName(firstIntro)
     try check(semantic.displayName(speaker:key)==nil,"one_self_introduction_is_not_a_name")
     for _ in 0..<4 {_=semantic.observeSemanticName(firstIntro)}
     try check(semantic.displayName(speaker:key)==nil,"intro_revisions_are_not_independent_confirmations")
     semantic.register(segment:"voice-21",item:secondIntro);_=semantic.observeSemanticName(secondIntro)
-    try check(semantic.displayName(speaker:key)?.origin == .semantic && semantic.displayName(speaker:key)?.visibleValue=="林虚构" && semantic.name(speaker:key)==nil,"repeated_explicit_self_introduction_has_separate_provenance")
-    for text in ["示例同事甲说他已经到家了。","示例同事甲你好。","他说我叫林虚构。","我不是林虚构。","我叫林虚构吗？","我是老师。","我叫他们来开会。","我叫林虚构。只是开玩笑。","他说：“我叫林虚构。”"] {
+    try check(semantic.displayName(speaker:key)?.origin == .semantic && semantic.displayName(speaker:key)?.visibleValue=="张三" && semantic.name(speaker:key)==nil,"repeated_explicit_self_introduction_has_separate_provenance")
+    for text in ["张三说他已经到家了。","张三你好。","他说我叫张三。","我不是张三。","我叫张三吗？","我是老师。","我叫他们来开会。","我叫张三。只是开玩笑。","他说：“我叫张三。”"] {
         try check(LocalSemanticNames.explicitIntroduction(text)==nil,"semantic_rejects_"+text)
     }
     let semanticSaved=try semantic.snapshot(session:key.session)
@@ -171,7 +171,7 @@ import AppKit
     var amended=secondIntro;amended["revision"]=2;amended["text"]="今天我们来讨论项目。"
     semanticRestored.register(segment:"voice-21",item:amended);_=semanticRestored.observeSemanticName(amended)
     try check(semanticRestored.displayName(speaker:key)==nil && !semanticRestored.autoNameIsSuppressed(key),"revised_introduction_withdraws_semantic_name")
-    let conflicting=intro(22,"我叫林示例。");semantic.register(segment:"voice-22",item:conflicting);_=semantic.observeSemanticName(conflicting)
+    let conflicting=intro(22,"我叫李四。");semantic.register(segment:"voice-22",item:conflicting);_=semantic.observeSemanticName(conflicting)
     try check(semantic.displayName(speaker:key)==nil,"conflicting_self_introductions_never_choose_a_name")
     var overlapped=LocalSemanticNames();_=overlapped.observe(firstIntro)
     var sameAudio=firstIntro;sameAudio["segment_id"]="different-id";_=overlapped.observe(sameAudio)
@@ -243,8 +243,8 @@ import AppKit
     semanticView.receive(["type":"started","session":key.session,"cache_id":UUID().uuidString])
     semanticView.receive(firstIntro);semanticView.receive(secondIntro)
     try semanticView.settleTranscriptForOfflineReview()
-    try check(semanticView.naming.displayName(speaker:key)?.origin == .semantic && semanticView.transcriptExport().contains("林虚构"),"production_receive_and_export_preserve_semantic_provenance")
-    try check(semanticView.acceptVoiceprintRecommendation(key) && semanticView.naming.name(speaker:key)=="林虚构" && semanticView.naming.displayName(speaker:key)?.origin == .manual,"explicit_semantic_confirmation_becomes_manual_name")
+    try check(semanticView.naming.displayName(speaker:key)?.origin == .semantic && semanticView.transcriptExport().contains("张三"),"production_receive_and_export_preserve_semantic_provenance")
+    try check(semanticView.acceptVoiceprintRecommendation(key) && semanticView.naming.name(speaker:key)=="张三" && semanticView.naming.displayName(speaker:key)?.origin == .manual,"explicit_semantic_confirmation_becomes_manual_name")
     let ui=try await minimalVoiceprintUIChecks(owner:view,key:key,directory:directory);checks.append(contentsOf:ui)
     view.cacheWriteQueue.sync{}
     var reopenedAfterRevoke=SessionNames();for i in 0..<3 {reopenedAfterRevoke.register(segment:"voice-\(i)",item:event(i))}

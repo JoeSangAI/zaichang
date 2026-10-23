@@ -29,9 +29,9 @@ final class SpeakerEmbeddingBackend {
         throw EmbeddingError.unavailable
         #endif
     }
-    func extract(_ samples:[Float],qualityOK:Bool,overlap:Bool,inputKind:String) throws->EmbeddingVector {
+    func extract(_ samples:[Float],qualityOK:Bool,overlap:Bool,inputKind:String,allowShortWindow:Bool=false) throws->EmbeddingVector {
         guard qualityOK,!overlap else{throw EmbeddingError.unreliableSegment}
-        guard (32000...64000).contains(samples.count),samples.allSatisfy({$0.isFinite && abs($0)<=1}),["synthetic_model_output","consented_live_audio"].contains(inputKind) else{throw EmbeddingError.invalidPCM}
+        guard ((allowShortWindow ? 6400:32000)...64000).contains(samples.count),samples.allSatisfy({$0.isFinite && abs($0)<=1}),["synthetic_model_output","consented_live_audio"].contains(inputKind) else{throw EmbeddingError.invalidPCM}
         #if canImport(SherpaC)
         guard let extractor=extractor,let stream=SherpaOnnxSpeakerEmbeddingExtractorCreateStream(extractor) else{throw EmbeddingError.unavailable}
         defer{SherpaOnnxDestroyOnlineStream(stream)}

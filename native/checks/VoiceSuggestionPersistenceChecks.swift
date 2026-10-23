@@ -15,15 +15,15 @@ func voiceSuggestionPersistenceChecks()throws->[String] {
          "speaker":["basis":"anonymous_cluster","cluster_id":slot,"source_id":"mic","epoch":"epoch"]]
     }
     func candidate(_ groupConsistent:Bool)->VoiceprintRecommendation {
-        VoiceprintRecommendation(personID:"00000000-0000-4000-8000-000000000011",name:"测试人物甲",archiveRevision:4,
+        VoiceprintRecommendation(personID:"00000000-0000-4000-8000-000000000011",name:"示例人",archiveRevision:4,
             evidenceCount:3,support:(0..<3).map{VoiceprintEvidenceRef(id:"suggestion-\($0)",revision:1)},groupConsistent:groupConsistent)
     }
     var names=SessionNames()
     for index in 0..<3 {names.register(segment:"suggestion-\(index)",item:event(index))}
     let partial=candidate(false)
     try check(names.reconcileAutoVoiceprint(key:key,candidate:partial),"partial_candidate_persists")
-    try check(names.voiceSuggestion(for:key)?.name=="测试人物甲","partial_candidate_available_through_suggestion_api")
-    try check(names.name(speaker:key)==nil && names.displayName(speaker:key)==nil && names.values.values.allSatisfy{$0 != "测试人物甲"} && names.voiceConfirmations.isEmpty,
+    try check(names.voiceSuggestion(for:key)?.name=="示例人","partial_candidate_available_through_suggestion_api")
+    try check(names.name(speaker:key)==nil && names.displayName(speaker:key)==nil && names.values.values.allSatisfy{$0 != "示例人"} && names.voiceConfirmations.isEmpty,
           "partial_candidate_is_not_name_export_or_confirmation")
     try check(names.autoNamedKeys(personID:partial.personID)==[key],"archive_disable_enumerates_suggestions")
     var completed=names
@@ -31,13 +31,13 @@ func voiceSuggestionPersistenceChecks()throws->[String] {
           completed.displayName(speaker:key)?.origin == .voiceprint,"complete_candidate_replaces_persisted_suggestion")
     let saved=try names.snapshot(session:session)
     let snapshotText=String(decoding:saved,as:UTF8.self)
-    try check(snapshotText.contains("voiceSuggestions") && snapshotText.contains("测试人物甲") && !snapshotText.contains("identity_features"),
+    try check(snapshotText.contains("voiceSuggestions") && snapshotText.contains("示例人") && !snapshotText.contains("identity_features"),
           "snapshot_persists_only_candidate_metadata")
 
     var restored=SessionNames()
     for index in 0..<3 {restored.register(segment:"suggestion-\(index)",item:event(index))}
     try restored.restore(saved,session:session)
-    try check(restored.voiceSuggestion(for:key)?.name=="测试人物甲" && restored.displayName(speaker:key)==nil,
+    try check(restored.voiceSuggestion(for:key)?.name=="示例人" && restored.displayName(speaker:key)==nil,
           "history_restore_keeps_suggestion_out_of_display_name")
 
     var stale=SessionNames()
@@ -58,7 +58,7 @@ func voiceSuggestionPersistenceChecks()throws->[String] {
     try check(transitioning.reconcileAutoVoiceprint(key:key,candidate:complete) && transitioning.displayName(speaker:key)?.origin == .voiceprint,
           "complete_candidate_can_be_automatic")
     try check(transitioning.reconcileAutoVoiceprint(key:key,candidate:partial) && transitioning.displayName(speaker:key)==nil &&
-          transitioning.voiceSuggestion(for:key)?.name=="测试人物甲","partial_update_withdraws_auto_name_and_keeps_suggestion")
+          transitioning.voiceSuggestion(for:key)?.name=="示例人","partial_update_withdraws_auto_name_and_keeps_suggestion")
 
     var aliased=SessionNames()
     let destination=SessionSpeakerKey(session:session,source:"mic",epoch:"epoch",identity:"slot:1")

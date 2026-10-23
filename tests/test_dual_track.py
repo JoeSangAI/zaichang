@@ -31,14 +31,14 @@ class DualContract(unittest.TestCase):
         self.assertEqual(self.d.snapshot(5)["missing_sequences"]["remote"], [])
 
     def test_no_names_inferred_from_audio_or_cluster(self):
-        self.d.ingest("mic", segment(speaker={"basis": "human_confirmed", "label": "说话人乙"}))
-        self.d.ingest("remote", segment(cluster_id="A", text="我是虚构姓名甲", overlap=True))
+        self.d.ingest("mic", segment(speaker={"basis": "human_confirmed", "label": "Bob"}))
+        self.d.ingest("remote", segment(cluster_id="A", text="我是张三", overlap=True))
         s = self.d.snapshot(1)["whole_meeting"]
         self.assertEqual(s[0]["speaker"]["label"], "本地麦克风")
         self.assertEqual(s[1]["speaker"]["basis"], "anonymous_cluster")
         self.assertTrue(s[1]["overlap"])
-        with self.assertRaises(ValueError): self.d.confirm_name("remote", "A", "虚构姓名甲")
-        self.d.confirm_name("remote", "A", "虚构姓名甲", confirmed=True, evidence="用户确认该匿名组")
+        with self.assertRaises(ValueError): self.d.confirm_name("remote", "A", "张三")
+        self.d.confirm_name("remote", "A", "张三", confirmed=True, evidence="用户确认该匿名组")
         self.assertEqual(self.d.snapshot(1)["whole_meeting"][1]["speaker"]["basis"], "human_confirmed")
 
     def test_wrong_session_app_and_bad_input_atomic(self):

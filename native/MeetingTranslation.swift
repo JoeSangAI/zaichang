@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 import CryptoKit
 
 struct MeetingTranslationEntry: Codable {
@@ -105,28 +106,36 @@ final class MeetingTranslationService {
     private var pending: [(id: String, source: String, hash: String)] = []
     private var backfill: [(id: String, source: String)] = []
     private var latestHash: [String: String] = [:]
+    private var failed = 0
     private var completed = 0
     private var total = 0
     private var generation = 0
     var onChange: (() -> Void)?
+    var onTranslated: ((String) -> Void)?
+    var onRestored: (() -> Void)?
+    // Injected only by offline checks; production always uses the existing provider.
+    var translator: (String, String) async throws -> String = { source, key in
+        try await DashScopeMeetingTranslator(apiKey: key).translate(source)
+    }
+    var credentialLoader: () throws -> String? = { try Credential.load(allowInteraction: false) }
     var onStatus: ((String) -> Void)?
 
     static func hash(_ text: String) -> String { SHA256.hash(data: Data(text.utf8)).map { String(format: "%02x", $0) }.joined() }
 
-    func bind(cacheID: String?) {
+    func bind(cacheID: String?, root: URL = meetingCacheRoot()) {
         guard cacheID != self.cacheID else { return }
         generation += 1; tasks.values.forEach{$0.cancel()};tasks.removeAll();pending.removeAll();backfill.removeAll();latestHash.removeAll();self.cacheID = cacheID; apiKey = nil; texts = [:]; enabled = false; store = nil
         guard let cacheID, UUID(uuidString: cacheID) != nil else { onChange?(); return }
-        let directory = meetingCacheRoot().appendingPathComponent(cacheID, isDirectory: true)
+        let directory = root.appendingPathComponent(cacheID, isDirectory: true)
         let candidate = MeetingTranslationStore(meetingDirectory: directory)
         store = candidate
-        let token = generation
+        let token = generation, loadCredential = credentialLoader
         Self.storageQueue.async { [weak self] in
             let loaded: (Bool, [String: String], String?)?
             do {
                 let saved = try candidate.load()
                 var key: String?
-                if saved.0 { key = try? Credential.load(allowInteraction: false) }
+                if saved.0 { key = try? loadCredential() }
                 loaded = (saved.0 && !(key ?? "").isEmpty, saved.1, key)
                 if saved.0 && (key ?? "").isEmpty { try? candidate.saveEnabled(false) }
             } catch { loaded = nil }
@@ -135,7 +144,7 @@ final class MeetingTranslationService {
                 if let loaded {
                     self.enabled = loaded.0; self.texts = loaded.1; self.apiKey = loaded.0 ? loaded.2 : nil
                 }
-                self.onChange?()
+                self.onChange?(); self.onRestored?()
             }
         }
         onChange?()
@@ -143,6 +152,7 @@ final class MeetingTranslationService {
 
     func setEnabled(_ value: Bool, apiKey: String?) throws {
         guard let store else { throw Failure(code: "translation_meeting_unavailable") }
+        guard !value || apiKey?.isEmpty == false else { throw Failure(code: "translation_credential_unavailable") }
         try store.saveEnabled(value)
         generation += 1; tasks.values.forEach{$0.cancel()};tasks.removeAll();pending.removeAll();backfill.removeAll();latestHash.removeAll();enabled = value;self.apiKey = value ? apiKey : nil
         if value && (apiKey?.isEmpty != false) { enabled = false; try? store.saveEnabled(false); throw Failure(code: "translation_credential_unavailable") }
@@ -154,23 +164,24 @@ final class MeetingTranslationService {
     /// calls run at once and no more than 300 sentences are scheduled per wave.
     func enqueueExisting(_ turns: [ReadingTurn]) {
         guard enabled else { return }
-        let existing = turns.flatMap { turn in turn.parts.compactMap { id, part -> (String, String)? in
-            guard part["final"] as? Bool == true else { return nil }
+        let existing = turns.filter { MeetingTranslationPolicy.eligible($0.item) }.flatMap { turn in turn.parts.compactMap { id, part -> (String, String)? in
+            guard MeetingTranslationPolicy.eligible(part) else { return nil }
             return (id, part["text"] as? String ?? "")
         }}
         let eligible = existing.filter { MeetingTranslationNeedsWork.test($0.1) }
         let work = Array(eligible.filter { translated(segmentID: $0.0, source: $0.1) == nil }.prefix(3000))
-        total = work.count; completed = 0
+        total = work.count; completed = 0; failed = 0
         backfill = Array(work.dropFirst(300))
         for (id, source) in work.prefix(300) { enqueue(segmentID: id, source: source, countForProgress: false) }
         if eligible.count > 3000 { onStatus?("会议英文内容较多，本次最多翻译 3000 句") }
         pump()
     }
 
-    func translated(segmentID: String, source: String) -> String? { texts[segmentID + ":" + Self.hash(source)] }
+    func translated(segmentID: String, source: String) -> String? { enabled ? texts[segmentID + ":" + Self.hash(source)] : nil }
 
-    func accept(segmentID: String, source: String, final: Bool) {
-        guard enabled, final, MeetingTranslationNeedsWork.test(source) else { return }
+    func accept(segmentID: String, item: [String: Any]) {
+        guard enabled, MeetingTranslationPolicy.eligible(item) else { return }
+        let source = item["text"] as? String ?? ""
         enqueue(segmentID: segmentID, source: source); pump()
     }
 
@@ -197,7 +208,7 @@ final class MeetingTranslationService {
             let item = pending.removeFirst(), token = generation
             tasks[item.id] = Task { @MainActor [weak self] in
                 do {
-                    let result = try await DashScopeMeetingTranslator(apiKey: apiKey).translate(item.source)
+                    let result = try await self?.translator(item.source, apiKey) ?? ""
                     if let self, self.generation == token, self.enabled, !Task.isCancelled,
                        self.latestHash[item.id] == item.hash, result.utf8.count <= 32_000, !result.isEmpty {
                         let entry = MeetingTranslationEntry(segmentID: item.id, sourceHash: item.hash, text: result)
@@ -205,14 +216,14 @@ final class MeetingTranslationService {
                         guard self.generation == token, self.enabled, !Task.isCancelled,
                               self.latestHash[item.id] == item.hash else { throw CancellationError() }
                         self.texts[entry.key] = result; self.completed += 1
-                        self.onChange?()
+                        self.onTranslated?(item.id)
                     }
                 } catch {
-                    if let self, self.generation == token, !Task.isCancelled, self.latestHash[item.id] == item.hash { self.onStatus?("有一句暂时没能翻译") }
+                    if let self, self.generation == token, !Task.isCancelled, self.latestHash[item.id] == item.hash { self.failed += 1; self.onStatus?("有一句暂时没能翻译") }
                 }
                 guard let self, self.generation == token, self.latestHash[item.id] == item.hash else { return }
                 self.tasks.removeValue(forKey: item.id)
-                if self.pending.isEmpty, self.tasks.isEmpty, self.backfill.isEmpty { self.onStatus?("中文翻译完成（\(self.completed)/\(self.total)）") }
+                if self.pending.isEmpty, self.tasks.isEmpty, self.backfill.isEmpty { self.onStatus?(self.failed == 0 ? "中文翻译完成（\(self.completed)/\(self.total)）" : "已翻译 \(self.completed) 句 · \(self.failed) 句未完成") }
                 self.pump()
             }
         }
@@ -225,6 +236,17 @@ final class MeetingTranslationService {
                 catch { continuation.resume(throwing: error) }
             }
         }
+    }
+}
+
+enum MeetingTranslationPolicy {
+    static func eligible(_ item: [String: Any]) -> Bool {
+        guard item["final"] as? Bool == true,
+              item["text_quality"] as? String != "needs_review" else { return false }
+        if let flags = item["quality_flags"], !(flags is NSNull) {
+            guard let values = flags as? [String], values.isEmpty else { return false }
+        }
+        return MeetingTranslationNeedsWork.test(item["text"] as? String ?? "")
     }
 }
 
@@ -259,5 +281,55 @@ private struct DashScopeMeetingTranslator {
         let value = content.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !value.isEmpty else { throw Failure(code: "translation_response_empty") }
         return value
+    }
+}
+
+// All UI reads and writes stay on the owning document; history and live capture
+// use separate services. Credentials are read off the main thread.
+extension Delegate {
+    func makeTranslationControl() -> NSView {
+        let row=stack(.horizontal,spacing:6);row.alignment = .centerY
+        let title=label("中文翻译",size:12);title.textColor=MeetingVisualStyle.muted
+        let toggle=MeetingTintedSwitch();toggle.backgroundColor=MeetingVisualStyle.surface;toggle.controlSize = .mini;toggle.target=self;toggle.action=#selector(toggleTranslation)
+        toggle.toolTip="将已定稿英文逐句译成中文";toggle.setAccessibilityLabel("中文翻译");toggle.isEnabled=currentCacheID != nil
+        translationSwitch=toggle;toggle.widthAnchor.constraint(equalToConstant:32).isActive=true;toggle.heightAnchor.constraint(equalToConstant:20).isActive=true;row.addArrangedSubview(title);row.addArrangedSubview(toggle)
+        translationService.onChange={ [weak self] in
+            guard let self else{return}
+            self.translationSwitch?.state=self.translationService.enabled ? .on:.off
+            if !self.translationService.enabled {self.translationStatusLabel?.isHidden=true}
+            self.markAllTranscriptParentsDirty();self.renderText()
+        }
+        translationService.onTranslated={ [weak self] id in
+            guard let self else{return}
+            self.markTranscriptParentDirty(self.transcriptParent(for:id));self.renderText()
+        }
+        translationService.onRestored={ [weak self] in
+            guard let self else{return};self.translationService.enqueueExisting(self.readingTurns())
+        }
+        translationService.onStatus={ [weak self] status in
+            self?.translationStatusLabel?.stringValue=status;self?.translationStatusLabel?.toolTip=status
+            self?.translationStatusLabel?.isHidden=false
+        }
+        return row
+    }
+    @objc func toggleTranslation() {
+        if translationSwitch?.state != .on {
+            translationCredentialJob.cancel()
+            do {try translationService.setEnabled(false,apiKey:nil)}
+            catch {showTransientFeedback("翻译设置未保存，请重试")}
+            return
+        }
+        guard let cache=currentCacheID,!translationCredentialJob.busy else {translationSwitch?.state = .off;return}
+        translationSwitch?.isEnabled=false
+        translationCredentialJob.run(timeout:15,work:{try Credential.load()}) { [weak self] result in
+            guard let self,self.currentCacheID==cache else{return}
+            self.translationSwitch?.isEnabled=true
+            do {
+                let key=try result.get()
+                guard let key,!key.isEmpty else {throw Failure(code:"translation_credential_unavailable")}
+                try self.translationService.setEnabled(true,apiKey:key)
+                self.translationService.enqueueExisting(self.readingTurns())
+            } catch {self.translationSwitch?.state = .off;self.showTransientFeedback("无法开启中文翻译，请检查服务设置后重试")}
+        }
     }
 }

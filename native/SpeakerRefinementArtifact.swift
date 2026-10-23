@@ -22,7 +22,7 @@ enum SpeakerRefinementArtifact {
     static let model="nemotron3-fast128:25a90f97f254428d4b30374b76af9c74fdee8327"
     static let offlineMethod="whole_meeting_v2"
     static let offlineModel="pyannote-community-1-coreml:df2625ac79a7ac6b65ad868fee6d80f320da4232"
-    static let maximumBytes=2*1024*1024
+    static let maximumBytes=8*1024*1024
     private static let maximumEventCount=50_000
     private static let maximumSources=32
 
@@ -95,8 +95,8 @@ enum SpeakerRefinementArtifact {
         let chunkMatch=name.range(of:"^([a-z0-9-]+)-([0-9]{6})\\.pcm$",options:.regularExpression)
         let chunkTrack=chunkMatch.map{String(name[$0].split(separator:"-").dropLast().joined(separator:"-"))}
         guard name=="meeting.json" || name=="speaker-reconciliation.json" ||
-              (name.hasSuffix("-manifest.json") && isTranscriptAudioTrack(String(name.dropLast("-manifest.json".count)))) ||
-              (chunkTrack.map{isTranscriptAudioTrack($0)} ?? false) else{throw SpeakerRefinementArtifactError.invalidPath}
+              (name.hasSuffix("-manifest.json") && isMeetingAudioTrack(String(name.dropLast("-manifest.json".count)))) ||
+              (chunkTrack.map{isMeetingAudioTrack($0)} ?? false) else{throw SpeakerRefinementArtifactError.invalidPath}
         guard name.count<=128 else{throw SpeakerRefinementArtifactError.invalidPath}
         let file=directory.appendingPathComponent(name,isDirectory:false)
         guard FileManager.default.fileExists(atPath:file.path) || isSymlinkEntry(file) else{return nil}
@@ -109,7 +109,7 @@ enum SpeakerRefinementArtifact {
     /// Returns the raw snapshot hash map, with empty strings for missing inputs.
     /// The map also includes every discovered manifest so a newly appearing
     /// track invalidates a result computed from an earlier snapshot.
-    static func snapshotHashes(directory:URL,cacheID:String,sourceHashes:[String:String]=[:])throws->[String:String] {
+    static func snapshotHashes(directory:URL,cacheID:String,sourceHashes:[String:String]=[:],includeAuxiliaryAudio:Bool=false)throws->[String:String] {
         let directory=try checkedDirectory(directory,cacheID:cacheID)
         let sourceTracks=try validateSourceHashes(sourceHashes)
         var tracks=Set(sourceTracks)
@@ -119,16 +119,24 @@ enum SpeakerRefinementArtifact {
             if name.hasSuffix("-manifest.json") {
                 let suffix="-manifest.json",track=String(name.dropLast(suffix.count))
                 guard isMeetingAudioTrack(track),track.count<=64 else{throw SpeakerRefinementArtifactError.invalidPath}
-                if isTranscriptAudioTrack(track) {tracks.insert(track)}
+                if includeAuxiliaryAudio || isTranscriptAudioTrack(track) {tracks.insert(track)}
             } else if name.hasSuffix("-transcript.jsonl") {
                 let suffix="-transcript.jsonl",track=String(name.dropLast(suffix.count))
                 guard isTranscriptAudioTrack(track),track.count<=64 else{throw SpeakerRefinementArtifactError.invalidPath}
                 tracks.insert(track)
             }
         }
-        guard tracks.count<=maximumSources else{throw SpeakerRefinementArtifactError.invalidSnapshot}
+        guard tracks.count<=(includeAuxiliaryAudio ? maximumSources*4:maximumSources) else{throw SpeakerRefinementArtifactError.invalidSnapshot}
         var hashes:[String:String]=[:]
-        if let data=try readOptional("meeting.json",in:directory,limit:64*1024) {hashes["meeting.json"]=digest(data)} else {hashes["meeting.json"]=""}
+        if let data=try readOptional("meeting.json",in:directory,limit:64*1024) {
+            if includeAuxiliaryAudio {
+                let metadata=try JSONSerialization.jsonObject(with:data) as? [String:Any] ?? [:]
+                // Health, costs and UI title may update while paused. Only
+                // identity/clock/archive fields affect this local audio pass.
+                let fields=Set(["schema","session","capture_origin_uptime","archive_only_before_append"])
+                hashes["meeting.json"]=digest(try jsonData(metadata.filter{fields.contains($0.key)}))
+            } else {hashes["meeting.json"]=digest(data)}
+        } else {hashes["meeting.json"]=""}
         for track in tracks.sorted() {
             let name=track+"-manifest.json"
             guard let data=try readOptional(name,in:directory,limit:512*1024) else {hashes[name]="";continue}
@@ -157,8 +165,8 @@ enum SpeakerRefinementArtifact {
 
     /// Deterministic digest of meeting metadata, all track manifests and the
     /// legacy speaker sidecar. Callers can retain the returned hash for commit.
-    static func snapshotSHA256(directory:URL,cacheID:String,sourceHashes:[String:String]=[:])throws->String {
-        digest(try jsonData(snapshotHashes(directory:directory,cacheID:cacheID,sourceHashes:sourceHashes)))
+    static func snapshotSHA256(directory:URL,cacheID:String,sourceHashes:[String:String]=[:],includeAuxiliaryAudio:Bool=false)throws->String {
+        digest(try jsonData(snapshotHashes(directory:directory,cacheID:cacheID,sourceHashes:sourceHashes,includeAuxiliaryAudio:includeAuxiliaryAudio)))
     }
 
     /// Hashes an input projected event while ignoring only transient warning
@@ -471,9 +479,27 @@ enum SpeakerRefinementArtifact {
         }
         return result
     }
-    private static func validateSpeaker(_ output:[String:Any],prior:[String:Any],event:[String:Any],evidence:Set<SessionSpeakerKey>,allowAnonymousRemap:Bool)throws {
+    private static func validateSpeaker(_ output:[String:Any],prior:[String:Any],event:[String:Any],evidence:Set<SessionSpeakerKey>,allowAnonymousRemap:Bool,acoustic:Bool=false,echoReferences:[String:(Double,Double)]=[:])throws {
         let oldBasis=prior["basis"] as? String
         guard oldBasis != nil else{throw SpeakerRefinementArtifactError.invalidArtifact}
+        if acoustic,(["unknown","anonymous_cluster","meeting_reconciliation","channel"].contains(oldBasis!) || (oldBasis=="multiple" && output["solo_verified"] as? Bool==true)) {
+            if try speakerJSONEqual(output,prior) {return}
+            if output["basis"] as? String=="unknown",output["reason"] as? String=="acoustic_unresolved",Set(output.keys)==Set(["basis","reason"]) {return}
+            guard output["basis"] as? String=="meeting_reconciliation",output["acoustic_verified"] as? Bool==true,
+                  Set(output.keys).isSubset(of:Set(["basis","source_id","epoch","identity_key","acoustic_verified","echo_of","solo_verified","slot_continuity"])) else{throw SpeakerRefinementArtifactError.invalidArtifact}
+            if output["slot_continuity"] != nil {
+                guard output["slot_continuity"] as? Bool==true,oldBasis=="anonymous_cluster" || oldBasis=="meeting_reconciliation",
+                      let lo=event["start"] as? Double,let hi=event["end"] as? Double,hi>lo,hi-lo<1.5 else{throw SpeakerRefinementArtifactError.invalidArtifact}
+            }
+            var scoped=event;scoped["speaker"]=output
+            guard let key=SessionSpeakerKey.from(scoped),evidence.contains(key) else{throw SpeakerRefinementArtifactError.unknownSlot}
+            if let echo=output["echo_of"] {
+                guard audioSourceCoreID(event["source_id"] as? String ?? "")=="mic",let id=echo as? String,
+                      let range=echoReferences[id],let lo=event["start"] as? Double,let hi=event["end"] as? Double,hi>lo,
+                      max(0,min(hi,range.1)-max(lo,range.0))/(hi-lo)>=0.85 else{throw SpeakerRefinementArtifactError.invalidArtifact}
+            }
+            return
+        }
         if oldBasis != "unknown" && !(allowAnonymousRemap && oldBasis=="anonymous_cluster") {
             guard try speakerJSONEqual(output,prior) else{throw SpeakerRefinementArtifactError.unsupportedSpeakerChange}
             return
@@ -509,7 +535,8 @@ enum SpeakerRefinementArtifact {
 
     static func validateApply(object:[String:Any],events:[[String:Any]],sourceHashes:[String:String],directory:URL,cacheID:String)throws->[[String:Any]] {
         _=try checkedDirectory(directory,cacheID:cacheID)
-        let currentSnapshot=try snapshotSHA256(directory:directory,cacheID:cacheID,sourceHashes:sourceHashes)
+        let acoustic=object["method"] as? String==MeetingAcousticRefinement.method && object["model"] as? String==MeetingAcousticRefinement.model
+        let currentSnapshot=try snapshotSHA256(directory:directory,cacheID:cacheID,sourceHashes:sourceHashes,includeAuxiliaryAudio:acoustic)
         guard events.count<=maximumEventCount,validCacheID(cacheID),
               object["schema"] as? Int==1,object["cache_id"] as? String==cacheID,
               let session=object["session"] as? String,!session.isEmpty,session.count<=160,
@@ -520,6 +547,7 @@ enum SpeakerRefinementArtifact {
         let allowAnonymousRemap:Bool
         if object["method"] as? String==method,object["model"] as? String==model {allowAnonymousRemap=false}
         else if object["method"] as? String==offlineMethod,object["model"] as? String==offlineModel {allowAnonymousRemap=true}
+        else if acoustic {allowAnonymousRemap=true}
         else {throw SpeakerRefinementArtifactError.invalidArtifact}
         _=try validateSourceHashes(sourceHashes)
         var originals:[String:[String:Any]]=[:]
@@ -528,6 +556,14 @@ enum SpeakerRefinementArtifact {
             originals[id]=event
         }
         let evidence=knownEvidence(events)
+        var echoReferences:[String:(Double,Double)]=[:]
+        for event in events where audioSourceCoreID(event["source_id"] as? String ?? "") != "mic" {
+            guard let parent=event["segment_id"] as? String else{continue}
+            let runs=event["speaker_runs"] as? [[String:Any]] ?? []
+            for row in runs.isEmpty ? [event]:runs {
+                if let lo=row["start"] as? Double,let hi=row["end"] as? Double,hi>lo {echoReferences[runs.isEmpty ? parent:TranscriptTimeline.runID(parent:parent,run:row)]=(lo,hi)}
+            }
+        }
         let protected=try protectedIDs(directory:directory,session:session,events:events)
         var replacements:[String:[String:Any]]=[:]
         for record in records {
@@ -543,9 +579,9 @@ enum SpeakerRefinementArtifact {
                   let afterSpeaker=record["speaker"] as? [String:Any] else{throw SpeakerRefinementArtifactError.eventChanged}
             let actualOriginalHash=try originalEventSHA256(original)
             guard originalHash==actualOriginalHash else{throw SpeakerRefinementArtifactError.eventChanged}
-            _=try scope(original)
+            if !acoustic || original["epoch"] as? String != nil {_=try scope(original)}
             let parentProtected=protected.contains(id)
-            if !parentProtected {try validateSpeaker(afterSpeaker,prior:beforeSpeaker,event:original,evidence:evidence,allowAnonymousRemap:allowAnonymousRemap)}
+            if !parentProtected {try validateSpeaker(afterSpeaker,prior:beforeSpeaker,event:original,evidence:evidence,allowAnonymousRemap:allowAnonymousRemap,acoustic:acoustic,echoReferences:echoReferences)}
 
             let originalRuns=original["speaker_runs"] as? [[String:Any]] ?? []
             let proposedRuns=record["speaker_runs"] as? [[String:Any]]
@@ -556,16 +592,18 @@ enum SpeakerRefinementArtifact {
                 guard let oldSpeaker=old["speaker"] as? [String:Any],let newSpeaker=new["speaker"] as? [String:Any],
                       try withoutSpeaker(old)==withoutSpeaker(new) else{throw SpeakerRefinementArtifactError.eventChanged}
                 var contextual=original
+                contextual["start"]=old["start"];contextual["end"]=old["end"]
                 for field in ["session","source_id","epoch"] {
                     if let supplied=old[field],String(describing:supplied) != String(describing:original[field] ?? "") {throw SpeakerRefinementArtifactError.invalidArtifact}
                     contextual[field]=original[field]
                 }
                 let runProtected=parentProtected || protected.contains(TranscriptTimeline.runID(parent:id,run:old))
-                if !runProtected {try validateSpeaker(newSpeaker,prior:oldSpeaker,event:contextual,evidence:evidence,allowAnonymousRemap:allowAnonymousRemap)}
+                if !runProtected {try validateSpeaker(newSpeaker,prior:oldSpeaker,event:contextual,evidence:evidence,allowAnonymousRemap:allowAnonymousRemap,acoustic:acoustic,echoReferences:echoReferences)}
                 var changed=old;changed["speaker"]=runProtected ? oldSpeaker:newSpeaker;patchedRuns.append(changed)
             }
             var replacement=original;replacement["speaker"]=parentProtected ? beforeSpeaker:afterSpeaker
             if !originalRuns.isEmpty {replacement["speaker_runs"]=patchedRuns}
+            if acoustic {replacement["acoustic_refinement_applied"]=true}
             replacements[id]=replacement
         }
         return events.map{replacements[$0["segment_id"] as? String ?? ""] ?? $0}

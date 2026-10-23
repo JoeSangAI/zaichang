@@ -758,8 +758,7 @@ private final class MinimalSpeakerReviewController:NSObject,NSWindowDelegate,NST
         defer {if checkBridge {owner.contextPublisher=originalPublisher;owner.contextSession=originalContextSession}}
         func readBridge(_ view:Delegate,current:Bool=false)throws->[String:Any] {
             owner.contextPublisher?.flushForChecks()
-            guard let python=PythonRuntime.executable() else{throw Failure(code:"python_runtime_missing")}
-            let proc=Process(),pipe=Pipe();proc.executableURL=python
+            let proc=Process(),pipe=Pipe();proc.executableURL=URL(fileURLWithPath:"/usr/local/bin/python3")
             proc.arguments=[owner.root+"/meeting_context.py","--database",bridgeDirectory.appendingPathComponent("context.sqlite").path]+(current ? ["current"]:["read","--session",view.activeSession!])
             proc.standardOutput=pipe;proc.standardError=FileHandle.nullDevice
             try proc.run();let data=pipe.fileHandleForReading.readDataToEndOfFile();proc.waitUntilExit()
@@ -843,8 +842,8 @@ private final class MinimalSpeakerReviewController:NSObject,NSWindowDelegate,NST
               unknownPart.flatMap{overlapController.textView.textStorage?.attribute(.toolTip,at:$0.range.location,effectiveRange:nil) as? String}?.contains("其他发言")==true else{throw Failure(code:"speaker_review_other_speech_single_entry")}
         var sameNameFixtureNames=SessionNames()
         let sameA=overlapSlot("same-name-a",0),sameB=overlapSlot("same-name-b",1)
-        sameNameFixtureNames.register(segment:"same-name-a",item:sameA);sameNameFixtureNames.setSpeaker(segment:"same-name-a",name:"顾问甲")
-        sameNameFixtureNames.register(segment:"same-name-b",item:sameB);sameNameFixtureNames.setSpeaker(segment:"same-name-b",name:"顾问甲")
+        sameNameFixtureNames.register(segment:"same-name-a",item:sameA);sameNameFixtureNames.setSpeaker(segment:"same-name-a",name:"张三")
+        sameNameFixtureNames.register(segment:"same-name-b",item:sameB);sameNameFixtureNames.setSpeaker(segment:"same-name-b",name:"张三")
         var sameOverlap=namedOverlap;sameOverlap["segment_id"]="same-name-overlap";sameOverlap["start"]=2.5;sameOverlap["end"]=3.0
         sameNameFixtureNames.register(segment:"same-name-overlap",item:sameOverlap)
         let sameTurns=[("same-name-a",sameA),("same-name-b",sameB),("same-name-overlap",sameOverlap)].map {
@@ -855,7 +854,7 @@ private final class MinimalSpeakerReviewController:NSObject,NSWindowDelegate,NST
         let sameController=MinimalSpeakerReviewController(owner:sameNameFixtureOwner)
         let sameTitles=sameIndex.people.map{sameController.title(.person($0.key),index:sameIndex)}
         guard sameIndex.people.count==1,sameIndex.people[0].keys.count==2,sameIndex.simultaneous.isEmpty,
-              sameTitles==["顾问甲 · 3轮"] else{throw Failure(code:"speaker_review_same_confirmed_name_is_one_person_choice")}
+              sameTitles==["张三 · 3轮"] else{throw Failure(code:"speaker_review_same_confirmed_name_is_one_person_choice")}
         var automaticNames=SessionNames();var automaticTurns:[ReadingTurn]=[]
         for slot in 0..<3 {
             var item=overlapSlot("auto-name-\(slot)",0);item["start"]=Double(slot);item["end"]=Double(slot)+0.5;item["revision"]=0
@@ -864,17 +863,17 @@ private final class MinimalSpeakerReviewController:NSObject,NSWindowDelegate,NST
         }
         let autoKey=automaticNames.key(segment:"auto-name-0")!
         let autoEvidence=(0..<3).map{VoiceprintEvidenceRef(id:"auto-name-\($0)",revision:0)}
-        let autoCandidate=VoiceprintRecommendation(personID:"00000000-0000-4000-8000-000000000001",name:"合成说话人乙",archiveRevision:1,evidenceCount:3,support:autoEvidence)
+        let autoCandidate=VoiceprintRecommendation(personID:"00000000-0000-4000-8000-000000000001",name:"示例人物82",archiveRevision:1,evidenceCount:3,support:autoEvidence)
         guard automaticNames.reconcileAutoVoiceprint(key:autoKey,candidate:autoCandidate) else{throw Failure(code:"speaker_review_auto_name_fixture_setup")}
         let automaticIndex=SpeakerReviewIndex.build(session:overlapFixtureOwner.activeSession ?? "",turns:automaticTurns,names:automaticNames)
         let automaticFixtureOwner=Delegate();automaticFixtureOwner.activeSession=overlapFixtureOwner.activeSession;automaticFixtureOwner.naming=automaticNames
         let automaticController=MinimalSpeakerReviewController(owner:automaticFixtureOwner)
-        guard automaticIndex.people.count==1,automaticController.title(.person(autoKey),index:automaticIndex)=="合成说话人乙 · 3轮",
-              automaticController.speakerTooltip(autoKey).contains("声音识别候选：合成说话人乙"),
+        guard automaticIndex.people.count==1,automaticController.title(.person(autoKey),index:automaticIndex)=="示例人物82 · 3轮",
+              automaticController.speakerTooltip(autoKey).contains("声音识别候选：示例人物82"),
               automaticController.speakerTooltip(autoKey).contains("尚未人工确认") else{throw Failure(code:"speaker_review_auto_candidate_not_presented_as_confirmed")}
         let manualSame=overlapSlot("manual-same-person",1)
         automaticNames.register(segment:"manual-same-person",item:manualSame)
-        automaticNames.setSpeaker(segment:"manual-same-person",name:"合成说话人乙")
+        automaticNames.setSpeaker(segment:"manual-same-person",name:"示例人物82")
         let mixedTurns=automaticTurns+[ReadingTurn(id:"manual-same-person",parent:"manual-same-person",item:manualSame,parts:[("manual-same-person",manualSame)],uncertain:false)]
         let mixedIndex=SpeakerReviewIndex.build(session:overlapFixtureOwner.activeSession ?? "",turns:mixedTurns,names:automaticNames)
         guard mixedIndex.people.count==1,mixedIndex.people[0].keys.count==2,mixedIndex.people[0].entries.count==4,
@@ -955,26 +954,26 @@ private final class MinimalSpeakerReviewController:NSObject,NSWindowDelegate,NST
         guard let sourcePart=source.entries.first?.partIDs.first,let destinationPart=destination.entries.first?.partIDs.first else {
             throw Failure(code:"speaker_review_reuse_fixture_parts")
         }
-        owner.naming.setSpeaker(segment:sourcePart,name:"说话人甲")
-        owner.naming.setSpeaker(segment:destinationPart,name:"说话人甲")
+        owner.naming.setSpeaker(segment:sourcePart,name:"Alice")
+        owner.naming.setSpeaker(segment:destinationPart,name:"Alice")
         owner.markAllTranscriptParentsDirty();refresh(preferred:source.key)
-        guard owner.naming.name(speaker:source.key)=="说话人甲",owner.naming.name(speaker:destination.key)=="说话人甲",
+        guard owner.naming.name(speaker:source.key)=="Alice",owner.naming.name(speaker:destination.key)=="Alice",
               owner.naming.canonical(source.key) != owner.naming.canonical(destination.key),
               let sameNamePerson=index?.people.first(where:{$0.keys.contains(source.key) && $0.keys.contains(destination.key)}),
               !reuseTargets.contains(destination.key) else {
             throw Failure(code:"speaker_review_same_confirmed_name_not_grouped")
         }
-        nameField.stringValue="说话人甲统一更名";controlTextDidChange(Notification(name:NSControl.textDidChangeNotification));renameSelectedPerson()
+        nameField.stringValue="Alice统一更名";controlTextDidChange(Notification(name:NSControl.textDidChangeNotification));renameSelectedPerson()
         let groupedRenameDeadline=Date().addingTimeInterval(1)
-        while (owner.naming.name(speaker:source.key) != "说话人甲统一更名" || owner.naming.name(speaker:destination.key) != "说话人甲统一更名") && Date()<groupedRenameDeadline {
+        while (owner.naming.name(speaker:source.key) != "Alice统一更名" || owner.naming.name(speaker:destination.key) != "Alice统一更名") && Date()<groupedRenameDeadline {
             try await Task.sleep(nanoseconds:10_000_000)
         }
-        guard owner.naming.name(speaker:source.key)=="说话人甲统一更名",owner.naming.name(speaker:destination.key)=="说话人甲统一更名" else {
+        guard owner.naming.name(speaker:source.key)=="Alice统一更名",owner.naming.name(speaker:destination.key)=="Alice统一更名" else {
             throw Failure(code:"speaker_review_multiname_rename_failed_\(owner.naming.name(speaker:source.key) ?? "nil")_\(owner.naming.name(speaker:destination.key) ?? "nil")")
         }
-        try await waitForProjection(owner,{owner.output.string.contains("说话人甲统一更名")})
+        try await waitForProjection(owner,{owner.output.string.contains("Alice统一更名")})
         undoCorrection()
-        try await waitForProjection(owner,{owner.naming.name(speaker:source.key)=="说话人甲" && owner.naming.name(speaker:destination.key)=="说话人甲"})
+        try await waitForProjection(owner,{owner.naming.name(speaker:source.key)=="Alice" && owner.naming.name(speaker:destination.key)=="Alice"})
         guard owner.naming.canonical(source.key) != owner.naming.canonical(destination.key),sameNamePerson.keys.count>=2 else {
             throw Failure(code:"speaker_review_grouped_rename_changed_source_identity")
         }
@@ -1123,7 +1122,7 @@ private final class MinimalSpeakerReviewController:NSObject,NSWindowDelegate,NST
         let window=SpeakerReviewWindow(contentRect:NSRect(x:0,y:0,width:700,height:620),styleMask:[.titled,.closable,.resizable],backing:.buffered,defer:false)
         present(in:window,for:key);window.orderOut(nil);window.contentView?.layoutSubtreeIfNeeded()
         guard recommendationRow?.isHidden==false,recommendationLabel.stringValue=="已按声音识别，姓名可直接修改。",rejectVoiceButton.title=="撤销自动识别",editDetails?.isHidden==true else{throw Failure(code:"voice_automatic_name_controls")}
-        guard nameField.stringValue=="合成说话人甲",renameButton.title=="确认",renameButton.isEnabled,nameField.action==nil,
+        guard nameField.stringValue=="测试甲方",renameButton.title=="确认",renameButton.isEnabled,nameField.action==nil,
               recommendationRow?.arrangedSubviews.count==1,rejectVoiceButton.superview===editDetails else{throw Failure(code:"voice_single_confirmation_control")}
         try saveWindow(window,to:directory.appendingPathComponent("voice-recommendation.png"))
         let automaticNames=owner.naming
@@ -1134,7 +1133,7 @@ private final class MinimalSpeakerReviewController:NSObject,NSWindowDelegate,NST
         renameButton.performClick(nil)
         let confirmDeadline=Date().addingTimeInterval(2)
         while persistenceInFlight && Date()<confirmDeadline {try await Task.sleep(nanoseconds:10_000_000)}
-        guard !persistenceInFlight,owner.naming.name(speaker:key)=="合成说话人甲",renameButton.title=="已确认",!renameButton.isEnabled,
+        guard !persistenceInFlight,owner.naming.name(speaker:key)=="测试甲方",renameButton.title=="已确认",!renameButton.isEnabled,
               recommendationRow?.isHidden==true else{throw Failure(code:"voice_unified_confirmation_not_saved")}
         try saveWindow(window,to:directory.appendingPathComponent("voice-confirmed.png"))
         undoCorrection()
@@ -1145,7 +1144,7 @@ private final class MinimalSpeakerReviewController:NSObject,NSWindowDelegate,NST
         rejectVoice()
         guard owner.naming.displayName(speaker:key)==nil,owner.naming.autoNameIsSuppressed(key),recommendationRow?.isHidden==true else{throw Failure(code:"voice_revoke_button")}
         try owner.settleTranscriptForOfflineReview()
-        guard !owner.transcriptExport().contains("合成说话人甲") else{throw Failure(code:"voice_revoke_export")}
+        guard !owner.transcriptExport().contains("测试甲方") else{throw Failure(code:"voice_revoke_export")}
         fixtureConfirmation={_,_,_ in true}
         nameField.stringValue="人工确认的姓名";renameSelectedPerson()
         let deadline=Date().addingTimeInterval(2)

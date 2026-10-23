@@ -3,20 +3,29 @@ import PDFKit
 import UniformTypeIdentifiers
 
 extension Delegate {
-    @objc func showMeetingExportMenu() {
-        let menu = NSMenu()
+    func makeMeetingExportMenu() -> NSMenu {
+        let menu = NSMenu(); menu.autoenablesItems = false
         let document = displayedDocument
         let transcript = menu.addItem(withTitle: "导出原文…", action: #selector(exportVisibleDocument), keyEquivalent: "")
         transcript.target = self
-        if RuntimeConfiguration.standalone {
-            menu.addItem(.separator())
-            let minutes = menu.addItem(withTitle: "生成会议纪要…", action: #selector(beginMeetingMinutes), keyEquivalent: "")
-            minutes.target = document
-            minutes.isEnabled = !document.readingTurns().isEmpty && !Credential.offline && !document.meetingMinutesBusy
-        }
+        menu.addItem(.separator())
+        let minutes = menu.addItem(withTitle: "导出纪要…", action: #selector(beginMeetingMinutes), keyEquivalent: "")
+        minutes.target = document
+        minutes.isEnabled = !document.readingTurns().isEmpty && !Credential.offline && !document.meetingMinutesBusy
+        return menu
+    }
+
+    @objc func showMeetingExportMenu() {
+        let menu = makeMeetingExportMenu()
         if let button = exportButton { menu.popUp(positioning: nil, at: NSPoint(x: 0, y: button.bounds.height), in: button) }
         else { menu.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil) }
     }
+
+    func cancelMeetingMinutes() {
+        meetingMinutesCredentialJob.cancel();meetingMinutesReferenceJob.cancel();meetingMinutesTask?.cancel();meetingMinutesTask=nil;meetingMinutesBusy=false
+    }
+
+    @objc func exportVisibleMinutes() {displayedDocument.beginMeetingMinutes()}
 
     @objc func beginMeetingMinutes() {
         guard !Credential.offline, currentCacheID != nil, !meetingMinutesBusy, !(workspaceOwner ?? self).meetingDeletionBusy else { return }
@@ -59,7 +68,7 @@ extension Delegate {
 
         let turns = readingTurns()
         let evidence = turns.flatMap { turn in turn.parts.compactMap { _, part -> String? in
-            guard part["final"] as? Bool == true else { return nil }
+            guard MeetingMinutes.evidenceEligible(part) else { return nil }
             let text = (part["text"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             guard !text.isEmpty else { return nil }
             return "[\(TranscriptTimeline.timestamp(part["start"]))] \(readingTurnLabel(turn)): \(text)"
@@ -74,7 +83,7 @@ extension Delegate {
             guard let self, self.currentCacheID == id, self.meetingDocumentGeneration == generation else { return }
             guard case .success(let key?) = result, !key.isEmpty else {
                 self.meetingMinutesBusy = false
-                self.showMinuteError("读取服务凭据失败；请在设置中完成配置")
+                self.showMinuteError("去设置里填写百炼密钥")
                 return
             }
             self.meetingMinutesTask = Task { [weak self] in
@@ -93,13 +102,18 @@ extension Delegate {
         }
     }
 
-    private func saveMeetingMinutes(_ markdown: String) {
-        let panel = NSSavePanel(); panel.title = "保存会议纪要"; panel.nameFieldStringValue = transcriptSuggestedFilename.replacingOccurrences(of: "－转写原文.txt", with: "－会议纪要.md")
-        panel.allowedContentTypes = [UTType(filenameExtension: "md") ?? .plainText]; panel.canCreateDirectories = true
-        panel.message = "会中笔记和参考资料只用于整理，不会附加到导出文件。"
-        guard panel.runModal() == .OK, let url = panel.url else { meetingMinutesBusy = false; diagnostic.stringValue = "纪要已生成，未保存"; return }
-        do { try markdown.write(to: url, atomically: true, encoding: .utf8); meetingMinutesBusy = false; diagnostic.stringValue = "会议纪要已保存" }
-        catch { meetingMinutesBusy = false; showMinuteError("保存纪要失败：\(error.localizedDescription)") }
+    func saveMeetingMinutes(_ markdown: String) {
+        let url: URL?
+        if let provider=savePanelURLProvider {url=provider()}
+        else {
+            let panel = NSSavePanel(); panel.title = "保存会议纪要"; panel.nameFieldStringValue = transcriptSuggestedFilename.replacingOccurrences(of: "－转写原文.txt", with: "－会议纪要.md")
+            panel.allowedContentTypes = [UTType(filenameExtension: "md") ?? .plainText]; panel.canCreateDirectories = true
+            panel.message = "会中笔记和参考资料只用于整理，不会附加到导出文件。"
+            url = panel.runModal() == .OK ? panel.url:nil
+        }
+        guard let url else {meetingMinutesBusy=false;diagnostic.stringValue="纪要已生成，未保存";return}
+        do {try markdown.write(to:url,atomically:true,encoding:.utf8);meetingMinutesBusy=false;diagnostic.stringValue="会议纪要已保存"}
+        catch {meetingMinutesBusy=false;showMinuteError("保存纪要失败：\(error.localizedDescription)")}
     }
 
     private func showMinuteError(_ text: String) {

@@ -1,64 +1,129 @@
-"""Read-only candidates from explicitly saved local transcription terms."""
+"""Read-only spelling guides from configured `## 转写词表` owners."""
 from __future__ import annotations
-import argparse, hashlib, importlib.util, json, re, signal, sys, unicodedata
+import json, os, sys, time, unicodedata
 from pathlib import Path
+from runtime_config import connectors
 sys.dont_write_bytecode = True
-TERM_TABLE = Path(__file__).resolve().parent/'term_table.py'
-MAX_SELECTED = 300
+HEADING = '## 转写词表'
+SEP, ITEM_SEP = '｜', '、'
+MAX_ROWS = 400
+SKIP_PARTS = {'_archive', 'node_modules', '.runtime', '.git', '__pycache__', '.venv', 'venv'}
+_COMPILED = [0.0, None, None]
 
-def valid_term(word):
-    if not isinstance(word,str) or word != word.strip() or not word or len(word)>128:
+class TermTableError(ValueError):
+    pass
+
+
+class Row:
+    def __init__(self, term: str, aliases: list[str] | None = None, misheard: list[str] | None = None):
+        self.term, self.aliases, self.misheard = term, list(aliases or []), list(misheard or [])
+
+    def words(self) -> list[str]:
+        return [self.term, *self.aliases]
+
+    def render(self) -> str:
+        line = f"- {self.term}"
+        if self.aliases or self.misheard:
+            line += SEP + ITEM_SEP.join(self.aliases)
+        if self.misheard:
+            line += SEP + ITEM_SEP.join(self.misheard)
+        return line
+
+    def as_dict(self) -> dict:
+        return {"term": self.term, "aliases": self.aliases, "misheard": self.misheard}
+
+
+def valid_word(word: str) -> bool:
+    if not isinstance(word, str) or not word or word != word.strip() or len(word) > 64:
         return False
-    if any(unicodedata.category(c).startswith('C') for c in word):return False
-    return len(word)<=15 if not word.isascii() else len(word.split())<=7
+    if any(c in word for c in (SEP, ITEM_SEP, "|", "\n", "[", "]", "`", "*")):
+        return False
+    if any(unicodedata.category(c).startswith("C") for c in word):
+        return False
+    return len(word) <= 20 if not word.isascii() else len(word.split()) <= 7
 
-def validate_vocabulary(value):
-    if not isinstance(value,dict) or len(value)>MAX_SELECTED:raise ValueError('asr_terms_invalid')
-    if any(not valid_term(k) or type(v) is not int or not 1<=v<=5 for k,v in value.items()):raise ValueError('asr_terms_invalid')
-    if len(json.dumps(value,ensure_ascii=False).encode())>24576:raise ValueError('asr_terms_too_large')
-    return dict(sorted(value.items()))
 
-def request_vocabulary(request):
-    value=request.get('asr_vocabulary')
-    if value is None:return {}
-    if request.get('asr_terms_confirmed') is not True:raise ValueError('asr_terms_not_confirmed')
-    return validate_vocabulary(value)
+def _items(value: str) -> list[str]:
+    return [item.strip() for item in value.split(ITEM_SEP) if item.strip()]
 
-_TABLES={};_COMPILED=[0.0,None]
 
-def term_table(module_path=TERM_TABLE):
-    if module_path not in _TABLES:
-        spec=importlib.util.spec_from_file_location('_zaichang_term_table',module_path)
-        module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module);_TABLES[module_path]=module
-    return _TABLES[module_path]
+def _section_bounds(lines: list[str]) -> tuple[int, int] | None:
+    starts = [i for i, line in enumerate(lines) if line.strip() == HEADING]
+    if len(starts) > 1:
+        raise TermTableError("duplicate_term_section")
+    if not starts:
+        return None
+    end = next((i for i in range(starts[0] + 1, len(lines)) if lines[i].startswith("#") and not lines[i].startswith("###")), len(lines))
+    return starts[0], end
+
+
+def parse(text: str) -> list[Row]:
+    """Rows in file order. Invalid rows raise so that a broken owner is visible."""
+    lines = text.splitlines()
+    bounds = _section_bounds(lines)
+    if bounds is None:
+        return []
+    rows: list[Row] = []
+    seen: dict[str, Row] = {}
+    for number, line in enumerate(lines[bounds[0] + 1:bounds[1]], bounds[0] + 2):
+        if not line.startswith("- "):
+            continue
+        parts = line[2:].split(SEP)
+        if len(parts) > 3:
+            raise TermTableError(f"row_shape:{number}")
+        term = parts[0].strip()
+        aliases = _items(parts[1]) if len(parts) > 1 else []
+        misheard = _items(parts[2]) if len(parts) > 2 else []
+        if not all(valid_word(w) for w in [term, *aliases, *misheard]):
+            raise TermTableError(f"invalid_word:{number}")
+        key = term.casefold()
+        if key in seen:  # merge accidental duplicates instead of failing reads
+            row = seen[key]
+            row.aliases += [a for a in aliases if a not in row.aliases]
+            row.misheard += [m for m in misheard if m not in row.misheard]
+            continue
+        row = Row(term, aliases, misheard)
+        seen[key] = row
+        rows.append(row)
+    if len(rows) > MAX_ROWS:
+        raise TermTableError("too_many_rows")
+    return rows
+
+
+def read_owner(path: Path) -> list[Row]:
+    return parse(Path(path).read_text(encoding="utf-8"))
+
+
+def _read(path, layer):
+    try:
+        if path.is_symlink() or path.stat().st_size > 1024 * 1024:
+            raise ValueError('invalid_term_owner')
+        rows = [dict(row.as_dict(), layer=layer, path=str(path)) for row in read_owner(path)]
+        return dict(path=str(path), layer=layer, rows=rows, error=None)
+    except (OSError, ValueError) as exc:
+        return dict(path=str(path), layer=layer, rows=[], error=type(exc).__name__)
+
 
 def compiled_owners(max_age=60.0):
-    """All owners, re-walked at most once a minute so learned words appear quickly."""
-    import time
-    if _COMPILED[1] is None or time.monotonic()-_COMPILED[0]>max_age:
-        _COMPILED[:]=[time.monotonic(),term_table().compile_all()]
+    config = connectors()
+    key = json.dumps(config, sort_keys=True)
+    if len(_COMPILED) != 3 or _COMPILED[2] != key or _COMPILED[1] is None or time.monotonic() - _COMPILED[0] > max_age:
+        paths = {}
+        for field, layer in [('general_terms', 'general'), ('people_terms', 'people')]:
+            if config.get(field): paths[Path(config[field])] = layer
+        for root in config.get('project_roots', []):
+            if Path(root).is_symlink(): continue
+            for base, dirs, files in os.walk(root, followlinks=False):
+                dirs[:] = sorted(d for d in dirs if d not in SKIP_PARTS and not d.startswith('.') and 'archive' not in d.casefold() and '归档' not in d and not (Path(base)/d).is_symlink())
+                if len(Path(base).parts) - len(Path(root).parts) >= 5: dirs[:] = []
+                if Path(base).name == '知识库' and (Path(base).parent/'实体与术语.md').is_file(): continue
+                if '实体与术语.md' in files:
+                    paths.setdefault(Path(base)/'实体与术语.md', 'project')
+        _COMPILED[:] = [time.monotonic(), [_read(path, layer) for path, layer in paths.items()], key]
     return _COMPILED[1]
 
-def candidates(module_path=TERM_TABLE):
-    table=term_table(module_path)
-    owners=table.compile_all()
-    if len(owners)>512:raise ValueError('term_source_limit')
-    collected={};source_hashes={}
-    for owner in owners:
-        path=Path(owner['path'])
-        if owner['error']:raise ValueError('term_table_invalid')
-        label={'general':'通用','people':'人物'}.get(owner['layer']) or path.parent.name
-        source_hashes[label]=hashlib.sha256(path.read_bytes()).hexdigest()
-        for row in owner['rows']:
-            for word in [row['term'],*row['aliases']]:
-                if valid_term(word):collected.setdefault(word,set()).add(label)
-    if len(collected)>2048:raise ValueError('term_candidate_limit')
-    rows=[dict(word=word,sources=sorted(labels)[:8]) for word,labels in sorted(collected.items(),key=lambda pair:pair[0].casefold())]
-    digest=hashlib.sha256(json.dumps(source_hashes,sort_keys=True).encode()).hexdigest()
-    return dict(schema=1,status='ok',requires_selection=True,source_digest=digest,source_count=len(source_hashes),candidates=rows)
-
 PROJECT_MIN_SCORE=3.0
-VOCABULARY_LIMIT=300
+TERM_LIMIT=300
 
 def _searchable(word):
     # Short Latin acronyms (AE, GE, TA) and single characters match too much ordinary speech.
@@ -92,8 +157,8 @@ def detect_projects(text,owners=None,title=''):
     scores=project_scores(text+('\n'+title)*3 if title else text,owners)
     return [Path(path).parent for score,path in scores if score>=PROJECT_MIN_SCORE]
 
-def meeting_text(cache_dir,limit=400000):
-    """Final segment text already on disk for this meeting; nothing is sent anywhere."""
+def meeting_segments(cache_dir):
+    """Latest finalized segments, respecting provider replay removals."""
     from audio_sources import transcript_tracks
     latest={}
     for track in transcript_tracks(Path(cache_dir)):
@@ -102,9 +167,14 @@ def meeting_text(cache_dir,limit=400000):
         for line in path.read_text(encoding='utf-8',errors='replace').splitlines():
             try:event=json.loads(line)
             except ValueError:continue
-            if isinstance(event,dict) and event.get('type')=='segment' and isinstance(event.get('text'),str):
+            if isinstance(event,dict) and event.get('type')=='asr_replay':
+                for key in event.get('discard_segment_ids',[]):latest.pop((track,key),None)
+            if isinstance(event,dict) and event.get('type')=='segment' and event.get('final') is True and isinstance(event.get('text'),str):
                 latest[(track,event.get('segment_id'))]=event['text']
-    return ''.join(latest.values())[-limit:]
+    return latest
+
+def meeting_text(cache_dir,limit=400000):
+    return ''.join(meeting_segments(cache_dir).values())[-limit:]
 
 def meeting_title(cache_dir):
     path=Path(cache_dir)/'display-info.json'
@@ -116,40 +186,34 @@ def meeting_title(cache_dir):
 def meeting_project(cache_dir):
     return detect_project(meeting_text(cache_dir),title=meeting_title(cache_dir))
 
-def merged_vocabulary(manual,project_dir=None,saved=None):
-    """Explicit picks first (they keep their weight), then the standing automatic words for this
-    meeting, then words saved by an earlier part of the same meeting."""
-    words=dict(manual or {})
-    for source in (auto_vocabulary(project_dir),saved or {}):
-        for word,weight in source.items():
-            if len(words)>=VOCABULARY_LIMIT:break
-            words.setdefault(word,weight)
-    return validate_vocabulary(words)
-
 def project_rows(project_dir=None):
     """Rows for one meeting in priority order: project, shared people, general."""
-    rows=term_table().for_project(project_dir)
-    order={'project':0,'people':1,'general':2}
-    return sorted(rows,key=lambda row:order[row['layer']])
+    owners = compiled_owners()
+    chosen = [owner for owner in owners if owner['layer'] != 'project']
+    if project_dir is not None:
+        directory = Path(project_dir).resolve()
+        candidates = [o for o in owners if o['layer'] == 'project' and directory.is_relative_to(Path(o['path']).parent.resolve())]
+        if candidates:
+            chosen.append(max(candidates, key=lambda o: len(Path(o['path']).parts)))
+    order = {'project': 0, 'people': 1, 'general': 2}
+    return sorted([row for owner in chosen for row in owner['rows']], key=lambda row: order[row['layer']])
 
-def auto_vocabulary(project_dir=None,limit=VOCABULARY_LIMIT):
-    """Use only accepted spellings and spoken aliases; known errors are never submitted as hotwords."""
-    weight={'project':4,'people':3,'general':2};words={}
-    for row in project_rows(project_dir):
-        for word in [row['term'],*row['aliases']]:
-            if valid_term(word) and word not in words and len(words)<limit:words[word]=weight[row['layer']]
-    return validate_vocabulary(words)
+def meeting_projects(cache_dir,text=None):
+    """Detect from this meeting's text and title; no derived term snapshot."""
+    return detect_projects(meeting_text(cache_dir) if text is None else text,title=meeting_title(cache_dir))
 
-def cleanup_terms(project_dir=None,limit=VOCABULARY_LIMIT,*,project_dirs=None):
+def cleanup_terms(project_dir=None,limit=TERM_LIMIT,*,project_dirs=None):
     """Structured spelling evidence; ambiguous mishearings are never replacements."""
     rows=[];seen={}
     for directory in project_dirs or [project_dir]:
         for row in project_rows(directory):
+            row=dict(row,misheard=list(row['misheard']) if row['layer']=='project' and directory is not None else [])
             key=row['term'].casefold()
             if key not in seen:
                 merged=dict(row,aliases=list(row['aliases']),misheard=list(row['misheard']))
                 rows.append(merged);seen[key]=merged
             else:
+                if row['layer']=='project' and directory is not None:seen[key]['layer']='project'
                 for field in ('aliases','misheard'):
                     seen[key][field]=list(dict.fromkeys([*seen[key][field],*row[field]]))
     rows.sort(key=lambda row:{'project':0,'people':1,'general':2}[row['layer']])
@@ -168,7 +232,7 @@ def cleanup_terms(project_dir=None,limit=VOCABULARY_LIMIT,*,project_dirs=None):
         result.append(value)
     return result, sorted(conflicts)
 
-def term_guide(project_dir=None,limit=VOCABULARY_LIMIT,*,project_dirs=None):
+def term_guide(project_dir=None,limit=TERM_LIMIT,*,project_dirs=None):
     """Prompt lines for the pause cleanup: standard spelling, aliases and known misrecognitions."""
     rows,conflicts=cleanup_terms(project_dir,limit,project_dirs=project_dirs)
     lines=[]
@@ -181,16 +245,3 @@ def term_guide(project_dir=None,limit=VOCABULARY_LIMIT,*,project_dirs=None):
     for word in sorted(conflicts):
         lines.append('待核：'+word+' 存在词表冲突，保留原写法，不自动纠正。')
     return lines
-
-def main():
-    argparse.ArgumentParser(description=__doc__).parse_args()
-    def timeout(*_):raise TimeoutError('term_source_timeout')
-    signal.signal(signal.SIGALRM,timeout);signal.setitimer(signal.ITIMER_REAL,2.5)
-    try:
-        value=candidates();raw=json.dumps(value,ensure_ascii=False)
-        if len(raw.encode())>256*1024:raise ValueError('term_output_limit')
-        print(raw);return 0
-    except Exception:
-        print(json.dumps(dict(schema=1,status='unavailable',requires_selection=True,candidates=[])));return 1
-    finally:signal.setitimer(signal.ITIMER_REAL,0)
-if __name__=='__main__':raise SystemExit(main())

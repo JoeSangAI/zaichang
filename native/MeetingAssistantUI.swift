@@ -6,9 +6,7 @@ import Darwin
 // Prepared only. No Keychain API is called unless the build is explicitly authorized.
 enum Credential {
     static var offline:Bool {(Bundle.main.object(forInfoDictionaryKey:"OfflineOnly") as? Bool ?? false) || (CommandLine.arguments.contains("--speaker-ui-self-test") || CommandLine.arguments.contains("--recovery-ui-self-test") || CommandLine.arguments.contains("--cache-async-self-test") || CommandLine.arguments.contains("--speaker-refinement-self-test"))}
-    // Stable standalone Keychain namespace keeps credentials from prior
-    // standalone builds available without reading Joe's private edition key.
-    static let service="com.joesang.zaichang.standalone.bailian"
+    static var service:String {RuntimeConfiguration.bailianService}
     static func existenceStatus() -> OSStatus {
         if offline {return errSecItemNotFound}
         let q:[String:Any]=[kSecClass as String:kSecClassGenericPassword,kSecAttrService as String:service,
@@ -66,8 +64,7 @@ final class ImmediateButton:NSButton {
 }
 final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextFieldDelegate,NSToolbarDelegate,NSTextViewDelegate,NSTableViewDelegate,NSTableViewDataSource,NSSearchFieldDelegate {
     var sidebar:NSView!;var sidebarWidth:NSLayoutConstraint!;var sidebarManualVisible:Bool?
-    var sidebarDivider:MeetingSidebarDivider?;var preferredSidebarWidth:CGFloat=224;var sidebarPreferencesOverride:UserDefaults?
-    var pendingASRTerms:[String:Int]=[:];var pendingASRTermsDecision=false;var activeASRTerms:[String:Int]=[:];var startingASRTerms:[String:Int]?;var pendingASRTermDigest:String?;var asrTermsButton:NSButton?;var asrTermProjectionFixture:ASRTermProjection?
+    var sidebarDivider:MeetingSidebarDivider?;var preferredSidebarWidth:CGFloat=200;var sidebarPreferencesOverride:UserDefaults?
     var meetingDeletionBusy=false;var deletingCacheID:String?;var deletionConfirmationOverride:((CachedMeeting)->Bool)?
     var libraryManagement:MeetingLibraryManagement?
     var feedbackExpiresAt=Date.distantPast;var feedbackUndoButton:NSButton?;var feedbackAllowsNameUndo=false
@@ -79,7 +76,6 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
     let libraryJob=CacheReadJob();let libraryOpenJob=CacheReadJob();let librarySearchJob=CacheReadJob();let librarySummaryJob=CacheReadJob();var librarySummaryPending:CachedMeeting?;var librarySummaryGeneration=0;var librarySummaryLoaded:Set<String>=[];var libraryFilterWork:DispatchWorkItem?;var pendingLibraryOpen:CachedMeeting?;var libraryReloadPending=false;var librarySelectRecentPending=false
     var liveReturn:NSButton!;var timelineToggle:NSButton!;var historyLiveButton:NSButton!;var showsSpeakerRanges=false
     var speakerReviewButton:NSButton?;var voiceCandidateButton:NSButton?;var speakerReviewWindow:NSWindow?;var libraryParticipants:[String:[String]]=[:]
-    lazy var translationService=MeetingTranslationService();var translationSwitch:NSSwitch?
     let autoTitle=MeetingAutoTitle();var titleProvider:MeetingTitleProvider?;var titleTextAllowed=false;var titleTask:Task<Void,Never>?;var titleRevision=0
     var finalTitleTasks:[String:Task<Void,Never>]=[:]
     var isHistoryReader=false;weak var workspaceOwner:Delegate?;var historyReader:Delegate?;var historyReaderShell:NSWindow?
@@ -92,7 +88,9 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
     var pending=Data();var buffer=Data();let readLock=NSLock();var drainScheduled=false;var transcriptRenderScheduled=false;var transcriptRenderPending=false;var lastTranscriptRender=Date.distantPast;var transcriptProjectionComputations=0;var spokenRowsCache:[String:(revision:Int,correctionRevision:Int,rows:[(String,[String:Any])])]=[:]
     var incrementalTranscript=IncrementalTranscript();var dirtyTranscriptParents:Set<String>=[];var dirtyTranscriptQueue:[String]=[];var dirtyTranscriptQueueIndex=0;var fullRefreshBlocksByParent:[String:[TranscriptRenderedBlock]]=[:];var fullRefreshGeneration=0;var indexedCorrectionRevision=0;var fullRefreshAtomsReady=false;var fullRefreshBuildInFlight=false;var nonFinalTranscriptParents=Set<String>();var fullTranscriptRefreshPending=false
     var transcriptReadingRestoreRevision=0;var pendingTranscriptReadingPosition:TranscriptReadingPosition?;var pendingTranscriptSelection:NSRange?
-    var timeline=TranscriptTimeline();var segments:[String:[String:Any]] {get {timeline.records} set {timeline.records=newValue;if newValue.isEmpty {fullRefreshGeneration &+= 1;indexedCorrectionRevision=naming.correctionRevision;fullRefreshAtomsReady=false;fullRefreshBuildInFlight=false;timeline.discardedIDs=[];spokenRowsCache=[:];dirtyTranscriptParents=[];dirtyTranscriptQueue=[];dirtyTranscriptQueueIndex=0;fullRefreshBlocksByParent=[:];nonFinalTranscriptParents=[];observedTranscriptTracks=[];observedTranscriptApplications=[];fullTranscriptRefreshPending=false;if let storage=output?.textStorage {incrementalTranscript.reset(storage:storage)}}}};var sequence:[String] {get {timeline.orderedIDs} set {timeline.arrivalOrder=newValue}};var expandedParents:[String:Set<String>]=[:];var transcriptCapacity=TranscriptCapacity();var showWholeTranscript=true;var transcriptLimitHit=false;var processingAudio=false;var asrNetworkStates:[String:String]=[:];var currentCacheID:String? {didSet {if oldValue != currentCacheID {notesPausedRelative=nil;meetingMinutesCredentialJob.cancel();meetingMinutesReferenceJob.cancel();meetingMinutesTask?.cancel();meetingMinutesTask=nil;meetingMinutesBusy=false;translationService.bind(cacheID:currentCacheID);translationSwitch?.state=translationService.enabled ? .on:.off};notesController?.bind(currentCacheID)}};var cachedTranscriptionComplete=false;var observedTranscriptTracks=Set<String>();var observedTranscriptApplications=Set<String>()
+    var timeline=TranscriptTimeline();var segments:[String:[String:Any]] {get {timeline.records} set {timeline.records=newValue;if newValue.isEmpty {fullRefreshGeneration &+= 1;indexedCorrectionRevision=naming.correctionRevision;fullRefreshAtomsReady=false;fullRefreshBuildInFlight=false;timeline.discardedIDs=[];spokenRowsCache=[:];dirtyTranscriptParents=[];dirtyTranscriptQueue=[];dirtyTranscriptQueueIndex=0;fullRefreshBlocksByParent=[:];nonFinalTranscriptParents=[];observedTranscriptTracks=[];observedTranscriptApplications=[];fullTranscriptRefreshPending=false;if let storage=output?.textStorage {incrementalTranscript.reset(storage:storage)}}}};var sequence:[String] {get {timeline.orderedIDs} set {timeline.arrivalOrder=newValue}};var expandedParents:[String:Set<String>]=[:];var transcriptCapacity=TranscriptCapacity();var showWholeTranscript=true;var transcriptLimitHit=false;var processingAudio=false;var asrNetworkStates:[String:String]=[:];var currentCacheID:String? {didSet {if oldValue != currentCacheID {notesPausedRelative=nil;cancelMeetingMinutes();translationCredentialJob.cancel();translationService.bind(cacheID:currentCacheID,root:recoveryBase());translationSwitch?.state=translationService.enabled ? .on:.off};notesController?.bind(currentCacheID)}};var cachedTranscriptionComplete=false;var observedTranscriptTracks=Set<String>();var observedTranscriptApplications=Set<String>()
+    lazy var translationService=MeetingTranslationService();var translationSwitch:NSSwitch?;let translationCredentialJob=CacheReadJob();var translationStatusLabel:NSTextField?
+    var meetingMinutesBusy=false;var meetingMinutesTask:Task<Void,Never>?;let meetingMinutesCredentialJob=CacheReadJob();let meetingMinutesReferenceJob=CacheReadJob()
     var availableCloudSeconds=0;let budgetReadJob=CacheReadJob();let credentialReadJob=CacheReadJob()
     let cacheReadJob=CacheReadJob();let cacheExportJob=CacheReadJob();let recordDetailsJob=CacheReadJob();let cacheWriteQueue=DispatchQueue(label:"meeting.cache.writes");
     var localOnlyMode=false;var modeUserSelected=false;var recordingModePicker:NSPopUpButton?;var exportButton:NSButton?;var startupWorkerFixture:(([String:Any])->Void)?;var startupCredentialFixture:(()throws->String?)?
@@ -111,7 +109,7 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
     // Times of automatic resumes after a microphone change; bounds a flapping device.
     var deviceAutoResumeTimes:[Double]=[]
     var replacing=false;var editing=false;var fixture:NSPopUpButton!
-    let fixtureBoard=NSPasteboard(name:NSPasteboard.Name("com.zaichang.app.validation-only"))
+    let fixtureBoard=NSPasteboard(name:NSPasteboard.Name("com.joesang.meeting-assistant.validation-only"))
     let fixtures=["fake",String(repeating:"x",count:16),String(repeating:"x",count:32),String(repeating:"x",count:64),String(repeating:"x",count:128),"  fake_key  \n","fake-_/+.=:()", "fake\ninside"]
     var sourceBundle="*system*";var sourceName="电脑声音";var sessionSource="电脑声音与麦克风";var useMic=true;var confirmedScope=false
     var people:[String:String]=[:];var identityArchive=IdentityArchive();var balanceDraft=BalanceConnectionDraft()
@@ -125,8 +123,7 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
     var workerInput:FileHandle?;var activeSession:String?;var identitySnapshot:[String:Any]?;var humanIdentityAuthorized=false;var identityBusy=false;var profileStore:ProfileArchiveStore?;var balanceState=BalanceSnapshotState();var balanceCredentials:BalanceCredentials?;var balancePermission=false;var lastWorkerManual:[String:String]=[:]
     var pausedTailStates:[String:String]=[:];var pausedTailRevision:Int?;var lastRecordingControlRevision = -1
     var recordingControlTimeout:DispatchWorkItem?;var recordingControlTimeoutSeconds=3.0
-    var meetingDocumentGeneration=0;var newMeetingRequested=false;var newMeetingSaveInFlight=false
-    var meetingMinutesBusy=false;var meetingMinutesTask:Task<Void,Never>?;let meetingMinutesCredentialJob=CacheReadJob();let meetingMinutesReferenceJob=CacheReadJob()
+    var meetingDocumentGeneration=0 {didSet {if oldValue != meetingDocumentGeneration {cancelMeetingMinutes()}}};var newMeetingRequested=false;var newMeetingSaveInFlight=false
     var recordingControlInFlight:String?
     var pendingAutomaticTailRecovery:(reason:String,cacheID:String,session:String)?;var automaticTailRecoveryAttempted=Set<String>()
     var mockRecordingControlHandler:(([String:Any])->Void)?;var mockStopHandler:(()->Void)?;var savePanelURLProvider:(()->URL?)?
@@ -164,10 +161,9 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
     var naming=SessionNames()
     // Transcript range lookup is backed by the treap index.
     var textRanges:[String:NSRange] {incrementalTranscript.allTurnRanges()}
-    var root:String {RuntimeConfiguration.adapterRoot().path}
+    var root:String {if Bundle.main.object(forInfoDictionaryKey:"SelfContainedRuntime") as? Bool==true,let resources=Bundle.main.resourceURL {return resources.appendingPathComponent("Runtime").path};return Bundle.main.object(forInfoDictionaryKey:"AdapterRoot") as? String ?? ""}
     var captureExecutableURL:URL {if offlineQA {return Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/会议采集离线QA.app/Contents/MacOS/MeetingCapture")};let revision=Bundle.main.object(forInfoDictionaryKey:"CandidateRevision") as? String;let build=revision=="nightly" ? "nightly-build":revision=="repair" ? "candidate-repair-build":"ui-next-build";return URL(fileURLWithPath:root+"/native/"+build+"/"+(build=="ui-next-build" ? "会议采集验证":"会议采集候选")+".app/Contents/MacOS/MeetingCapture")}
     var trialCandidate:Bool {Bundle.main.object(forInfoDictionaryKey:"TrialCandidate") as? Bool ?? false}
-    var trialSettingsCandidate:Bool {trialCandidate && !RuntimeConfiguration.standalone}
     var trialArmed:Bool {Bundle.main.object(forInfoDictionaryKey:"TrialArmed") as? Bool ?? false}
     var authorized:Bool {Bundle.main.object(forInfoDictionaryKey:"KeychainAuthorized") as? Bool ?? false}
     var stored:Bool {mock ? vault.bytes != nil : authorized && Credential.existenceStatus()==errSecSuccess}
@@ -182,6 +178,7 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
         if offlineQA {do {try configureOfflineQA()}catch{phase.phase = .failed;phase.error="离线QA隔离配置错误";updateUI();return}}
         // No recording or secret retrieval on launch.
         layoutWorkspace();updateUI();configureVoiceprintRecommendations();configureMeetingContext();reconcileDeletedMeetingProjections()
+        showMissingCredentialHintIfNeeded()
         if previewRenderOnly {return}
         reloadLibrary(selectRecent:true)
         if !mock && Bundle.main.object(forInfoDictionaryKey:"LocalRecordingAllowed") as? Bool != true {refreshCloudBudget()}
@@ -205,7 +202,7 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
         default:spec=("设置","gearshape",#selector(showSettings))
         }
         let item=NSToolbarItem(itemIdentifier:id);item.label=spec.0;item.toolTip=spec.0;item.autovalidates=false
-        let button=ImmediateButton(title:spec.0,target:self,action:spec.2);button.bezelStyle = .texturedRounded;button.image=NSImage(systemSymbolName:spec.1,accessibilityDescription:spec.0);button.imagePosition = .imageOnly;button.title="";button.setAccessibilityLabel(spec.0)
+        let button=ImmediateButton(title:spec.0,target:self,action:spec.2);button.bezelStyle = .inline;button.isBordered=false;button.contentTintColor=MeetingVisualStyle.muted;button.image=NSImage(systemSymbolName:spec.1,accessibilityDescription:spec.0);button.imagePosition = .imageOnly;button.title="";button.setAccessibilityLabel(spec.0)
         item.view=button
         switch id.rawValue {case "history":historyButton=button;case "export":exportButton=button;case "assistant":agentSidebarButton=button;default:break}
         return item
@@ -232,10 +229,9 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
         key=NSSecureTextField();key.delegate=self;key.placeholderString=mock ? "仅输入假密钥" : "粘贴API密钥";key.bezelStyle = .roundedBezel;place(key,24,157,472,30)
         let privacy=label(mock ? "离线预览：请勿输入真实密钥。" : "云端识别由阿里云百炼提供，录音保存在本机。",size:12);privacy.textColor = .secondaryLabelColor;place(privacy,24,126,472,22)
         setupMessage=label("",size:12);setupMessage.textColor = .secondaryLabelColor;place(setupMessage,24,103,472,20)
-        if mock || humanIdentityAuthorized || !trialSettingsCandidate {place(label("更多设置",size:12,weight:.medium),24,78,76,24)}
+        if mock || humanIdentityAuthorized || !trialCandidate {place(label("更多设置",size:12,weight:.medium),24,78,76,24)}
         let peopleButton=ImmediateButton(title:"人物资料…",target:self,action:#selector(manageConsent));peopleButton.bezelStyle = .rounded;peopleButton.isHidden = !mock && !humanIdentityAuthorized;place(peopleButton,112,76,88,28)
-        let balanceButton=ImmediateButton(title:"余额…",target:self,action:#selector(configureBalance));balanceButton.bezelStyle = .rounded;place(balanceButton,208,76,88,28);balanceButton.isHidden=trialSettingsCandidate
-        let terms=ImmediateButton(title:"本场术语…",target:self,action:#selector(chooseASRTerms));terms.bezelStyle = .rounded;asrTermsButton=terms;place(terms,304,76,192,28);updateASRTermStatus()
+        let balanceButton=ImmediateButton(title:"余额…",target:self,action:#selector(configureBalance));balanceButton.bezelStyle = .rounded;place(balanceButton,208,76,88,28);balanceButton.isHidden=trialCandidate
         change=ImmediateButton(title:"更换密钥",target:self,action:#selector(changeKey));change.bezelStyle = .rounded;place(change,24,20,108,28)
         let cancel=ImmediateButton(title:"取消",target:self,action:#selector(dismissSettings));settingsCancel=cancel;cancel.bezelStyle = .rounded;cancel.keyEquivalent="\u{1b}";place(cancel,296,20,84,28)
         save=ImmediateButton(title:"保存密钥",target:self,action:#selector(saveKey));save.bezelStyle = .rounded;save.keyEquivalent="\r";place(save,388,20,108,28)
@@ -248,12 +244,18 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
         guard (child==nil || modelsPrepared),![.connecting,.recording,.stopping].contains(phase.phase) else{return}
         sourceBundle="*system*";sourceName="电脑声音";useMic=true;confirmedScope=false
     }
+    var showsMissingCredentialHint:Bool {diagnostic?.stringValue=="去设置里填写百炼密钥"}
+    func showMissingCredentialHintIfNeeded() {
+        if !stored {
+            diagnostic.stringValue="去设置里填写百炼密钥";diagnostic.isHidden=false
+            if currentCacheID==nil {empty.stringValue=diagnostic.stringValue}
+        }
+    }
     @objc func showSettings() {
         guard (child==nil || modelsPrepared),[.idle,.stopped,.failed,.ended].contains(phase.phase),window.attachedSheet==nil else {return}
-        editing = trialSettingsCandidate ? false : !stored;replacing=false;key.stringValue="";refreshSettings();window.beginSheet(sheet);sheet.makeFirstResponder(editing ? key : save)
+        editing = !stored;replacing=false;key.stringValue="";refreshSettings();window.beginSheet(sheet);sheet.makeFirstResponder(editing ? key : save)
     }
     func refreshSettings() {
-        if trialSettingsCandidate {savedLabel.stringValue="云端转写服务";savedLabel.isHidden=false;keyLabel.isHidden=true;key.isHidden=true;change.isHidden=true;save.title="完成";save.isEnabled=true;setupMessage.stringValue="自动收录麦克风与电脑声音";sheet.layoutIfNeeded();return}
         savedLabel.isHidden=editing || !stored;keyLabel.isHidden = !editing;key.isHidden = !editing;change.isHidden = !stored || editing
         save.title=editing ? "保存密钥" : "完成";save.isEnabled = !editing || CredentialInput(raw:key.stringValue).issue==nil
         setupMessage.stringValue=editing ? "" : "已保存";sheet.layoutIfNeeded()
@@ -276,7 +278,7 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
         do {
             if mock {try vault.save(value.normalized);precondition(vault.bytes==Data(value.normalized.utf8))}
             else {guard authorized else {return};try Credential.save(value.normalized)}
-            key.stringValue="";editing=false;replacing=false;refreshSettings();setupMessage.stringValue="已保存";sheet.makeFirstResponder(save)
+            key.stringValue="";editing=false;replacing=false;refreshSettings();if diagnostic.stringValue=="去设置里填写百炼密钥" {diagnostic.stringValue="密钥已保存";if currentCacheID==nil {empty?.stringValue="开始后，会议文字会出现在这里"}};setupMessage.stringValue="已保存";sheet.makeFirstResponder(save)
         } catch {setupMessage.stringValue=stored ? "没能更换密钥，原密钥仍可用。请重试。" : "没能保存密钥，请重试。"}
     }
     @objc func dismissSettings() {key.stringValue="";window.endSheet(sheet);sheet.orderOut(nil)}
@@ -294,10 +296,9 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
         if currentCacheID != nil {diagnostic.stringValue="本场已保存；请点“新对话”开始另一场";return}
         guard [.idle,.stopped,.failed].contains(phase.phase) else {return}
         prepareAutomaticCapture()
-        if RuntimeConfiguration.standalone && !localOnlyMode && !stored {showSettings();return}
         if Bundle.main.object(forInfoDictionaryKey:"LocalRecordingAllowed") as? Bool==true && (!mock || (Credential.offline && previewRenderOnly && startupWorkerFixture != nil)) {beginRecordingModeFlow();return}
         if !mock && localOnlyMode {beginLocalOnlyFlow();return}
-        if !trialSettingsCandidate && !stored {showSettings();return}
+        if !trialCandidate && !stored {showSettings();return}
         if !mock && remainingSeconds()<=0 {beginLocalOnlyFlow();return}
         if !mock && !["com.tencent.meeting","*microphone*"].contains(sourceBundle) {
             let alert=NSAlert();alert.messageText="开始实时转写？";alert.informativeText=(sourceBundle=="*system*" ? "全部电脑声音包括浏览器、音乐、通知。" : sourceName+"。")+(useMic ? "另收录麦克风。" : "不收录麦克风。")+"音频将上传至云端生成文字，费用按实际用量计算。";alert.addButton(withTitle:"确认并开始");alert.addButton(withTitle:"取消");guard alert.runModal() == .alertFirstButtonReturn else{return};confirmedScope=true
@@ -310,7 +311,7 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
             if offlineQA {beginQAMeetingAsync(done:begin)}else{begin()};return
         }
         let secret:String
-        do {guard let found=try Credential.load(),!found.isEmpty else {phase.phase = .failed;phase.error="无法连接转写服务，请检查服务设置";updateUI();return};secret=found}
+        do {guard let found=try Credential.load(),!found.isEmpty else {phase.phase = .failed;phase.error="去设置里填写百炼密钥";updateUI();return};secret=found}
         catch {phase.phase = .failed;phase.error="无法连接转写服务，请允许访问系统保存的凭据";updateUI();return}
         startWorker(secret)
     }
@@ -367,7 +368,7 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
         guard !credentialReadJob.busy else{phase.phase = .failed;phase.error="请先处理系统服务访问提示，或选择仅录音";updateUI();return}
         sessionLocalOnly=false;localOnlyMode=false
         newRecordingPending=false;phase=UIState();phase.phase = .connecting;phase.error=nil;diagnostic.stringValue="正在连接转写服务";credentialReadJob.onStateChange={ [weak self] in self?.updateUI() };updateUI()
-        credentialReadJob.run(timeout:15,work:{if let fixture=fixture {return try fixture()};return try Credential.load()}){[weak self] result in guard let self=self else{return};switch result {case .success(let secret):guard let secret=secret,!secret.isEmpty else{self.phase.phase = .failed;self.phase.error="无法连接转写服务，请检查服务设置";self.updateUI();return};self.namelessCloudStart(secret);case .failure:self.phase.phase = .failed;self.phase.error="连接未完成，请处理系统访问提示后重试";self.updateUI()}}
+        credentialReadJob.run(timeout:15,work:{if let fixture=fixture {return try fixture()};return try Credential.load()}){[weak self] result in guard let self=self else{return};switch result {case .success(let secret):guard let secret=secret,!secret.isEmpty else{self.phase.phase = .failed;self.phase.error="去设置里填写百炼密钥";self.updateUI();return};self.namelessCloudStart(secret);case .failure:self.phase.phase = .failed;self.phase.error="连接未完成，请处理系统访问提示后重试";self.updateUI()}}
     }
     func namelessCloudStart(_ key:String){
         titleProvider=DashScopeMeetingTitleProvider(apiKey:key);titleTextAllowed=true
@@ -381,7 +382,6 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
         guard child==nil,!credentialReadJob.waiting,!processingAudio,!preparingModels,!([.connecting,.recording,.paused,.stopping].contains(phase.phase)) else{diagnostic.stringValue="正在保存上一场录音，请稍候";return}
         meetingDocumentGeneration &+= 1
         detachSavedCoarseRefinement();speakerRefinementLifecycle.begin(session:nil);speakerRefinementNeedsRetry=false
-        pendingASRTerms=[:];pendingASRTermsDecision=false;activeASRTerms=[:];startingASRTerms=nil;pendingASRTermDigest=nil;updateASRTermStatus()
         (workspaceOwner ?? self).voiceprintService?.cancelHistoricalLearning()
         invalidateAutoTitle();titleProvider=nil;titleTextAllowed=false;speakerReviewWindow?.close();speakerReviewWindow=nil
         // Clear the old live context before changing the visible title. Any UI
@@ -525,15 +525,16 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
         guard job.isCurrent(token) else{return}
         if owner.savedCoarseJobs[cacheID] === job {owner.savedCoarseJobs.removeValue(forKey:cacheID)}
         let coarseWarning=events.first?["coarse_refinement_warning"] as? String
+        let readingNotice=events.first?["reading_projection_notice"] as? String
         if currentCacheID==cacheID,coarseSourceSHA256 != nil {
             coarseProcessingProgress=nil;coarseProgressTimer?.invalidate()
-            coarseProcessingSummary=coarseWarning == nil ? "上一段已整理，可标记发言人":"部分内容已整理，其余可重试；原文保留"
+            coarseProcessingSummary=coarseWarning == nil ? (readingNotice ?? "上一段已整理，可标记发言人"):"部分内容已整理，其余可重试；原文保留"
         }
         if coarseSourceSHA256 != nil {saveCoarseStatus(cacheID:cacheID,session:session,state:coarseWarning == nil ? "complete":"partial")}
         if job !== speakerRefinementJob || currentCacheID != cacheID {
             if let reader=owner.historyReader,reader.currentCacheID==cacheID,reader.activeSession==session {
                 let completionSummary:String? = coarseSourceSHA256 == nil ? nil :
-                    (coarseWarning == nil ? "上一段已整理，可标记发言人":"部分内容已整理，其余可重试；原文保留")
+                    (coarseWarning == nil ? (readingNotice ?? "上一段已整理，可标记发言人"):"部分内容已整理，其余可重试；原文保留")
                 reader.refreshSpeakerRefinementProjection(cacheID:cacheID,session:session,completionSummary:completionSummary)
             }
             owner.reloadLibrary();return
@@ -675,7 +676,7 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
             case "failed","partial":coarseProcessingSummary="部分内容尚未整理，可重试"
             case "running":coarseProcessingSummary="上次整理中断，可重试"
             case "cancelled":coarseProcessingSummary="整理已停止"
-            case "complete" where showsCoarseProjection:coarseProcessingSummary="上一段已整理，可标记发言人"
+            case "complete" where showsCoarseProjection:coarseProcessingSummary=events.first?["reading_projection_notice"] as? String ?? "上一段已整理，可标记发言人"
             default:break
             }
         }
@@ -740,13 +741,10 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
         // already cancelled by the user must not clear that cancellation.
         suppressAutomaticRefinementAfterStop=false
         (workspaceOwner ?? self).stopSpeakerAudioPreview()
-        let overrideRequest=overrideRequest.map{requestWithASRTerms($0)}
-        startingASRTerms=overrideRequest?["asr_vocabulary"] as? [String:Int]
         (workspaceOwner ?? self).voiceprintService?.cancelHistoricalLearning()
         if Credential.offline && previewRenderOnly,let fixture=startupWorkerFixture,let request=overrideRequest {fixture(request);return}
         guard !Credential.offline else{phase.phase = .failed;phase.error="离线入口禁止启动生产工作进程";updateUI();return}
-        guard let python=PythonRuntime.executable() else {phase.phase = .failed;phase.error="请安装 Python 3.12 或更高版本后重试";updateUI();return}
-        let proc=Process();let stdin=Pipe();let stdout=Pipe();proc.executableURL=python;proc.arguments=["-u",root+"/gui_worker.py"]
+        let proc=Process();let stdin=Pipe();let stdout=Pipe();proc.executableURL=URL(fileURLWithPath:"/usr/local/bin/python3");proc.arguments=["-u",root+"/gui_worker.py"]
         if Bundle.main.object(forInfoDictionaryKey:"CandidateRevision") as? String=="repair" {proc.arguments!.append("--candidate-repair")}
         if Bundle.main.object(forInfoDictionaryKey:"CandidateRevision") as? String=="nightly" {proc.arguments!.append("--candidate-nightly")}
         var env=RuntimeConfiguration.childEnvironment();for name in ["DASHSCOPE_API_KEY","ALIYUN_API_KEY","BAILIAN_API_KEY"] {env.removeValue(forKey:name)};env["PYTHONDONTWRITEBYTECODE"]="1";env["MEETING_GUI"]="1";proc.environment=env
@@ -883,7 +881,6 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
 
         let type=event["type"] as? String ?? ""
         let wasRecoveryRun=type=="stopped" && resumeBusy
-        if type=="asr_terms",event["state"] as? String=="rejected" {activeASRTerms=[:];showTransientFeedback("术语未被服务接受，已切换普通转写；原音保留");return}
         if type=="stopped" || type=="error" {recordingControlTimeout?.cancel();recordingControlInFlight=nil}
         if type=="error" {cancelSpeakerRefinement()}
         if type=="audio_levels" {receiveAudioLevels(event);return}
@@ -892,6 +889,7 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
         if type=="recording_paused" || type=="recording_resumed" {
             guard event["session"] as? String == activeSession else{return}
             let action=type=="recording_paused" ? "pause":"resume"
+            let userRequestedPause=recordingControlInFlight=="pause"
             let devicePause=action=="pause" && ["input_device_changed","mic_conversion_backpressure"].contains(event["reason"] as? String ?? "")
             guard [.recording,.paused].contains(phase.phase),recordingControlInFlight==nil || recordingControlInFlight==action || devicePause else{return}
             if let revision=event["control_revision"] as? Int {
@@ -907,7 +905,7 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
             if action=="pause",let tracks=event["draining_tracks"] as? [String] {for track in tracks where isTranscriptAudioTrack(track) {pausedTailStates[track]="processing"}}
             if let elapsed=event["recording_elapsed_seconds"] as? Double,elapsed.isFinite,elapsed>=0 {phase.elapsed=max(phase.elapsed,elapsed)}
             diagnostic.stringValue=action=="pause" ? (sessionLocalOnly ? "录音已暂停并保存；再次点录音继续同一场":"录音已暂停，正在补齐已录内容的转写；再次点录音继续同一场"):"已继续录音"
-            if action=="pause",event["reason"] as? String=="input_device_changed" {
+            if action=="pause",event["reason"] as? String=="input_device_changed",!userRequestedPause {
                 // Switching to headphones changes the default microphone. Resume on the
                 // new device automatically; keep paused only if the device keeps flapping.
                 let now=ProcessInfo.processInfo.systemUptime
@@ -929,13 +927,13 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
                 }
             }
             if action=="pause",event["reason"] as? String=="mic_conversion_backpressure" {diagnostic.stringValue="声音处理暂时跟不上，已暂停；有短暂缺口，已录内容保留。点继续接上本场录音"}
-            if action=="pause" && event["reason"] as? String != "input_device_changed" {
+            if action=="pause" && (event["reason"] as? String != "input_device_changed" || userRequestedPause) {
                 // Reuse the existing tail completion event; no separate timer
                 // or pre-tail title request while the transcript is draining.
                 if !pausedTailStates.values.contains("processing") {scheduleAutoTitle()}
                 reloadLibrary()
-                scheduleSavedVoiceRecognition()
-                if !Credential.offline || coarseRefinementExecutorOverride != nil {
+                if Credential.offline && coarseRefinementExecutorOverride==nil {scheduleSavedVoiceRecognition()}
+                if !pausedTailStates.values.contains("processing") && (!Credential.offline || coarseRefinementExecutorOverride != nil) {
                     scheduleCoarseRefinement(trigger:"pause",allowUnsealed:true,cutoff:phase.elapsed)
                 }
             }
@@ -951,7 +949,7 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
                 // Title freshness must not depend on which refinement backend
                 // runs, or whether refinement succeeds.
                 scheduleAutoTitle()
-                scheduleSavedVoiceRecognition()
+                if Credential.offline && coarseRefinementExecutorOverride==nil {scheduleSavedVoiceRecognition()}
                 if !speakerRefinementCheckMode {diagnostic.stringValue=pausedTailStates.values.contains("pending") ? "录音已暂停；部分转写未完成，原音保留，可重试转写":"录音已暂停；已录内容已自动转写完成"}
                 if (!Credential.offline || coarseRefinementExecutorOverride != nil) {
                     scheduleCoarseRefinement(trigger:"pause_tail",allowUnsealed:true,cutoff:phase.elapsed)
@@ -1076,16 +1074,14 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
             for (key,row) in visibleRows where key != id {naming.register(segment:key,item:row)}
             if !deferPresentation,naming.registeredSpeakerCount != previousSpeakerCount {persistSessionNames()}
             observeVoiceprint(event);observeSemanticName(event)
-            // A saved per-meeting opt-in also covers already-recorded turns
-            // when that meeting is reopened; translated rows remain hash-bound.
-            translationService.accept(segmentID:id,source:event["text"] as? String ?? "",final:event["final"] as? Bool==true)
+            if MeetingTranslationPolicy.eligible(event) {for (partID, part) in visibleRows {translationService.accept(segmentID:partID,item:part)}}
             markTranscriptParentDirty(id,preparedRows:visibleRows)
             if event["final"] as? Bool == true,phase.phase == .recording {scheduleAutoTitle()}
             if previewRenderOnly && dirtyTranscriptQueue.count<=24 {renderText()}
         } else if type=="meter" {
             phase.elapsed=max(phase.elapsed,event["elapsed_seconds"] as? Double ?? 0)
             if let text=(event["combined_estimated_yuan"] ?? event["estimated_yuan"]) as? String,let amount=Double(text),amount.isFinite,amount>=0 {phase.estimated=amount}
-        } else if type=="started" {let resuming=event["resume"] as? Bool==true,appending=event["append_capture"] as? Bool==true;pendingAutomaticTailRecovery=nil;if resuming {cancelSpeakerRefinementForResume()} else if !appending {detachSavedCoarseRefinement()};if resuming || appending {invalidateMeetingArchivePreparationOnResume()};speakerRefinementNeedsRetry=false;commitASRTermsOnStarted();resetVoiceprintRecommendations(session:event["session"] as? String);if !resuming && !appending {absoluteTime=nil};if let clock=MeetingAbsoluteTime(event["absolute_clock"]) {absoluteTime=clock};sourceActivity=SourceActivity();latestAudioLevels=[:];latestAudioLevelAt=0;observedAppSources=[:];sourceCaptureGapLabels=[];unavailableAppSourceIDs=[];echoStatusLabel="";asrNetworkStates=[:];sessionLocalOnly=event["mode"] as? String=="local_only";activeSession=event["session"] as? String;currentCacheID=event["cache_id"] as? String;speakerRefinementLifecycle.begin(session:activeSession);cachedTranscriptionComplete=false;if phase.phase != .stopping {phase.phase = event["capture"] as? Bool==false && !(Credential.offline && event["mock"] as? Bool==true) ? .stopping:(event["audio_frames_received"] as? Bool==false ? .connecting:.recording)};if meetingTitle=="新会议" {meetingTitle=MeetingLibraryInfo.defaultTitle(Date())};beginMeetingContext();if !previewRenderOnly {reloadLibrary()}}
+        } else if type=="started" {let resuming=event["resume"] as? Bool==true,appending=event["append_capture"] as? Bool==true;pendingAutomaticTailRecovery=nil;if resuming {cancelSpeakerRefinementForResume()} else if !appending {detachSavedCoarseRefinement()};if resuming || appending {invalidateMeetingArchivePreparationOnResume()};speakerRefinementNeedsRetry=false;resetVoiceprintRecommendations(session:event["session"] as? String);if !resuming && !appending {absoluteTime=nil};if let clock=MeetingAbsoluteTime(event["absolute_clock"]) {absoluteTime=clock};sourceActivity=SourceActivity();latestAudioLevels=[:];latestAudioLevelAt=0;observedAppSources=[:];sourceCaptureGapLabels=[];unavailableAppSourceIDs=[];echoStatusLabel="";asrNetworkStates=[:];sessionLocalOnly=event["mode"] as? String=="local_only";activeSession=event["session"] as? String;currentCacheID=event["cache_id"] as? String;speakerRefinementLifecycle.begin(session:activeSession);cachedTranscriptionComplete=false;if phase.phase != .stopping {phase.phase = event["capture"] as? Bool==false && !(Credential.offline && event["mock"] as? Bool==true) ? .stopping:(event["audio_frames_received"] as? Bool==false ? .connecting:.recording)};if meetingTitle=="新会议" {meetingTitle=MeetingLibraryInfo.defaultTitle(Date())};beginMeetingContext();if !previewRenderOnly {reloadLibrary()}}
         else if type=="capture_stopped" {
             phase.phase = .stopping;phase.elapsed=max(phase.elapsed,event["recording_elapsed_seconds"] as? Double ?? 0)
             let reason=event["reason"] as? String ?? "unknown"
@@ -1148,7 +1144,7 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
         if reason=="startup_timeout" {return "连接超时，请重试"}
         if reason=="startup_interrupted" {return "已取消"}
         if reason.contains("permission") {return "无法录音，请在系统设置中允许访问麦克风和电脑声音"}
-        if reason.contains("InvalidApiKey") || reason.contains("401") {return trialCandidate ? "无法连接转写服务，请检查服务设置" : "密钥无效，请在设置中更换"}
+        if reason.contains("InvalidApiKey") || reason.contains("401") {return trialCandidate ? "去设置里填写百炼密钥" : "密钥无效，请在设置中更换"}
         if reason.contains("Quota") {return "转写服务余额不足，请检查账户"}
         if reason.hasPrefix("speaker_model") {return "发言人识别出错，记录已停止；已有文字已保留"}
         if reason=="processing_cancelled" || reason=="processing_timeout" {return "转写未完成，可导出当前文字"}
@@ -1376,12 +1372,12 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
         // Keep the reading surface quiet. Evidence and per-fragment correction
         // remain available on the header/underlined text and in original export.
         let unresolved=["待确认","多人重叠","多人同时发言","句内说话人变化"].contains(originalLabel)
-        let speaker=unresolved ? "发言":originalLabel
+        let speaker=unresolved ? (originalLabel=="待确认" ? "待确认":"多人发言"):originalLabel
         let hint=unresolved ? "":voiceprintHint(turn)
         let text=NSMutableAttributedString(string:"");var partRanges:[String:NSRange]=[:]
         let final=item["final"] as? Bool ?? false
         let review=(item["quality_flags"] as? [String])?.isEmpty==false
-        let state=review ? " · 待核对" : final ? "" : item["stream_closed"] as? Bool==true || ![.connecting,.recording,.stopping].contains(phase.phase) ? " · 未完成" : " · 正在转写"
+        let state=final ? "" : item["stream_closed"] as? Bool==true || ![.connecting,.recording,.stopping].contains(phase.phase) ? " · 未完成" : " · 正在转写"
         // Header: avatar, name and one time. The source and the relative time
         // stay in the tooltip; consecutive turns of one speaker collapse it.
         let start=TranscriptTimeline.start(item)
@@ -1389,40 +1385,43 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
         let absolute=absoluteTime?.display(start)
         let colorKey=unresolved ? nil:originalLabel
         let tint=MeetingVisualStyle.speakerColor(colorKey)
-        let header=NSMutableParagraphStyle();header.paragraphSpacingBefore=18;header.paragraphSpacing=4;header.lineBreakMode = .byCharWrapping
-        header.minimumLineHeight=24
+        let header=NSMutableParagraphStyle();header.paragraphSpacingBefore=14;header.paragraphSpacing=3;header.lineBreakMode = .byCharWrapping
+        header.minimumLineHeight=22
         let tooltip=readingTurnLabel(turn)+(turn.uncertain ? " · 部分发言归属未定":"")+" · "+audioSourceLabel(item)+" · "+relative+(absolute.map{" · "+$0} ?? "")
         let headerStart=text.length
         let avatar=NSTextAttachment();avatar.image=MeetingVisualStyle.speakerAvatar(unresolved ? "?":MeetingVisualStyle.speakerInitial(speaker),color:tint)
-        avatar.bounds=NSRect(x:0,y:-6,width:22,height:22)
+        avatar.bounds=NSRect(x:0,y:-4,width:18,height:18)
         text.append(NSAttributedString(attachment:avatar))
         let base:[NSAttributedString.Key:Any]=[.paragraphStyle:header,.toolTip:tooltip]
-        text.append(NSAttributedString(string:"  "+speaker,attributes:base.merging([.font:NSFont.systemFont(ofSize:13.5,weight:.semibold),.foregroundColor:unresolved ? MeetingVisualStyle.muted:MeetingVisualStyle.ink]){$1}))
+        text.append(NSAttributedString(string:"  "+speaker,attributes:base.merging([.font:NSFont.systemFont(ofSize:12.5,weight:.medium),.foregroundColor:unresolved ? MeetingVisualStyle.muted:MeetingVisualStyle.ink]){$1}))
         if !hint.isEmpty {text.append(NSAttributedString(string:hint,attributes:base.merging([.font:NSFont.systemFont(ofSize:12),.foregroundColor:MeetingVisualStyle.muted]){$1}))}
         text.append(NSAttributedString(string:"   "+(absolute ?? relative)+state+"\n",attributes:base.merging([.font:NSFont.monospacedDigitSystemFont(ofSize:12,weight:.regular),.foregroundColor:MeetingVisualStyle.faint]){$1}))
         text.addAttribute(.paragraphStyle,value:header,range:NSRange(location:headerStart,length:text.length-headerStart))
         let continuation=unresolved || turn.uncertain || review ? nil:speaker+"\u{1F}"+audioSourceLabel(item)
         text.addAttribute(.zaichangTurnHeader,value:TranscriptTurnHeader(continuationKey:continuation,start:start,end:(item["end"] as? Double).flatMap{$0.isFinite ? $0:nil} ?? start),range:NSRange(location:headerStart,length:text.length-headerStart))
-        let para=NSMutableParagraphStyle();para.lineSpacing=8;para.paragraphSpacing=8;para.lineBreakMode = .byCharWrapping
-        para.firstLineHeadIndent=32;para.headIndent=32
+        let para=NSMutableParagraphStyle();para.lineSpacing=5;para.paragraphSpacing=6;para.lineBreakMode = .byWordWrapping
+        para.firstLineHeadIndent=30;para.headIndent=30
         var identities=Set<String>()
         for (partID,part) in turn.parts {
             let offset=text.length,body=part["text"] as? String ?? ""
             let identity=readingIdentity(partID,part);if let identity=identity {identities.insert(identity)}
-            var attributes:[NSAttributedString.Key:Any]=[.font:NSFont.systemFont(ofSize:16),.foregroundColor:MeetingVisualStyle.ink,.paragraphStyle:para]
+            var attributes:[NSAttributedString.Key:Any]=[.font:NSFont.systemFont(ofSize:14.5),.foregroundColor:MeetingVisualStyle.ink,.paragraphStyle:para]
             if identity==nil && turn.uncertain {
                 attributes[.link]=partID;attributes[.underlineStyle]=NSUnderlineStyle.single.rawValue|NSUnderlineStyle.patternDot.rawValue
                 attributes[.toolTip]=(part["speaker"] as? [String:Any])?["reason"] as? String=="overlap" ? "这部分有重叠发言；点击修改发言人":"这部分的发言人待确认；点击修改"
             }
             text.append(NSAttributedString(string:body,attributes:attributes));partRanges[partID]=NSRange(location:offset,length:text.length-offset)
         }
-        let translated=turn.parts.compactMap { partID,part in
-            translationService.translated(segmentID:partID,source:part["text"] as? String ?? "")
+        let translated=turn.parts.compactMap { partID, part -> String? in
+            guard MeetingTranslationPolicy.eligible(turn.item),MeetingTranslationPolicy.eligible(part) else {return nil}
+            return translationService.translated(segmentID:partID,source:part["text"] as? String ?? "")
         }.joined(separator:"\n")
         if !translated.isEmpty {
-            text.append(NSAttributedString(string:"\n"+translated,attributes:[.font:NSFont.systemFont(ofSize:14),.foregroundColor:MeetingVisualStyle.muted,.paragraphStyle:para]))
+            let style=para.mutableCopy() as! NSMutableParagraphStyle
+            style.paragraphSpacingBefore=4;style.lineSpacing=4
+            text.append(NSAttributedString(string:"\n"+translated,attributes:[.font:NSFont.systemFont(ofSize:12.5),.foregroundColor:MeetingVisualStyle.muted,.paragraphStyle:style]))
         }
-        text.append(NSAttributedString(string:"\n",attributes:[.font:NSFont.systemFont(ofSize:16),.paragraphStyle:para]))
+        text.append(NSAttributedString(string:"\n",attributes:[.font:NSFont.systemFont(ofSize:14.5),.paragraphStyle:para]))
         if showsSpeakerRanges {
             for (partID,part) in turn.parts {
                 let detail=TranscriptTimeline.timestamp(part["start"],precise:true)+"–"+TranscriptTimeline.timestamp(part["end"],precise:true)+"  "+speakerLabel(partID,part)
@@ -1663,10 +1662,15 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
     func transcriptExport()->String {transcriptExportSnapshot().text()}
     func assistExportTranslations(turns:[ReadingTurn])->[String:String] {
         guard translationService.enabled else{return [:]}
-        return Dictionary(turns.compactMap { turn in
-            let value=turn.parts.compactMap { id,part in translationService.translated(segmentID:id,source:part["text"] as? String ?? "") }.joined(separator:"\n")
-            return value.isEmpty ? nil:(turn.parent,value)
-        },uniquingKeysWith:{_,last in last})
+        var values:[String:String]=[:]
+        for turn in turns {
+            let translated=turn.parts.compactMap { id, part -> String? in
+                guard MeetingTranslationPolicy.eligible(turn.item),MeetingTranslationPolicy.eligible(part) else{return nil}
+                return translationService.translated(segmentID:id,source:part["text"] as? String ?? "")
+            }.joined(separator:"\n")
+            if !translated.isEmpty {values[turn.id]=translated}
+        }
+        return values
     }
     func transcriptExportSnapshot()->TranscriptExportSnapshot {
         let settled = dirtyTranscriptParents.isEmpty && !fullTranscriptRefreshPending && !fullRefreshBuildInFlight
@@ -1692,7 +1696,11 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
         if !dirtyTranscriptParents.isEmpty || fullTranscriptRefreshPending || fullRefreshBuildInFlight {scheduleTranscriptRender();if !fullRefreshBuildInFlight {renderText()};let deferredGeneration=meetingDocumentGeneration;DispatchQueue.main.asyncAfter(deadline:.now()+0.02){[weak self] in guard let self,self.meetingDocumentGeneration==deferredGeneration else{return};self.saveTranscriptAsync(to:url)};return}
         let snapshot=transcriptExportSnapshot(),count=snapshot.turns.count,generation=meetingDocumentGeneration,cache=currentCacheID,session=activeSession
         diagnostic.stringValue="正在导出原文"
-        cacheExportJob.run(work:{try snapshot.text().write(to:url,atomically:true,encoding:.utf8)}){[weak self] result in
+        let assistantDirectory = agentStoreOverride ?? recoveryBase().deletingLastPathComponent().appendingPathComponent(Credential.offline ? "DevelopmentQA/Assistant" : "Assistant")
+        cacheExportJob.run(work:{
+            let reminders = try cache.map { try meetingAssistantReminderExport(cacheID: $0, assistantDirectory: assistantDirectory) } ?? ""
+            try (snapshot.text() + reminders).write(to:url,atomically:true,encoding:.utf8)
+        }){[weak self] result in
             guard let self=self,self.meetingDocumentGeneration==generation,self.currentCacheID==cache,self.activeSession==session else{return}
             switch result {case .success:self.diagnostic.stringValue="本场全部\(count)段原文已导出"
             case .failure:self.diagnostic.stringValue="导出失败，请重试"}
@@ -1756,8 +1764,7 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
             guard let data=try? JSONSerialization.data(withJSONObject:command) else{identityBusy=false;return}
             do {try handle.write(contentsOf:data+Data([10]))} catch {identityBusy=false;diagnostic.stringValue="人物连接已关闭，未保存"};return
         }
-        guard let python=PythonRuntime.executable() else {identityBusy=false;diagnostic.stringValue="请安装 Python 3.12 或更高版本后重试";return}
-        let proc=Process();let input=Pipe();let outputPipe=Pipe();proc.executableURL=python;proc.arguments=["-u",root+"/identity_control.py"];proc.standardInput=input;proc.standardOutput=outputPipe;proc.standardError=FileHandle.nullDevice
+        let proc=Process();let input=Pipe();let outputPipe=Pipe();proc.executableURL=URL(fileURLWithPath:"/usr/local/bin/python3");proc.arguments=["-u",root+"/identity_control.py"];proc.standardInput=input;proc.standardOutput=outputPipe;proc.standardError=FileHandle.nullDevice
         var request:[String:Any]=["session":session,"synthetic_only":mock,"human_use_authorized":humanIdentityAuthorized,"command":command];if let state=identitySnapshot {request["state"]=state}
         var env=RuntimeConfiguration.childEnvironment();for key in ["DASHSCOPE_API_KEY","ALIYUN_API_KEY","BAILIAN_API_KEY"] {env.removeValue(forKey:key)};env["PYTHONDONTWRITEBYTECODE"]="1";proc.environment=env
         DispatchQueue.global().async {
@@ -1831,7 +1838,7 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
         let panel=NSView(frame:NSRect(x:0,y:0,width:420,height:160));let labels=["同意本机跨会识别用途","同意生成专用Keychain加密密钥","同意保存到本机应用支持目录","理解备份和删除范围"]
         var boxes:[NSButton]=[];for (i,title) in labels.enumerated(){let box=ImmediateButton(checkboxWithTitle:title,target:nil,action:nil);box.frame=NSRect(x:0,y:CGFloat(125-i*35),width:415,height:28);panel.addSubview(box);boxes.append(box)};dialog.accessoryView=panel;dialog.addButton(withTitle:"保存");dialog.addButton(withTitle:"取消")
         guard dialog.runModal() == .alertFirstButtonReturn,boxes.allSatisfy({$0.state == .on}) else{return}
-        let folder=mock ? URL(fileURLWithPath:root+"/native/validation-workflow/fake-profile") : RuntimeConfiguration.dataRoot().appendingPathComponent("Identity",isDirectory:true)
+        let folder=mock ? URL(fileURLWithPath:root+"/native/validation-workflow/fake-profile") : RuntimeConfiguration.dataRoot(legacyJoeIdentity:true).appendingPathComponent("Identity",isDirectory:true)
         let grant=ProfileStorageGrant(purposeAccepted:true,keychainKeyAccepted:true,localFolderAccepted:true,backupDeletionAccepted:true)
         let keys:ProfileKeyProvider=mock ? FakeProfileKeyProvider() : KeychainProfileProvider(permitted:true)
         let store=ProfileArchiveStore(folder:folder,domain:mock ? "synthetic_model_output" : "consented_live_audio",keys:keys,grant:grant)
@@ -1840,7 +1847,7 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
     @objc func restoreProfileArchive() {
         if trialCandidate {return}
         guard mock || Bundle.main.object(forInfoDictionaryKey:"ProfileStorageAuthorized") as? Bool==true else{diagnostic.stringValue="请先启用人物资料保存";return}
-        let folder=mock ? URL(fileURLWithPath:root+"/native/validation-workflow/fake-profile") : RuntimeConfiguration.dataRoot().appendingPathComponent("Identity",isDirectory:true)
+        let folder=mock ? URL(fileURLWithPath:root+"/native/validation-workflow/fake-profile") : RuntimeConfiguration.dataRoot(legacyJoeIdentity:true).appendingPathComponent("Identity",isDirectory:true)
         let grant=ProfileStorageGrant(purposeAccepted:true,keychainKeyAccepted:true,localFolderAccepted:true,backupDeletionAccepted:true)
         let provider:ProfileKeyProvider=mock ? FakeProfileKeyProvider() : KeychainProfileProvider(permitted:true)
         let store=profileStore ?? ProfileArchiveStore(folder:folder,domain:mock ? "synthetic_model_output" : "consented_live_audio",keys:provider,grant:grant);profileStore=store
@@ -1933,7 +1940,7 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
         if item.tag==9 || item.tag==10 {
             phase=UIState();phase.phase = .recording;phase.elapsed=123;phase.estimated=0.12;segments=[:];sequence=[];sessionSource="腾讯会议";naming.reset()
             for i in 0..<20 {receive(["type":"segment","segment_id":"review-\(i)","session":"synthetic-ui","track":i%3==1 ? "mic":"remote","text":"先把品牌主张讲清楚，再比较用户反馈与预算。这段仅为界面验证的虚构文字。","final":i != 19,"revision":1,"speaker":["basis":"unknown"]])}
-            naming.set(segment:"review-0",name:"合成说话人甲 · 产品负责人");markTranscriptParentDirty("review-0")
+            naming.set(segment:"review-0",name:"张宇 · 品牌策略与增长运营负责人");markTranscriptParentDirty("review-0")
             if item.tag==10 {balanceState.cash="1234567890.12";balanceState.currency="CNY";phase.estimated=99999.99}
             renderText();updateUI();return
         }
@@ -1962,7 +1969,7 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
         panel.center();panel.makeKeyAndOrderFront(nil)
     }
     @objc func exportReviewShot() {
-        guard mock,window.isVisible else{return};let directory=URL(fileURLWithPath:NSTemporaryDirectory()).appendingPathComponent("zaichang-meeting-ui-review");try? FileManager.default.createDirectory(at:directory,withIntermediateDirectories:true)
+        guard mock,window.isVisible else{return};let directory=URL(fileURLWithPath:NSTemporaryDirectory()).appendingPathComponent("joesang-meeting-ui-review");try? FileManager.default.createDirectory(at:directory,withIntermediateDirectories:true)
         let stamp=String(Int(Date().timeIntervalSince1970));let targets:[(String,NSView?)]=[("main-"+phase.phase.rawValue,window.contentView),("settings",window.attachedSheet?.contentView),("person",inlinePopover?.isShown==true ? inlinePopover?.contentViewController?.view : nil)]
         for (name,target) in targets {guard let target=target,let bitmap=target.bitmapImageRepForCachingDisplay(in:target.bounds) else{continue};target.effectiveAppearance.performAsCurrentDrawingAppearance { target.cacheDisplay(in:target.bounds,to:bitmap) };let image=NSImage(size:target.bounds.size);image.lockFocus();target.effectiveAppearance.performAsCurrentDrawingAppearance { NSColor.windowBackgroundColor.setFill();NSBezierPath(rect:NSRect(origin:.zero,size:target.bounds.size)).fill();bitmap.draw(in:NSRect(origin:.zero,size:target.bounds.size)) };image.unlockFocus();guard let tiff=image.tiffRepresentation,let opaque=NSBitmapImageRep(data:tiff) else{continue};if let png=opaque.representation(using:.png,properties:[:]) {try? png.write(to:directory.appendingPathComponent(stamp+"-"+name+".png"))}}
     }
@@ -1975,6 +1982,7 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
         let rename=edit.addItem(withTitle:"重命名所选记录…",action:#selector(renameSelectedLibraryMeeting),keyEquivalent:"r");rename.keyEquivalentModifierMask=[.command,.shift];rename.target=self
         let delete=edit.addItem(withTitle:"删除所选记录…",action:#selector(deleteSelectedLibraryMeeting),keyEquivalent:"");delete.target=self
         let transcribe=edit.addItem(withTitle:"转写所选录音…",action:#selector(transcribeSelectedLibraryMeeting),keyEquivalent:"");transcribe.target=self
+        let exportMinutes=edit.addItem(withTitle:"导出纪要…",action:#selector(exportVisibleMinutes),keyEquivalent:"");exportMinutes.target=self
         let exportText=edit.addItem(withTitle:"导出原文…",action:#selector(exportVisibleDocument),keyEquivalent:"");exportText.target=self
         let peopleReview=edit.addItem(withTitle:"按发言人查看…",action:#selector(showSpeakerReview),keyEquivalent:"p");peopleReview.target=self
         let details=edit.addItem(withTitle:"会议详情…",action:#selector(showWorkspaceDetails),keyEquivalent:"");details.target=self
@@ -2214,29 +2222,29 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
             done.performClick(nil)
         }
         view.receive(item("a",0));view.receive(item("b",0));view.receive(item("other",1));view.receive(item("unknown",nil))
-        commit("a","说话人甲");precondition(view.naming.name(segment:"a")=="说话人甲" && view.naming.name(segment:"b")=="说话人甲" && view.naming.name(segment:"other")==nil);checks+=1
-        view.receive(item("future",0));precondition(view.naming.name(segment:"future")=="说话人甲" && view.output.string.components(separatedBy:"说话人甲").count==4);checks+=1
-        commit("other","说话人甲");commit("a","First person");precondition(view.naming.name(segment:"other")=="说话人甲" && view.naming.name(segment:"future")=="First person");checks+=1
-        view.undoName();precondition(view.naming.name(segment:"future")=="说话人甲");checks+=1
-        commit("b","This sentence",1);precondition(view.naming.name(segment:"b")=="This sentence" && view.naming.name(segment:"a")=="说话人甲");view.undoName();checks+=1
+        commit("a","Alice");precondition(view.naming.name(segment:"a")=="Alice" && view.naming.name(segment:"b")=="Alice" && view.naming.name(segment:"other")==nil);checks+=1
+        view.receive(item("future",0));precondition(view.naming.name(segment:"future")=="Alice" && view.output.string.components(separatedBy:"Alice").count==4);checks+=1
+        commit("other","Alice");commit("a","First person");precondition(view.naming.name(segment:"other")=="Alice" && view.naming.name(segment:"future")=="First person");checks+=1
+        view.undoName();precondition(view.naming.name(segment:"future")=="Alice");checks+=1
+        commit("b","This sentence",1);precondition(view.naming.name(segment:"b")=="This sentence" && view.naming.name(segment:"a")=="Alice");view.undoName();checks+=1
         view.beginInlineName("b");let target=view.inlineTargets.first{$0.value.identity=="slot:1"}!.key
-        view.inlineScope!.selectItem(at:target);view.changeInlineScope();precondition(view.inlineField!.stringValue=="说话人甲");view.inlineField!.stringValue="Second person";view.commitInlineName()
+        view.inlineScope!.selectItem(at:target);view.changeInlineScope();precondition(view.inlineField!.stringValue=="Alice");view.inlineField!.stringValue="Second person";view.commitInlineName()
         view.receive(item("b",0,2));precondition(view.naming.key(segment:"b")?.identity=="slot:1" && view.naming.name(segment:"b")=="Second person" && view.naming.name(segment:"other")=="Second person");checks+=1
-        view.undoName();precondition(view.naming.key(segment:"b")?.identity=="slot:0" && view.naming.name(segment:"other")=="说话人甲");checks+=1
+        view.undoName();precondition(view.naming.key(segment:"b")?.identity=="slot:0" && view.naming.name(segment:"other")=="Alice");checks+=1
         view.beginInlineName("unknown");precondition(view.inlineScope!.indexOfSelectedItem==1 && view.inlineScope!.item(at:0)!.isEnabled==false);view.inlineField!.stringValue="Only this sentence";view.commitInlineName();view.receive(item("unknown-future",nil));precondition(view.naming.name(segment:"unknown-future")==nil);checks+=1
         var split=item("split",nil);split["text"]="甲乙";split["start"]=1.0;split["end"]=3.0;split["speaker_runs"]=[["start":1.0,"end":2.0,"text":"甲","speaker":item("unused",0)["speaker"]!],["start":2.0,"end":3.0,"text":"乙","speaker":item("unused",1)["speaker"]!]]
         view.receive(split);precondition(view.segments["split"] != nil && view.sequence.contains("split") && !view.sequence.contains("split:word:2000"));checks+=1
         let before=view.sequence.count;split["revision"]=2;view.receive(split);precondition(view.sequence.count==before);checks+=1
-        view.receive(["type":"stopped","reason":"trial_time_limit"]);precondition(view.naming.name(segment:"future")=="说话人甲" && view.phase.phase == .ended);checks+=1
+        view.receive(["type":"stopped","reason":"trial_time_limit"]);precondition(view.naming.name(segment:"future")=="Alice" && view.phase.phase == .ended);checks+=1
         view.deferPresentation=true
         for index in 0..<210 {view.receive(item("retained-\(index)",0))}
         view.deferPresentation=false
         view.showRecentTranscript()
         try view.settleTranscriptForOfflineReview()
-        precondition(view.segments["a"] != nil && view.sequence.count>200 && view.textRanges.count==view.readingTurns().count && view.output.string.contains("离线虚构发言 a") && view.output.string.contains("离线虚构发言 retained-209") && view.naming.name(segment:"retained-209")=="说话人甲");checks+=1
+        precondition(view.segments["a"] != nil && view.sequence.count>200 && view.textRanges.count==view.readingTurns().count && view.output.string.contains("离线虚构发言 a") && view.output.string.contains("离线虚构发言 retained-209") && view.naming.name(segment:"retained-209")=="Alice");checks+=1
         view.showFullTranscript();precondition(view.output.string.contains("离线虚构发言 a") && view.textRanges.count==view.readingTurns().count);checks+=1
         view.showRecentTranscript();precondition(view.textRanges.count==view.readingTurns().count && view.output.string.contains("离线虚构发言 a"));checks+=1
-        let exported=view.transcriptExport();precondition(exported.contains("离线虚构发言 a") && exported.contains("离线虚构发言 retained-209") && exported.contains("说话人甲") && exported.contains("待确认"));checks+=1
+        let exported=view.transcriptExport();precondition(exported.contains("离线虚构发言 a") && exported.contains("离线虚构发言 retained-209") && exported.contains("Alice") && exported.contains("待确认"));checks+=1
         let saved=view.segments["a"]!;var tooLarge=item("overflow",0);tooLarge["text"]=String(repeating:"x",count:2*1024*1024+1);view.receive(tooLarge)
         precondition(view.transcriptLimitHit && view.segments["overflow"]==nil && view.segments["a"] != nil && view.phase.phase == .failed);view.receive(["type":"stopped","reason":"user_stop"]);precondition(view.phase.phase == .failed && view.phase.error!.contains("内容已达上限"));checks+=1
         precondition(view.segments["a"]!["text"] as? String==saved["text"] as? String);view.showFullTranscript();checks+=1
@@ -2291,26 +2299,23 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
     }
     @MainActor static func main() async {
         if runMeetingNotesChecks() {return}
-
-        if CommandLine.arguments.count==3,CommandLine.arguments[1]=="--meeting-translation-self-test",Credential.offline {
-            do {let result=try meetingTranslationChecks(directory:URL(fileURLWithPath:CommandLine.arguments[2]));print(String(data:try JSONSerialization.data(withJSONObject:result,options:.sortedKeys),encoding:.utf8)!)}catch{print("meeting-translation-failed");exit(1)}
-            return
-        }
-
-        if CommandLine.arguments.count==2,CommandLine.arguments[1]=="--meeting-minutes-self-test",Credential.offline {
-            do {let checks=try meetingMinutesChecks();print(String(data:try JSONSerialization.data(withJSONObject:["type":"meeting_minutes_checks","checks":checks,"network":false,"capture":false,"passed":checks.count],options:.sortedKeys),encoding:.utf8)!)}catch{print("meeting-minutes-failed");exit(1)}
-            return
-        }
-
-        if CommandLine.arguments.count==3,CommandLine.arguments[1]=="--public-demo-render",
-           Bundle.main.object(forInfoDictionaryKey:"OfflineOnly") as? Bool==true {
-            do {
-                let directory=URL(fileURLWithPath:CommandLine.arguments[2],isDirectory:true)
-                try FileManager.default.createDirectory(at:directory,withIntermediateDirectories:true)
-                let result=try publicDemoRender(directory:directory)
-                print(String(data:try JSONSerialization.data(withJSONObject:result,options:[.sortedKeys]),encoding:.utf8)!)
-            } catch {print("public-demo-render-failed");exit(1)}
-            return
+        if CommandLine.arguments.count>=2,Credential.offline {
+            let flag=CommandLine.arguments[1]
+            if ["--runtime-configuration-self-test","--meeting-minutes-self-test","--edition-ui-self-test","--meeting-files-self-test"].contains(flag) {
+                do {
+                    var checks:[String]=[]
+                    switch flag {
+                    case "--runtime-configuration-self-test": checks=try runtimeConfigurationChecks()
+                    case "--meeting-minutes-self-test": checks=try meetingMinutesChecks()
+                    default:
+                        guard CommandLine.arguments.count==3 else{throw Failure(code:"check_directory_required")}
+                        let directory=URL(fileURLWithPath:CommandLine.arguments[2])
+                        checks = try flag=="--edition-ui-self-test" ? editionUIChecks(directory:directory):meetingFilesExportChecks(directory:directory)
+                    }
+                    print(String(data:try JSONSerialization.data(withJSONObject:["type":flag,"edition":RuntimeConfiguration.edition(),"checks":checks,"passed":checks.count,"capture":false,"cloud":false,"keychain":false],options:.sortedKeys),encoding:.utf8)!)
+                } catch {print("edition-check-failed: \(error)");exit(1)}
+                return
+            }
         }
 
         // A worker that exits early must surface as a write error on its pipe,
@@ -2355,6 +2360,14 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
         if CommandLine.arguments.count==3,["--assistant-ui-self-test","--assistant-live-probe","--assistant-overview-live-probe"].contains(CommandLine.arguments[1]),Credential.offline {
             do {let result=try meetingAgentChecks(directory:URL(fileURLWithPath:CommandLine.arguments[2]),live:CommandLine.arguments[1] != "--assistant-ui-self-test",overviewOnly:CommandLine.arguments[1]=="--assistant-overview-live-probe");print(String(data:try JSONSerialization.data(withJSONObject:result,options:.sortedKeys),encoding:.utf8)!)}catch{print("assistant-ui-failed: \(error)");exit(1)};return
         }
+        if CommandLine.arguments.count==3,CommandLine.arguments[1]=="--meeting-translation-ui-self-test",Credential.offline {
+            do {let result=try meetingTranslationUIChecks(directory:URL(fileURLWithPath:CommandLine.arguments[2]));print(String(data:try JSONSerialization.data(withJSONObject:result,options:.sortedKeys),encoding:.utf8)!)}catch{print("meeting-translation-ui-failed: \(error)");exit(1)}
+            return
+        }
+        if CommandLine.arguments.count==3,CommandLine.arguments[1]=="--meeting-translation-self-test",Credential.offline {
+            do {let result=try meetingTranslationChecks(directory:URL(fileURLWithPath:CommandLine.arguments[2]));print(String(data:try JSONSerialization.data(withJSONObject:result,options:.sortedKeys),encoding:.utf8)!)}catch{print("meeting-translation-failed: \(error)");exit(1)}
+            return
+        }
         if CommandLine.arguments.count==3,CommandLine.arguments[1]=="--meeting-context-self-test",Credential.offline {
             do {let result=try await meetingContextChecks(directory:URL(fileURLWithPath:CommandLine.arguments[2]));print(String(data:try JSONSerialization.data(withJSONObject:result,options:.sortedKeys),encoding:.utf8)!)}catch{print("meeting-context-failed: \(error)");exit(1)};return
         }
@@ -2379,6 +2392,9 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
         if CommandLine.arguments.count==3,CommandLine.arguments[1]=="--workspace-self-test",Credential.offline {
             do {var result=try workspaceChecks(directory:URL(fileURLWithPath:CommandLine.arguments[2]));let pauseChecks=try meetingWorkspaceTranscriptionPauseChecks(directory:URL(fileURLWithPath:CommandLine.arguments[2]));let archiveChecks=try meetingArchiveUIChecks();let lifecycleChecks=try meetingWindowLifecycleChecks(directory:URL(fileURLWithPath:CommandLine.arguments[2]).appendingPathComponent(UUID().uuidString));let checks=(result["checks"] as? [String] ?? [])+pauseChecks+archiveChecks+lifecycleChecks;result["checks"]=checks;result["passed"]=checks.count;print(String(data:try JSONSerialization.data(withJSONObject:result,options:.sortedKeys),encoding:.utf8)!)}catch{print("workspace-failed: \(error)");exit(1)};return
         }
+        if CommandLine.arguments.count==3,CommandLine.arguments[1]=="--acoustic-real-self-test",Credential.offline {
+            do {let result=try await automaticAcousticMeetingCheck(directory:URL(fileURLWithPath:CommandLine.arguments[2]));print(String(data:try JSONSerialization.data(withJSONObject:result,options:[.sortedKeys]),encoding:.utf8)!)}catch{print("acoustic-real-failed: \(error)");exit(1)};return
+        }
         if CommandLine.arguments.count==3,CommandLine.arguments[1]=="--coarse-real-prepare-readonly",Credential.offline {
             do {let result=try meetingCoarseRefinementReadOnlyPrepare(cacheID:CommandLine.arguments[2],root:meetingCacheRoot());print(String(data:try JSONSerialization.data(withJSONObject:result,options:[.sortedKeys]),encoding:.utf8)!)}catch{print("coarse-prepare-failed: \(error)");exit(1)};return
         }
@@ -2388,8 +2404,8 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
         if CommandLine.arguments.count==3,CommandLine.arguments[1]=="--recording-control-self-test",Credential.offline {
             do {let result=try await recordingControlChecks(directory:URL(fileURLWithPath:CommandLine.arguments[2]));print(String(data:try JSONSerialization.data(withJSONObject:result,options:[.sortedKeys]),encoding:.utf8)!)}catch{print("recording-control-failed: \(error)");exit(1)};return
         }
-        if CommandLine.arguments.count==4,CommandLine.arguments[1]=="--saved-speaker-review",Credential.offline {
-            do {let evidence=try renderSavedSpeakerReview(cacheID:CommandLine.arguments[2],directory:URL(fileURLWithPath:CommandLine.arguments[3]));print(String(data:try JSONSerialization.data(withJSONObject:evidence,options:[.sortedKeys]),encoding:.utf8)!)}catch{print("saved-speaker-review-failed: \(error)");exit(1)};return
+        if [4,5].contains(CommandLine.arguments.count),CommandLine.arguments[1]=="--saved-speaker-review",Credential.offline {
+            do {let evidence=try renderSavedSpeakerReview(cacheID:CommandLine.arguments[2],directory:URL(fileURLWithPath:CommandLine.arguments[3]),cacheRoot:CommandLine.arguments.count==5 ? URL(fileURLWithPath:CommandLine.arguments[4]):meetingCacheRoot());print(String(data:try JSONSerialization.data(withJSONObject:evidence,options:[.sortedKeys]),encoding:.utf8)!)}catch{print("saved-speaker-review-failed: \(error)");exit(1)};return
         }
         if CommandLine.arguments.count==3,CommandLine.arguments[1]=="--realtime-timeline-self-test",Credential.offline {
             do {let result=try realtimeTimelineChecks(directory:URL(fileURLWithPath:CommandLine.arguments[2]));print(String(data:try JSONSerialization.data(withJSONObject:result,options:.sortedKeys),encoding:.utf8)!)}catch{print("realtime-timeline-failed: \(error)");exit(1)};return
@@ -2460,9 +2476,6 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
         if CommandLine.arguments.count==3,CommandLine.arguments[1]=="--historical-voice-self-test",Credential.offline {
             do {let checks=try historicalVoiceLearningChecks(directory:URL(fileURLWithPath:CommandLine.arguments[2]));print(String(data:try JSONSerialization.data(withJSONObject:["type":"historical_voice_checks","passed":checks.count,"checks":checks,"capture":false,"cloud":false],options:.sortedKeys),encoding:.utf8)!)}catch{print("historical-voice-failed: \(error)");exit(1)};return
         }
-        if CommandLine.arguments.count==2,CommandLine.arguments[1]=="--asr-terms-self-test",Credential.offline {
-            do {let result=try asrTermsChecks();print(String(data:try JSONSerialization.data(withJSONObject:result,options:.sortedKeys),encoding:.utf8)!)}catch{print("asr-terms-failed: \(error)");exit(1)};return
-        }
         if CommandLine.arguments.count==3,CommandLine.arguments[1]=="--speaker-confirmation-self-test",Credential.offline {
             do {let value=try speakerConfirmationChecks(directory:URL(fileURLWithPath:CommandLine.arguments[2]));print(String(data:try JSONSerialization.data(withJSONObject:value,options:[.sortedKeys]),encoding:.utf8)!)}catch{print("speaker-confirmation-check-failed: \(error)");exit(1)};return
         }
@@ -2488,7 +2501,7 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
             precondition(NSApp.mainMenu?.items.contains{$0.submenu?.title=="验证"}==true);checks+=1
             for tag in [1,11,12,13] {let item=NSMenuItem();item.tag=tag;view.validationScenario(item);precondition(view.phase.phase == .recording && view.action.title=="暂停录音" && view.action.isEnabled==true && !view.action.isHiddenOrHasHiddenAncestor && view.newButton?.isEnabled==false && view.historyButton?.isEnabled==true);checks+=1}
             view.phase.phase = .stopped;view.updateUI();precondition(view.newButton?.isEnabled==true && view.historyButton?.isEnabled==true);checks+=1
-            view.receive(["type":"segment","session":view.activeSession ?? "experience-fixture","segment_id":"a","track":"mic","text":"虚构内容，仅检查界面","final":true,"speaker":["basis":"unknown"]]);precondition(view.output.string.contains("发言") && !view.output.string.contains("待确认") && view.speakerLabel("a",view.segments["a"]!)=="待确认");checks+=1
+            view.receive(["type":"segment","session":view.activeSession ?? "experience-fixture","segment_id":"a","track":"mic","text":"虚构内容，仅检查界面","final":true,"speaker":["basis":"unknown"]]);precondition(view.output.string.contains("待确认") && view.speakerLabel("a",view.segments["a"]!)=="待确认");checks+=1
             let dir=URL(fileURLWithPath:CommandLine.arguments[2]);try! FileManager.default.createDirectory(at:dir,withIntermediateDirectories:true)
             for (name,width,height,appearance) in [("standard",800,620,NSAppearance.Name.aqua),("compact",640,480,NSAppearance.Name.aqua),("dark",800,620,NSAppearance.Name.darkAqua)] {
                 view.window.setContentSize(NSSize(width:width,height:height));view.window.appearance=NSAppearance(named:appearance);view.window.contentView!.layoutSubtreeIfNeeded();let target=view.window.contentView!;let bitmap=target.bitmapImageRepForCachingDisplay(in:target.bounds)!;target.effectiveAppearance.performAsCurrentDrawingAppearance {target.cacheDisplay(in:target.bounds,to:bitmap)};let image=NSImage(size:target.bounds.size);image.lockFocus();target.effectiveAppearance.performAsCurrentDrawingAppearance {NSColor.windowBackgroundColor.setFill();NSBezierPath(rect:NSRect(origin:.zero,size:target.bounds.size)).fill();bitmap.draw(in:NSRect(origin:.zero,size:target.bounds.size))};image.unlockFocus();let opaque=NSBitmapImageRep(data:image.tiffRepresentation!)!;try! opaque.representation(using:.png,properties:[:])!.write(to:dir.appendingPathComponent(name+".png"))
@@ -2500,11 +2513,17 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
         if CommandLine.arguments.contains("--qa-blocked-read-self-test"),Bundle.main.object(forInfoDictionaryKey:"OfflineQA") as? Bool==true {do {try offlineQABlockedReadChecks();exit(0)}catch{print("offline-qa-blocked-read-failed: \(error)");exit(1)}}
         if CommandLine.arguments.count==3,CommandLine.arguments[1]=="--qa-clock-self-test",Bundle.main.object(forInfoDictionaryKey:"OfflineQA") as? Bool==true {do {try offlineQAClockChecks(input:URL(fileURLWithPath:CommandLine.arguments[2]));exit(0)}catch{print("offline-qa-clock-failed: \(error)");exit(1)}}
         if CommandLine.arguments.contains("--cache-async-self-test"),Credential.offline {do {try cacheAsyncChecks();exit(0)}catch{print("cache-async-failed: \(error)");exit(1)}}
+        if CommandLine.arguments.count==2,["--authorized-public-asr-test","--authorized-public-asr-test-no-prompt"].contains(CommandLine.arguments[1]) {
+            guard Bundle.main.object(forInfoDictionaryKey:"CandidateRevision") as? String=="nightly",Bundle.main.object(forInfoDictionaryKey:"KeychainAuthorized") as? Bool==true,!Credential.offline,let root=Bundle.main.object(forInfoDictionaryKey:"AdapterRoot") as? String else{print("public-asr-scope-denied");exit(1)}
+            do {guard let key=try Credential.load(allowInteraction:CommandLine.arguments[1] != "--authorized-public-asr-test-no-prompt"),!key.isEmpty else{print("public-asr-key-unavailable");exit(1)}
+                let child=Process();let input=Pipe();child.executableURL=URL(fileURLWithPath:"/usr/local/bin/python3");child.arguments=[root+"/public_audio_trial.py"];child.standardInput=input;try child.run();try input.fileHandleForWriting.write(contentsOf:JSONSerialization.data(withJSONObject:["key":key])+Data([10]));try input.fileHandleForWriting.close();child.waitUntilExit();exit(child.terminationStatus)
+            }catch{print("public-asr-keychain-or-launch-failed");exit(1)}
+        }
         if CommandLine.arguments.contains("--ui-self-test") {modelSelfTest();exit(0)}
         if CommandLine.arguments.contains("--key-status") {let code=Credential.existenceStatus();print(code==errSecItemNotFound ? "key_absent" : code==errSecSuccess ? "key_present" : "key_status_unavailable");exit(0)}
-        let ownID=Bundle.main.bundleIdentifier ?? "com.zaichang.app"
+        let ownID=Bundle.main.bundleIdentifier ?? "com.joesang.meeting-assistant"
         if NSRunningApplication.runningApplications(withBundleIdentifier:ownID).contains(where:{$0.processIdentifier != getpid()}) {exit(0)}
-        let lockPath=Bundle.main.object(forInfoDictionaryKey:"AppLockPath") as? String ?? NSTemporaryDirectory()+"zaichang-meeting-ui-\(getuid())-\(ownID).lock"
+        let lockPath=Bundle.main.object(forInfoDictionaryKey:"AppLockPath") as? String ?? NSTemporaryDirectory()+"joesang-meeting-ui-\(getuid())-\(ownID).lock"
         let uiLock=open(lockPath,O_CREAT|O_RDWR|O_NOFOLLOW|O_NONBLOCK,0o600)
         var lockStat=stat();guard uiLock>=0,fstat(uiLock,&lockStat)==0,(lockStat.st_mode & S_IFMT)==S_IFREG,lockStat.st_uid==getuid(),flock(uiLock,LOCK_EX|LOCK_NB)==0 else {exit(0)}
         let app=NSApplication.shared;app.setActivationPolicy(.regular);let delegate=Delegate();app.delegate=delegate;withExtendedLifetime(delegate){app.run()}

@@ -20,11 +20,11 @@ import sys
 import time
 import unicodedata
 from pathlib import Path
+from runtime_config import data_root
 from datetime import datetime
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from typing import Any, Iterable
 from urllib.parse import quote
-from runtime_config import data_root
 
 SCHEMA_VERSION = 1
 # The state/response protocol remains v1; only the database adds notes in v2.
@@ -756,13 +756,17 @@ def _safe_turn(turn: Any) -> dict[str, Any]:
     if not isinstance(turn, dict):
         raise ContextError("invalid_segment_payload")
     keys = ("id", "parent", "text", "speaker", "speaker_confirmed", "speaker_name_origin", "uncertain", "final",
-            "start", "end", "absolute_start", "absolute_end", "source", "parts")
+            "start", "end", "absolute_start", "absolute_end", "source", "parts", "quality_flags", "text_quality")
     safe: dict[str, Any] = {}
     for key in keys:
         if key not in turn:
             continue
         value = turn[key]
-        if key in {"text"} and isinstance(value, str):
+        if key == "quality_flags":
+            safe[key] = _safe_quality_flags(value)
+        elif key == "text_quality":
+            safe[key] = value if value in ("unreliable", "needs_review", "usable") else "needs_review"
+        elif key in {"text"} and isinstance(value, str):
             safe[key] = value
         elif key == "speaker_name_origin":
             safe[key] = value if isinstance(value, str) and value in {"manual", "voiceprint", "semantic", "anonymous", "mixed"} else "anonymous"
@@ -778,6 +782,15 @@ def _safe_turn(turn: Any) -> dict[str, Any]:
     safe.setdefault("text", "")
     safe.setdefault("parts", [])
     safe.setdefault("final", False)
+    flags = set(safe.get("quality_flags", []))
+    for part in safe["parts"]:
+        flags.update(part.get("quality_flags", []))
+        if part.get("text_quality") in {"unreliable", "needs_review"}:
+            flags.add("text_needs_review")
+        if part.get("final") is False:
+            flags.add("contains_nonfinal_part")
+    if flags:
+        safe["quality_flags"] = sorted(flags)
     reference = _shared_person_reference(turn)
     parts = safe["parts"]
     if (reference and not safe.get("uncertain", False) and parts
@@ -786,15 +799,30 @@ def _safe_turn(turn: Any) -> dict[str, Any]:
     return safe
 
 
+def _safe_quality_flags(value: Any) -> list[str]:
+    if not isinstance(value, list) or len(value) > 32:
+        return ["quality_metadata_invalid"]
+    valid = [v for v in value if isinstance(v, str) and re.fullmatch(r"[a-z][a-z0-9_]{0,63}", v)]
+    if len(valid) != len(value):
+        valid.append("quality_metadata_invalid")
+    return sorted(set(valid))
+
+
 def _safe_part(part: Any) -> dict[str, Any]:
     if not isinstance(part, dict):
         raise ContextError("invalid_segment_payload")
     out: dict[str, Any] = {}
-    for key in ("id", "text", "speaker", "speaker_confirmed", "speaker_name_origin", "start", "end"):
+    for key in ("id", "text", "speaker", "speaker_confirmed", "speaker_name_origin", "start", "end", "final", "quality_flags", "text_quality"):
         if key not in part:
             continue
         value = part[key]
-        if key == "text" and isinstance(value, str):
+        if key == "quality_flags":
+            out[key] = _safe_quality_flags(value)
+        elif key == "text_quality":
+            out[key] = value if value in ("unreliable", "needs_review", "usable") else "needs_review"
+        elif key == "final":
+            out[key] = value is True
+        elif key == "text" and isinstance(value, str):
             out[key] = value
         elif key == "speaker_name_origin":
             out[key] = value if isinstance(value, str) and value in {"manual", "voiceprint", "semantic", "anonymous"} else "anonymous"

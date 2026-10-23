@@ -13,7 +13,7 @@ final class LocalRecordingSession {
     init(config:Config,base:URL=meetingCacheRoot())throws {
         try config.validate();guard config.isLocalOnly,config.localRecordingConfirmed==true else{throw Failure(code:"local_recording_not_confirmed")}
         id=config.appendCaptureCacheID ?? UUID().uuidString;directory=base.appendingPathComponent(id)
-        if config.appendCaptureCacheID == nil {_ = try prepareMeetingCacheRoot(at:base);try FileManager.default.createDirectory(at:directory,withIntermediateDirectories:false,attributes:[.posixPermissions:0o700])}
+        if config.appendCaptureCacheID == nil {try FileManager.default.createDirectory(at:directory,withIntermediateDirectories:false,attributes:[.posixPermissions:0o700])}
         writerLease=try SessionCacheWriterLease.acquire(directory:directory)
         let old:[String:Any]
         let tracks:[String]
@@ -131,7 +131,7 @@ func runLocalRecording(config:Config)async throws {
         func routeChangeReason() throws -> String? {
             if config.bundle != "*system*",processes(bundle:config.bundle) != tap.selectedPIDs {return "selected_application_process_changed"}
             if config.bundle=="*system*",audioObjects(for:selfAudioPIDs()) != tap.excludedAudioObjects {return "self_audio_process_changed"}
-            var property=address(kAudioHardwarePropertyDefaultOutputDevice);var output:AudioObjectID=0;var size=UInt32(MemoryLayout<AudioObjectID>.size);try check(AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject),&property,0,nil,&size,&output),"output_clock_check");return output==tap.outputClock ? nil:"output_device_changed"
+            var property=address(kAudioHardwarePropertyDefaultOutputDevice);var output:AudioObjectID=0;var size=UInt32(MemoryLayout<AudioObjectID>.size);try check(AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject),&property,0,nil,&size,&output),"output_clock_check");return output != tap.outputClock ? "output_device_changed" : (tap.inputFormatChanged() ? "output_format_changed":nil)
         }
         func rebuildApplicationTap(reason:String) throws {
             // The clock keeps running and the microphone keeps recording; only the
@@ -179,13 +179,10 @@ func runLocalRecording(config:Config)async throws {
 
 func localRecordingFixture(base:URL)async throws->[String:Any] {
     try FileManager.default.createDirectory(at:base,withIntermediateDirectories:true)
-    let firstRunData=base.appendingPathComponent(".first-run-"+UUID().uuidString,isDirectory:true)
-    let firstRunBase=firstRunData.appendingPathComponent("SessionCache",isDirectory:true)
-    defer {try? FileManager.default.removeItem(at:firstRunData)}
     var ids:[String]=[];var total=0
     for bundle in ["*microphone*","*system*"] {
         let raw:[String:Any]=["session":"local-fixture-"+UUID().uuidString,"bundle":bundle,"key":"","confirmed":true,"maxSeconds":3600,"model":"qwen-audio-3.0-asr-flash-streaming","silenceMS":1300,"micEnabled":true,"localOnly":true,"localRecordingConfirmed":true,"userLaunchConfirmed":true]
-        let config=try JSONDecoder().decode(Config.self,from:JSONSerialization.data(withJSONObject:raw));let recorder=try LocalRecordingSession(config:config,base:bundle=="*microphone*" ? firstRunBase:base);ids.append(recorder.id)
+        let config=try JSONDecoder().decode(Config.self,from:JSONSerialization.data(withJSONObject:raw));let recorder=try LocalRecordingSession(config:config,base:base);ids.append(recorder.id)
         let packet=Data(repeating:0,count:3200)
         let originalStores=recorder.stores
         for index in 0..<35 {for box in recorder.boxes.values {box.put(packet,at:100+Double(index)/10)}}
@@ -202,8 +199,8 @@ func localRecordingFixture(base:URL)async throws->[String:Any] {
         let metadata=try JSONSerialization.jsonObject(with:Data(contentsOf:recorder.directory.appendingPathComponent("meeting.json"))) as! [String:Any];precondition(metadata["upload_authorized"] as? Bool==false && metadata["asr_destination"] as? String=="")
         var denied=raw;denied["localRecordingConfirmed"]=false;let bad=try JSONDecoder().decode(Config.self,from:JSONSerialization.data(withJSONObject:denied));var rejected=false;do {try bad.validate()}catch{rejected=true};precondition(rejected)
     }
-    let recovered=(try cachedMeetings(in:base)+cachedMeetings(in:firstRunBase)).filter{ids.contains($0.id)};precondition(recovered.count==2 && recovered.allSatisfy{$0.pendingBytes==$0.writtenBytes && !$0.audioCleaned})
-    let first=recovered.first(where:{$0.id==ids[0]})!;let metadata=try first.metadata();let config=Config(session:metadata["session"] as! String,bundle:"*microphone*",key:"",confirmed:true,maxSeconds:90,model:"qwen-audio-3.0-asr-flash-streaming",silenceMS:1300,micEnabled:true,localSpeakerDirectory:nil,localEmbeddingModel:nil,userLaunchConfirmed:true)
-    var sockets=0;var rejected=false;do {try await resumeCachedMeeting(config:config,id:first.id,base:firstRunBase,factory:{sockets+=1;return FixtureSocket(fail:false)})}catch{rejected=(error as? Failure)?.code=="local_audio_upload_not_confirmed"};precondition(rejected && sockets==0)
-    return ["type":"local_recording_fixture","two_isolated_sessions":true,"first_run_cache_root_created":FileManager.default.fileExists(atPath:firstRunBase.path),"mic_and_system_plus_mic_tracks":true,"same_session_pause_resume":true,"paused_audio_excluded":true,"pcm_bytes":total,"recoverable":true,"asr_committed_zero":true,"upload_authorized":false,"unapproved_resume_created_no_socket":true,"no_device_created":true,"cloud_asr":false,"network":false,"keychain":false,"capture":false]
+    let recovered=try cachedMeetings(in:base).filter{ids.contains($0.id)};precondition(recovered.count==2 && recovered.allSatisfy{$0.pendingBytes==$0.writtenBytes && !$0.audioCleaned})
+    let first=recovered.first!;let metadata=try first.metadata();let config=Config(session:metadata["session"] as! String,bundle:"*microphone*",key:"",confirmed:true,maxSeconds:90,model:"qwen-audio-3.0-asr-flash-streaming",silenceMS:1300,micEnabled:true,localSpeakerDirectory:nil,localEmbeddingModel:nil,userLaunchConfirmed:true)
+    var sockets=0;var rejected=false;do {try await resumeCachedMeeting(config:config,id:first.id,base:base,factory:{sockets+=1;return FixtureSocket(fail:false)})}catch{rejected=(error as? Failure)?.code=="local_audio_upload_not_confirmed"};precondition(rejected && sockets==0)
+    return ["type":"local_recording_fixture","two_isolated_sessions":true,"mic_and_system_plus_mic_tracks":true,"same_session_pause_resume":true,"paused_audio_excluded":true,"pcm_bytes":total,"recoverable":true,"asr_committed_zero":true,"upload_authorized":false,"unapproved_resume_created_no_socket":true,"no_device_created":true,"cloud_asr":false,"network":false,"keychain":false,"capture":false]
 }

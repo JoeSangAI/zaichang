@@ -93,6 +93,73 @@ private struct ReferencePacket {
     var end: Double { at + Double(audio.count) / 32_000 }
 }
 
+/// Bounded per-capture-generation echo diagnostics. It stores counters and
+/// aggregate PCM energy only; no packet audio or per-packet history survives.
+final class EchoCaptureDiagnostics {
+    private struct Energy {
+        var samples=0
+        var squared=0.0
+        var peak=0.0
+        mutating func add(_ data:Data) {
+            guard !data.isEmpty else{return}
+            let value=PCM16Energy(data)
+            samples+=value.samples
+            squared+=value.rms*value.rms*Double(value.samples)
+            peak=max(peak,value.peak)
+        }
+        var json:[String:Any] {
+            ["samples":samples,"rms":samples>0 ? sqrt(squared/Double(samples)):0,"peak":peak]
+        }
+    }
+    private let lock=NSLock()
+    private var modelAvailable:Bool?
+    private var modelDetail:String?
+    private var input=Energy(),reference=Energy(),output=Energy()
+    private var frameCount=0,enhancedFrames=0,partialFrames=0,bufferedFrames=0,bypassFrames=0,missingReferenceFrames=0
+    private var statuses:[String:Int]=[:],details:[String:Int]=[:]
+
+    func setModel(_ diagnostics:[String:Any]) {
+        lock.lock();defer{lock.unlock()}
+        modelAvailable=diagnostics["echo_model_available"] as? Bool
+        modelDetail=diagnostics["echo_model_detail"] as? String
+    }
+    func recordFrame(microphone:Data,reference referenceAudio:Data?,result:EchoProcessResult,
+                     referenceAligned:Bool,referenceFailure:String?) {
+        lock.lock();defer{lock.unlock()}
+        frameCount+=1
+        input.add(microphone)
+        if let referenceAudio {reference.add(referenceAudio)}
+        switch result.status {
+        case .processed: if referenceAligned {enhancedFrames+=1}else{bypassFrames+=1}
+        case .processedWithRawEdges: if referenceAligned {partialFrames+=1}else{bypassFrames+=1}
+        case .bufferedForModelLatency: bufferedFrames+=1
+        default: bypassFrames+=1
+        }
+        if !referenceAligned {missingReferenceFrames+=1}
+        let status=result.status.rawValue
+        statuses[status,default:0]+=1
+        let detail=referenceFailure ?? result.detail ?? status
+        if details[detail] != nil || details.count<16 {details[detail,default:0]+=1}
+        else {details["other",default:0]+=1}
+    }
+    func recordOutput(_ audio:Data) {
+        lock.lock();defer{lock.unlock()};output.add(audio)
+    }
+    func snapshot(micTrack:String,rawTrack:String,referenceTrack:String)->[String:Any] {
+        lock.lock();defer{lock.unlock()}
+        var byStatus:[String:Int]=[:]
+        for key in EchoPreprocessorStatus.allCases.map(\.rawValue) {byStatus[key]=statuses[key] ?? 0}
+        return ["schema":1,"mic_track":micTrack,"raw_track":rawTrack,"reference_track":referenceTrack,
+                "model_available":modelAvailable.map{$0 as Any} ?? (NSNull() as Any),
+                "model_detail":modelDetail.map{$0 as Any} ?? (NSNull() as Any),
+                "frames":frameCount,"enhanced_frames":enhancedFrames,"partial_frames":partialFrames,
+                "buffered_frames":bufferedFrames,"bypass_frames":bypassFrames,
+                "reference_missing_frames":missingReferenceFrames,"status_counts":byStatus,
+                "detail_counts":details,"microphone_input":input.json,
+                "aligned_reference_input":reference.json,"processed_output":output.json]
+    }
+}
+
 private final class EchoResetControl {
     private let lock = NSLock()
     private var generation = 0
@@ -129,6 +196,17 @@ final class CapturePauseTransition {
     func finishHardwarePart(_ code:String?) {lock.lock();hardwarePending=max(0,hardwarePending-1);if failure==nil {failure=code};lock.unlock()}
     func finishUploadDrain() {lock.lock();uploadDone=true;lock.unlock()}
     func snapshot()->(hardwareDone:Bool,uploadDone:Bool,failure:String?) {lock.lock();defer{lock.unlock()};return(hardwarePending==0,uploadDone,failure)}
+}
+
+// A hardware stop alone does not publish the raw/reference writer's in-memory
+// tail. Run on the teardown queue, within the existing teardown deadline.
+func finishCapturePauseWriter(_ store:RecordingJournal,transition:CapturePauseTransition,
+                              stop:() throws->Void) {
+    do {
+        try stop()
+        store.wait()
+        transition.finishHardwarePart(store.fault() ?? store.processingFault())
+    } catch {transition.finishHardwarePart((error as? Failure)?.code ?? "capture_pause_writer_failed")}
 }
 
 // Pause receipts have a safety deadline in the parent process. Run the small
@@ -326,7 +404,7 @@ private final class CaptureASRConsumerInventory {
 // RecordingJournal.wait() synchronizes on its serial writer queue. Keep that
 // blocking synchronization off Swift's cooperative executor when an ASR task
 // retires a sealed source.
-private func waitForSourceJournal(_ store:RecordingJournal) async {
+func waitForSourceJournal(_ store:RecordingJournal) async {
     await withCheckedContinuation { (continuation:CheckedContinuation<Void,Never>) in
         DispatchQueue.global(qos:.utility).async {store.wait();continuation.resume()}
     }
@@ -446,6 +524,7 @@ private func captureControlGatesMatch(requestedPaused: Bool, capturePaused: Bool
 private func consumeEcho(
     config: Config, raw: RecordingJournal, reference: RecordingJournal,
     cleaned: Mailbox, resetControl: EchoResetControl, pauseTail:CapturePauseTailBarrier,
+    diagnostics:EchoCaptureDiagnostics,
     failure: @escaping (String) -> Void, processorOverride: EchoPreprocessor? = nil,
     onReferenceWait: (() -> Void)? = nil, onEmptyRawPoll: (() -> Void)? = nil
 ) async {
@@ -454,6 +533,7 @@ private func consumeEcho(
     let processor:EchoPreprocessor
     if let processorOverride {processor=processorOverride}
     else {processor=await EchoPreprocessor.load(modelDirectory:modelPath)}
+    diagnostics.setModel(await processor.diagnostics())
     var micCursor = 0
     var referenceCursor = 0
     var window: [ReferencePacket] = []
@@ -478,6 +558,8 @@ private func consumeEcho(
         if !accepted || before<0 || after-before != audio.count {
             cleaned.journal?.setProcessingError("echo_output_write_incomplete")
             _ = reportCleanedWriteFailure()
+        } else {
+            diagnostics.recordOutput(audio)
         }
     }
     func completePauseIfReady() async {
@@ -543,6 +625,10 @@ private func consumeEcho(
             let output = await processor.process(microphone: mic, at: stamp,
                                                  reference: aligned?.audio ?? Data(),
                                                  at: aligned?.at ?? stamp)
+            let referenceFailure:String? = aligned == nil && output.status != .modelUnavailable ?
+                "reference_missing_or_misaligned" : nil
+            diagnostics.recordFrame(microphone:mic,reference:aligned?.audio,result:output,
+                                    referenceAligned:aligned != nil,referenceFailure:referenceFailure)
             currentPacketConsumed=true
             if !output.audio.isEmpty {writeCleaned(output.audio,at:output.captureTime)}
             if reportCleanedWriteFailure() {break}
@@ -598,7 +684,7 @@ func runSourceCaptureSession(config: Config) async throws {
     let cloud = !config.isLocalOnly
     let cacheID = config.appendCaptureCacheID ?? UUID().uuidString
     let directory = meetingCacheRoot().appendingPathComponent(cacheID)
-    if config.appendCaptureCacheID == nil {_ = try prepareMeetingCacheRoot();try FileManager.default.createDirectory(at:directory,withIntermediateDirectories:false,attributes:[.posixPermissions:0o700])}
+    if config.appendCaptureCacheID == nil {try FileManager.default.createDirectory(at:directory,withIntermediateDirectories:false,attributes:[.posixPermissions:0o700])}
     let writerLease=try SessionCacheWriterLease.acquire(directory:directory)
     defer {writerLease.release()}
     let existingMetadata:[String:Any]
@@ -649,6 +735,7 @@ func runSourceCaptureSession(config: Config) async throws {
         if let id=value["source_id"] as? String,isTranscriptAudioTrack(id) {sourceMetadata[id]=value}
     }
     var echoTask: Task<Void, Never>?
+    let echoDiagnostics=EchoCaptureDiagnostics()
     var pauseTransition:CapturePauseTransition?
     var pauseTransitionStarted=0.0
     var pauseTransitionRevision:sig_atomic_t = -1
@@ -682,8 +769,8 @@ func runSourceCaptureSession(config: Config) async throws {
         paused=true;referenceAvailable=false;lastReferenceAttempt=0
         let transition=CapturePauseTransition();pauseTransition=transition;pauseTransitionStarted=at
         pauseTransitionRevision=captureControlRevision
-        DispatchQueue.global(qos:.userInitiated).async {microphone.stop();transition.finishHardwarePart(nil)}
-        DispatchQueue.global(qos:.userInitiated).async {do {try referenceTap.stopChecked();transition.finishHardwarePart(nil)} catch {transition.finishHardwarePart((error as? Failure)?.code ?? "reference_tap_stop_failed")}}
+        DispatchQueue.global(qos:.userInitiated).async {finishCapturePauseWriter(rawStore,transition:transition) {microphone.stop()}}
+        DispatchQueue.global(qos:.userInitiated).async {finishCapturePauseWriter(referenceStore,transition:transition) {try referenceTap.stopChecked()}}
         DispatchQueue.global(qos:.userInitiated).async {do {try routes.stopChecked();transition.finishHardwarePart(nil)} catch {transition.finishHardwarePart((error as? Failure)?.code ?? "source_tap_stop_failed")}}
         transition.finishUploadDrain()
     }
@@ -720,7 +807,6 @@ func runSourceCaptureSession(config: Config) async throws {
         }
         metadata["archive_only_before_append"]=true
     }
-    if cloud,let words=config.asrVocabulary,!words.isEmpty {metadata["asr_vocabulary"]=words;metadata["asr_vocabulary_confirmed"]=config.asrVocabularyConfirmed==true}
     if config.cloudSessionConfirmed == true {
         metadata["cloud_session_authorized"] = true
         metadata["unlimited_session"] = config.unlimitedSession==true
@@ -1017,6 +1103,11 @@ func runSourceCaptureSession(config: Config) async throws {
         }
     }
 
+    func persistEchoDiagnostics() {
+        var generations=metadata["echo_processing_by_generation"] as? [String:[String:Any]] ?? [:]
+        generations[micTrack]=echoDiagnostics.snapshot(micTrack:micTrack,rawTrack:rawTrack,referenceTrack:referenceTrack)
+        metadata["echo_processing_by_generation"]=generations
+    }
     func emitHealth(_ elapsed: Double, includeSpeakerDiagnostics:Bool=true) async {
         var health: [String: Any] = ["type": "health", "session": config.session,
                                      "elapsed_seconds": elapsed, "paused": paused,
@@ -1039,9 +1130,12 @@ func runSourceCaptureSession(config: Config) async throws {
         micValues["raw_signal"]=rawSignal
         micValues["input_diagnostics"]=microphoneDiagnostics
         micValues["clean_signal"]=cleanBox.signalMetrics()
+        let echoSnapshot=echoDiagnostics.snapshot(micTrack:micTrack,rawTrack:rawTrack,referenceTrack:referenceTrack)
+        micValues["echo_processing"]=echoSnapshot
         health["mic"] = micValues
         metadata["microphone_capture_diagnostics"]=microphoneDiagnostics
         metadata["capture_signal_health"]=health
+        persistEchoDiagnostics()
         do {try persistMetadata()} catch {state.fault("cache_metadata_write_failed")}
         emit(health)
     }
@@ -1112,6 +1206,7 @@ func runSourceCaptureSession(config: Config) async throws {
         try persistMetadata()
         echoTask = Task { await consumeEcho(config: config, raw: rawStore, reference: referenceStore,
                                             cleaned: cleanBox, resetControl: echoReset,pauseTail:pauseTail,
+                                            diagnostics:echoDiagnostics,
                                             failure: { state.fault($0) }) }
         if cloud {
             let mic = SourceCaptureEntry(id: micTrack, store: micStore, producer: cleanBox)
@@ -1155,6 +1250,13 @@ func runSourceCaptureSession(config: Config) async throws {
             let requestRevision = captureControlRevision
             let requestedPaused = capturePaused != 0
             if requestRevision != captureControlRevision { continue }
+            if requestedPaused && paused && pauseTransition != nil && pauseTransitionRevision != requestRevision {
+                // Resume followed by pause can happen between loop turns. The
+                // devices are still stopping/stopped; reuse that teardown but
+                // give the latest revision its own echo-tail boundary.
+                pauseTransitionRevision=requestRevision
+                pauseTail.begin(revision:requestRevision,throughByte:pauseTailTargetByte(rawStore))
+            }
             if paused,let failure=pauseTransition?.snapshot().failure {
                 state.fault("capture_pause_teardown_failed:"+failure);interrupted=2
                 emit(["type":"recording_control_failed","session":config.session,"action":"pause","reason":"capture_pause_teardown_failed","audio_retained":true])
@@ -1198,8 +1300,11 @@ func runSourceCaptureSession(config: Config) async throws {
                 lastReferenceAttempt = 0
                 let transition=CapturePauseTransition();pauseTransition=transition;pauseTransitionStarted=now
                 pauseTransitionRevision=requestRevision
-                DispatchQueue.global(qos:.userInitiated).async { microphone.stop();transition.finishHardwarePart(nil) }
-                DispatchQueue.global(qos:.userInitiated).async { do { try referenceTap.stopChecked();transition.finishHardwarePart(nil) } catch { transition.finishHardwarePart((error as? Failure)?.code ?? "reference_tap_stop_failed") } }
+                // Raw/reference have no ASR checkpoint writer. Persist their
+                // last partial chunk before any pause-tail receipt can release
+                // refinement. Keep ended=false for same-session continuation.
+                DispatchQueue.global(qos:.userInitiated).async {finishCapturePauseWriter(rawStore,transition:transition) {microphone.stop()}}
+                DispatchQueue.global(qos:.userInitiated).async {finishCapturePauseWriter(referenceStore,transition:transition) {try referenceTap.stopChecked()}}
                 DispatchQueue.global(qos:.userInitiated).async { do { try routes.stopChecked();transition.finishHardwarePart(nil) } catch { transition.finishHardwarePart((error as? Failure)?.code ?? "source_tap_stop_failed") } }
                 // Saved audio continues draining while paused; no upload
                 // shutdown is pending and no actor/task round trip is needed.
@@ -1471,6 +1576,8 @@ func runSourceCaptureSession(config: Config) async throws {
         }
     }
     if let echoTask { await echoTask.value }
+    persistEchoDiagnostics()
+    do {try persistMetadata()} catch {state.fault("cache_metadata_write_failed")}
     if cloud, let origin {
         for entry in entries.values where !entry.consumersStarted {
             await startConsumers(for: entry, at: origin)
@@ -1746,6 +1853,7 @@ func sourceCaptureCancellationChecks(config:Config,directory:URL) async throws->
     let consumer=Task {
         await consumeEcho(config:config,raw:raw,reference:reference,cleaned:output,
                           resetControl:reset,pauseTail:CapturePauseTailBarrier(),
+                          diagnostics:EchoCaptureDiagnostics(),
                           failure:{_ in preconditionFailure("reference cancellation must not report an audio fault")},
                           processorOverride:EchoPreprocessor(stream:CaptureCancellationEchoFixture()),
                           onReferenceWait:{probe.mark()})
@@ -1771,6 +1879,7 @@ func sourceCaptureCancellationChecks(config:Config,directory:URL) async throws->
     let emptyConsumer=Task {
         await consumeEcho(config:config,raw:emptyRaw,reference:emptyReference,cleaned:emptyOutput,
                           resetControl:EchoResetControl(),pauseTail:CapturePauseTailBarrier(),
+                          diagnostics:EchoCaptureDiagnostics(),
                           failure:{_ in preconditionFailure("empty consumer cancellation must not report an audio fault")},
                           processorOverride:EchoPreprocessor(stream:CaptureCancellationEchoFixture()),
                           onEmptyRawPoll:{emptyProbe.mark()})

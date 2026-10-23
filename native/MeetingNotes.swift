@@ -70,7 +70,7 @@ final class MeetingNotesStore {
     var recognize: (Data) throws -> String = MeetingNotesStore.visionText
     init(directory: URL) {
         self.directory = directory.standardizedFileURL
-        notes = directory.appendingPathComponent("notes", isDirectory: true)
+        notes = self.directory.appendingPathComponent("notes", isDirectory: true)
     }
     static func exportMeetingFiles(_ target: CachedMeeting, to folder: URL) throws {
         try queue.sync {
@@ -79,12 +79,25 @@ final class MeetingNotesStore {
         }
     }
     static func hash(_ data: Data) -> String { SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined() }
-    private func safe(_ url: URL) throws {
-        let path = url.standardizedFileURL.path
-        guard path == directory.path || path.hasPrefix(directory.path + "/") else { throw Failure(code: "notes_path_scope") }
+    func safe(_ url: URL) throws {
+        // Foundation normalizes existing /private/tmp paths differently from
+        // not-yet-created children. Compare the two OS aliases consistently.
+        func scopePath(_ value:URL)->String {
+            let path=value.standardizedFileURL.path
+            for prefix in ["/private/tmp", "/private/var"] {
+                if path==prefix || path.hasPrefix(prefix+"/") {return String(path.dropFirst(8))}
+            }
+            return path
+        }
+        let path=scopePath(url),base=scopePath(directory)
+        guard path == base || path.hasPrefix(base + "/") else { throw Failure(code: "notes_path_scope") }
         var part = url.standardizedFileURL
         while part.path != "/" {
-            if let type = try? FileManager.default.attributesOfItem(atPath: part.path)[.type], type as? FileAttributeType == .typeSymbolicLink { throw Failure(code: "notes_symlink") }
+            if let type = try? FileManager.default.attributesOfItem(atPath: part.path)[.type], type as? FileAttributeType == .typeSymbolicLink {
+                let target=(try? FileManager.default.destinationOfSymbolicLink(atPath:part.path)) ?? ""
+                let systemAlias=["/tmp","/var"].contains(part.path) && ["/private"+part.path,"private"+part.path].contains(target)
+                if !systemAlias {throw Failure(code:"notes_symlink")}
+            }
             part.deleteLastPathComponent()
         }
     }

@@ -27,7 +27,6 @@ func pipelineFixture(directory:URL) async throws->PipelineFixtureResult {
     events.append(["type":"speaker_model","state":"loading","capture":false])
     let embeddingURL=directory.deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("local-embedding-install/3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx")
     let loadStart=Date();try await remote.load(directory:directory,embeddingModel:embeddingURL);try await mic.load(directory:directory,embeddingModel:embeddingURL)
-    let warmStart=Date();try await remote.warmStandby();try await mic.warmStandby();let warmSeconds=Date().timeIntervalSince(warmStart)
     events.append(["type":"speaker_model","state":"ready","identity_available":false]);events.append(["type":"started"])
     // Real model, exact capture mailbox and synthetic PCM16 packets. No websocket or devices.
     let remoteDecoder=Decoder();let micDecoder=Decoder()
@@ -92,7 +91,8 @@ func pipelineFixture(directory:URL) async throws->PipelineFixtureResult {
         var item=segment(id,lo,hi);let joined=timeline.join(item,source:"remote",epoch:"fixture-remote");precondition(joined["reason"] as? String==reason);item["speaker"]=joined;events.append(item);checks+=1
     }
     var partial=segment("partial",0,0);partial["end_time_known"]=false;precondition(timeline.join(partial,source:"remote",epoch:"fixture-remote")["basis"] as? String=="unknown");checks+=1
-    var unreliable=single;unreliable["quality_flags"]=["language_shift_needs_review"];precondition(timeline.join(unreliable,source:"remote",epoch:"fixture-remote")["reason"] as? String=="asr_quality");checks+=1
+    var unreliable=single;unreliable["quality_flags"]=["language_shift_needs_review"];precondition(timeline.join(unreliable,source:"remote",epoch:"fixture-remote")["basis"] as? String=="anonymous_cluster");checks+=1
+    unreliable["quality_flags"]=["audio_corrupt"];precondition(timeline.join(unreliable,source:"remote",epoch:"fixture-remote")["reason"] as? String=="asr_quality");checks+=1
     var mismatch=single;mismatch["epoch"]="other";precondition(timeline.join(mismatch,source:"remote",epoch:"fixture-remote")["reason"] as? String=="source_or_epoch_mismatch");checks+=1
     timeline.replace([frame(0,1,[2],2)],revision:2);single["speaker"]=timeline.join(single,source:"remote",epoch:"fixture-remote");events.append(single)
     timeline.replace([frame(0,1,[7],1)],revision:1);precondition(timeline.revision==2 && timeline.frames[0].activeSlots==[2]);checks+=1
@@ -147,5 +147,5 @@ func pipelineFixture(directory:URL) async throws->PipelineFixtureResult {
     precondition(changedText["speaker_runs"]==nil);checks+=1
     _ = try await naturalWords.close(flush:false)
     events.append(["type":"stopped","reason":"user_stop"])
-    return PipelineFixtureResult(events:events,evidence:["type":"native_pipeline_validation","passed":checks,"real_model":true,"real_model_input":"synthetic_silence_and_tone","model_warmup":true,"model_warmup_seconds":warmSeconds,"real_embedding_loaded_in_pipeline":true,"real_embedding_output_from_mock_single_speaker_interval":true,"mock_asr":true,"mock_speaker_timeline":true,"capture":false,"network_audio":false,"identity_enrollment":false,"coreml_cache_may_be_warm":true,"quality_verified":false,"packets_per_track":40,"seconds_per_track":4,"mic_origin":0.25,"model_load_seconds":Date().timeIntervalSince(loadStart)-Date().timeIntervalSince(processing),"pipeline_processing_seconds":Date().timeIntervalSince(processing)])
+    return PipelineFixtureResult(events:events,evidence:["type":"native_pipeline_validation","passed":checks,"real_model":true,"real_model_input":"synthetic_silence_and_tone","real_embedding_loaded_in_pipeline":true,"real_embedding_output_from_mock_single_speaker_interval":true,"mock_asr":true,"mock_speaker_timeline":true,"capture":false,"network_audio":false,"identity_enrollment":false,"coreml_cache_may_be_warm":true,"quality_verified":false,"packets_per_track":40,"seconds_per_track":4,"mic_origin":0.25,"model_load_seconds":Date().timeIntervalSince(loadStart)-Date().timeIntervalSince(processing),"pipeline_processing_seconds":Date().timeIntervalSince(processing)])
 }

@@ -46,8 +46,8 @@ func meetingSummaryVoiceArchive()->VoiceprintArchive? {
     // Development and offline QA builds must stay inside their synthetic
     // namespace even when the real user's archive exists on the same Mac.
     let developmentQA=info["OfflineQA"] as? Bool==true || info["DevelopmentWorkspace"] as? Bool==true
-    let base=FileManager.default.urls(for:.applicationSupportDirectory,in:.userDomainMask)[0]
-    let folder=RuntimeConfiguration.dataRoot().appendingPathComponent(developmentQA ? "DevelopmentQA/Voiceprints":"Voiceprints")
+    let base=RuntimeConfiguration.dataRoot()
+    let folder=base.appendingPathComponent(developmentQA ? "DevelopmentQA/Voiceprints":"Voiceprints")
     let domain=developmentQA ? "synthetic_model_output":"consented_live_audio"
     return try? VoiceprintArchiveStore(folder:folder,domain:domain).load()
 }
@@ -316,7 +316,7 @@ final class MeetingParticipantLabel:NSView {
     names.setSpeaker(segment:"d",name:"主要人物")
     guard names.mergeSpeaker(from:remoteKey,to:mainKey,humanConfirmed:true) else{throw Failure(code:"meeting_card_summary_fixture_merge")}
     guard let suggestionKey=names.key(segment:"suggested-0") else{throw Failure(code:"meeting_card_summary_suggestion_key")}
-    let suggestion=VoiceprintRecommendation(personID:"00000000-0000-4000-8000-000000000021",name:"测试人物甲",archiveRevision:1,evidenceCount:3,
+    let suggestion=VoiceprintRecommendation(personID:"00000000-0000-4000-8000-000000000021",name:"示例人",archiveRevision:1,evidenceCount:3,
         support:(0..<3).map{VoiceprintEvidenceRef(id:"suggested-\($0)",revision:1)},groupConsistent:false)
     guard names.reconcileAutoVoiceprint(key:suggestionKey,candidate:suggestion),names.displayName(speaker:suggestionKey)==nil,
           names.name(speaker:suggestionKey)==nil else{throw Failure(code:"meeting_card_partial_voice_suggestion_setup")}
@@ -325,22 +325,22 @@ final class MeetingParticipantLabel:NSView {
                            occupiedBytes:0,tracks:["mic","remote"],audioCleaned:false,warning:false,retiredBytes:0)
     let voicePersonID="00000000-0000-4000-8000-000000000021"
     let enabledArchive=VoiceprintArchive(schema:1,partition:SpeakerEmbeddingBackend.partition,inputKind:"consented_live_audio",revision:1,
-        people:[VoiceprintPerson(id:voicePersonID,name:"测试人物甲",authorizedAt:"2026-10-14T00:00:00Z",enabled:true,samples:[])])
+        people:[VoiceprintPerson(id:voicePersonID,name:"示例人",authorizedAt:"2026-10-14T00:00:00Z",enabled:true,samples:[])])
     let summary=meetingParticipantSummary(item,voiceArchive:enabledArchive)
-    guard summary.contains("主要人物"),summary.contains("次要人物"),summary.contains("可能是测试人物甲"),!summary.contains("测试人物甲（声音识别）") else{throw Failure(code:"meeting_card_summary_ranking_or_unknown_filter")}
+    guard summary.contains("主要人物"),summary.contains("次要人物"),summary.contains("可能是示例人"),!summary.contains("示例人（声音识别）") else{throw Failure(code:"meeting_card_summary_ranking_or_unknown_filter")}
     guard meetingParticipantSummary(item,voiceArchive:enabledArchive)==summary else{throw Failure(code:"meeting_card_summary_memoized_repeat")}
     let disabledArchive=VoiceprintArchive(schema:1,partition:SpeakerEmbeddingBackend.partition,inputKind:"consented_live_audio",revision:2,
-        people:[VoiceprintPerson(id:voicePersonID,name:"测试人物甲",authorizedAt:"2026-10-14T00:00:00Z",enabled:false,samples:[])])
-    guard !meetingParticipantSummary(item,voiceArchive:disabledArchive).contains("可能是测试人物甲") else{throw Failure(code:"meeting_card_disabled_voice_candidate_visible")}
+        people:[VoiceprintPerson(id:voicePersonID,name:"示例人",authorizedAt:"2026-10-14T00:00:00Z",enabled:false,samples:[])])
+    guard !meetingParticipantSummary(item,voiceArchive:disabledArchive).contains("可能是示例人") else{throw Failure(code:"meeting_card_disabled_voice_candidate_visible")}
     let revisedArchive=VoiceprintArchive(schema:1,partition:SpeakerEmbeddingBackend.partition,inputKind:"consented_live_audio",revision:2,
-        people:[VoiceprintPerson(id:voicePersonID,name:"测试人物甲",authorizedAt:"2026-10-14T00:00:00Z",enabled:true,samples:[])])
-    guard !meetingParticipantSummary(item,voiceArchive:revisedArchive).contains("可能是测试人物甲") else{throw Failure(code:"meeting_card_stale_voice_archive_revision_visible")}
+        people:[VoiceprintPerson(id:voicePersonID,name:"示例人",authorizedAt:"2026-10-14T00:00:00Z",enabled:true,samples:[])])
+    guard !meetingParticipantSummary(item,voiceArchive:revisedArchive).contains("可能是示例人") else{throw Failure(code:"meeting_card_stale_voice_archive_revision_visible")}
     let spanSupport=(0..<3).map{VoiceprintEvidenceRef(id:"suggested-\($0)",revision:1)}
-    let recognized=VoiceprintRecommendation(personID:voicePersonID,name:"测试人物甲",archiveRevision:1,evidenceCount:3,support:spanSupport,groupConsistent:false,recognizedSupport:spanSupport)
+    let recognized=VoiceprintRecommendation(personID:voicePersonID,name:"示例人",archiveRevision:1,evidenceCount:3,support:spanSupport,groupConsistent:false,recognizedSupport:spanSupport)
     guard names.reconcileAutoVoiceprint(key:suggestionKey,candidate:recognized) else{throw Failure(code:"meeting_card_span_setup")}
     try names.snapshot(session:session).write(to:folder.appendingPathComponent("session-names.json"),options:.atomic)
     let spanSummary=meetingParticipantSummary(item,voiceArchive:enabledArchive)
-    guard spanSummary.contains("测试人物甲") && !spanSummary.contains("（声音识别）"),!spanSummary.contains("可能是测试人物甲") else{throw Failure(code:"meeting_card_identified_spans_show_actual_name")}
+    guard spanSummary.contains("示例人") && !spanSummary.contains("（声音识别）"),!spanSummary.contains("可能是示例人") else{throw Failure(code:"meeting_card_identified_spans_show_actual_name")}
     let empty=MeetingParticipantLabel(names:[])
     guard empty.isHidden else{throw Failure(code:"meeting_card_empty_hidden")}
     let populated=MeetingParticipantLabel(names:summary)

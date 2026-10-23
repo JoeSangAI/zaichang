@@ -13,7 +13,7 @@ final class FakeProfileKeyProvider:ProfileKeyProvider {
     func deleteKey()throws{value=nil}
 }
 struct KeychainProfileProvider:ProfileKeyProvider {
-    let permitted:Bool;static let service="com.zaichang.app.identity-v2"
+    let permitted:Bool;static var service:String {RuntimeConfiguration.identityService}
     func key(create:Bool)throws->SymmetricKey {
         guard permitted,Bundle.main.object(forInfoDictionaryKey:"OfflineOnly") as? Bool != true else{throw ProfileStoreError.permission}
         let query:[String:Any]=[kSecClass as String:kSecClassGenericPassword,kSecAttrService as String:Self.service,kSecAttrAccount as String:"archive-aes-256",kSecReturnData as String:true,kSecMatchLimit as String:kSecMatchLimitOne]

@@ -42,10 +42,10 @@ func meetingSpeakerRefinementUIChecks(directory:URL)throws->[String] {
     var names=SessionNames()
     let original:[String:Any]=["type":"segment","session":"session-a","source_id":"mic","epoch":"epoch-1","segment_id":"word-1","revision":1,"final":true,"speaker":["basis":"anonymous_cluster","cluster_id":0,"source_id":"mic","epoch":"epoch-1"]]
     names.register(segment:"word-1",item:original)
-    names.set(segment:"word-1",name:"人工确认的顾问甲")
+    names.set(segment:"word-1",name:"人工确认的张三")
     var refined=original;refined["speaker"]=["basis":"anonymous_cluster","cluster_id":1,"source_id":"mic","epoch":"epoch-1"]
     names.register(segment:"word-1",item:refined)
-    precondition(names.name(segment:"word-1")=="人工确认的顾问甲")
+    precondition(names.name(segment:"word-1")=="人工确认的张三")
     precondition(names.displayName(segment:"word-1")?.origin == .manual)
     checks.append("human_name_survives_automatic_speaker_projection")
 
@@ -111,7 +111,7 @@ func meetingSpeakerRefinementUIChecks(directory:URL)throws->[String] {
     view.segments=Dictionary(uniqueKeysWithValues:events.compactMap{event in (event["segment_id"] as? String).map{($0,event)}})
     view.sequence=events.compactMap{$0["segment_id"] as? String}
     for event in events {view.naming.register(segment:event["segment_id"] as! String,item:event)}
-    view.naming.setSpeaker(segment:"known",name:"人工确认的顾问甲")
+    view.naming.setSpeaker(segment:"known",name:"人工确认的张三")
     view.pausedTailRevision=9;view.pausedTailStates=["mic":"processing","remote-g1":"processing","remote-g2":"processing","remote-g3":"processing","remote-g4":"processing"]
     let lock=NSLock();var pending:(UUID,(UUID,Result<Data,Error>)->Void)?
     view.speakerRefinementExecutorOverride={_,_,_,token,done in lock.lock();pending=(token,done);lock.unlock()}
@@ -137,7 +137,7 @@ func meetingSpeakerRefinementUIChecks(directory:URL)throws->[String] {
     while Date()<commitDeadline && view.speakerRefinementToken != nil {RunLoop.main.run(until:Date().addingTimeInterval(0.01))}
     precondition(FileManager.default.fileExists(atPath:committed.path))
     precondition((view.segments["target"]?["speaker"] as? [String:Any])?["cluster_id"] as? Int==0)
-    precondition(view.naming.name(segment:"target")=="人工确认的顾问甲")
+    precondition(view.naming.name(segment:"target")=="人工确认的张三")
     checks.append("delegate_commits_and_projects_result_without_losing_manual_speaker_name")
 
     try FileManager.default.removeItem(at:committed)

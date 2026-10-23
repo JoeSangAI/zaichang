@@ -204,6 +204,7 @@ final class MeetingNotesController: NSObject, NSTextViewDelegate {
     let editor = MeetingNoteEditor()
     let scroller = NSScrollView()
     let status = NSTextField(wrappingLabelWithString: "")
+    let retryLoadButton = NSButton(title: "重新读取笔记", target: nil, action: nil)
     let toggle = NSButton(title: "笔记", target: nil, action: nil)
     var panelWidth: NSLayoutConstraint!
     var transportRow: NSStackView?
@@ -217,6 +218,7 @@ final class MeetingNotesController: NSObject, NSTextViewDelegate {
     private var binding = UUID()
     private var dirty = false
     private var loading = false
+    private var loadFailureMessage: String?
     private var knownIDs = Set<String>()
     private var imageReferences: [String: MeetingNoteImage] = [:]
     private var migrateDraft = false
@@ -257,6 +259,7 @@ final class MeetingNotesController: NSObject, NSTextViewDelegate {
         editor.setAccessibilityLabel("笔记记事本"); editor.reportError = { [weak self] in self?.fail($0) }
         editor.importImages = { [weak self] data in
             guard let self, let store = self.store else { throw Failure(code: "notes_missing_image_store") }
+            guard self.loadFailureMessage == nil else { throw Failure(code: "notes_read_only_load_failure") }
             let imported = try MeetingNotesStore.queue.sync {
                 try data.map { bytes -> (MeetingNoteImage, Data) in
                     let image = try store.importImage(bytes)
@@ -275,7 +278,9 @@ final class MeetingNotesController: NSObject, NSTextViewDelegate {
         }
         scroller.documentView = editor
         status.font = .systemFont(ofSize: 10); status.textColor = MeetingVisualStyle.muted; status.isHidden = true
-        let content = NSStackView(views: [scroller, status]); content.orientation = .vertical; content.alignment = .leading; content.spacing = 4
+        retryLoadButton.target = self; retryLoadButton.action = #selector(retryLoad)
+        retryLoadButton.bezelStyle = .inline; retryLoadButton.isHidden = true
+        let content = NSStackView(views: [scroller, status, retryLoadButton]); content.orientation = .vertical; content.alignment = .leading; content.spacing = 4
         content.translatesAutoresizingMaskIntoConstraints = false; panel.addSubview(content)
         NSLayoutConstraint.activate([content.leadingAnchor.constraint(equalTo: panel.leadingAnchor, constant: 10), content.trailingAnchor.constraint(equalTo: panel.trailingAnchor, constant: -6), content.topAnchor.constraint(equalTo: panel.topAnchor), content.bottomAnchor.constraint(equalTo: panel.bottomAnchor, constant: -6), scroller.widthAnchor.constraint(equalTo: content.widthAnchor), status.widthAnchor.constraint(equalTo: content.widthAnchor)])
         toggle.isEnabled = false; editor.isEditable = false
@@ -350,7 +355,7 @@ final class MeetingNotesController: NSObject, NSTextViewDelegate {
         return result
     }
     func textDidChange(_ notification: Notification) {
-        guard !loading else { return }
+        guard !loading, loadFailureMessage == nil else { return }
         revision += 1; dirty = true
         do { _ = try paragraphs(recordUndo: true) } catch { fail(error) }
         editor.fitAttachments(); scheduleSave()
@@ -361,6 +366,9 @@ final class MeetingNotesController: NSObject, NSTextViewDelegate {
     }
     @discardableResult func flushPendingChanges(wait: Bool = true) -> Bool {
         debounce?.invalidate(); debounce = nil
+        // A missing-image placeholder is presentation only. Never serialize it
+        // or drop the original image reference when leaving this meeting.
+        guard loadFailureMessage == nil else { return true }
         guard let store, dirty || pending > 0 || migrateDraft else { return true }
         let values: [MeetingNotebookParagraph]
         do { values = try paragraphs() } catch { fail(error); return false }
@@ -406,18 +414,20 @@ final class MeetingNotesController: NSObject, NSTextViewDelegate {
                 }
                 unsaved.removeValue(forKey: id)
             }
-            lastError = nil; status.stringValue = ""; status.isHidden = true
+            if loadFailureMessage == nil { lastError = nil; status.stringValue = ""; status.isHidden = true }
             return true
         } catch { fail(error); return false }
     }
-    func bind(_ id: String?) {
-        guard cacheID != id else { return }
+    @objc func retryLoad() { bind(cacheID, reload: true) }
+    func bind(_ id: String?, reload: Bool = false) {
+        guard cacheID != id || reload else { return }
         if !flushPendingChanges(), let cacheID, let store {
             unsaved[cacheID] = UnsavedNotebook(content: editor.attributedString(), paragraphs: try? paragraphs(), knownIDs: knownIDs, store: store, migrateDraft: migrateDraft, images: imageReferences)
         }
         binding = UUID(); revision = 0; dirty = false; migrateDraft = false
         saveSequence = 0; completedSave = 0
         cacheID = id; snapshot = MeetingNotesSnapshot(); knownIDs = []; lastError = nil; status.stringValue = ""; status.isHidden = true
+        loadFailureMessage = nil; retryLoadButton.isHidden = true
         imageReferences = [:]
         store = (Credential.offline && owner?.recoveryRootOverride == nil ? nil : id).flatMap { UUID(uuidString: $0) == nil ? nil : $0 }.map { MeetingNotesStore(directory: owner!.recoveryBase().appendingPathComponent($0)) }
         loading = true; defer { loading = false }
@@ -425,6 +435,7 @@ final class MeetingNotesController: NSObject, NSTextViewDelegate {
         toggle.isEnabled = store != nil; editor.isEditable = store != nil
         guard let store else { return }
         do {
+            var unreadableImages = 0
             let loaded = try MeetingNotesStore.queue.sync { () throws -> (MeetingNotesSnapshot, NSAttributedString, Bool) in
                 let saved = try store.snapshot(); let content = NSMutableAttributedString(string: "")
                 for note in MeetingNotebook.ordered(saved) {
@@ -432,9 +443,14 @@ final class MeetingNotesController: NSObject, NSTextViewDelegate {
                     let paragraph = NSMutableAttributedString(string: note.text.replacingOccurrences(of: "\u{fffc}", with: "").replacingOccurrences(of: "\n", with: "\u{2028}"), attributes: baseAttributes)
                     for image in note.images {
                         imageReferences[image.sha256] = image
-                        let character = NSMutableAttributedString(attributedString: NSAttributedString(attachment: try MeetingNoteEditor.attachment(store.imageData(image))))
-                        character.addAttribute(.zaichangNoteImageSHA, value: image.sha256, range: NSRange(location: 0, length: character.length))
-                        paragraph.append(character)
+                        do {
+                            let character = NSMutableAttributedString(attributedString: NSAttributedString(attachment: try MeetingNoteEditor.attachment(store.imageData(image))))
+                            character.addAttribute(.zaichangNoteImageSHA, value: image.sha256, range: NSRange(location: 0, length: character.length))
+                            paragraph.append(character)
+                        } catch {
+                            unreadableImages += 1
+                            paragraph.append(NSAttributedString(string: "\n[图片无法读取]", attributes: baseAttributes))
+                        }
                     }
                     if paragraph.length == 0 { paragraph.append(NSAttributedString(string: "重点标记", attributes: baseAttributes)) }
                     let identity = MeetingNoteIdentity(id: note.note_id, anchor: note.anchor)
@@ -453,14 +469,23 @@ final class MeetingNotesController: NSObject, NSTextViewDelegate {
                 return (saved, content, !draft.isEmpty)
             }
             snapshot = loaded.0; knownIDs = Set(snapshot.visible.map(\.note_id)); migrateDraft = loaded.2
-            let buffer = unsaved.removeValue(forKey: id!)
+            // Keep any previous failed-save buffer until a complete reload can
+            // safely restore it to the editable notebook.
+            let buffer = unreadableImages > 0 ? unsaved[id!] : unsaved.removeValue(forKey: id!)
             if let buffer { imageReferences.merge(buffer.images) { _, buffered in buffered } }
             editor.textStorage?.setAttributedString(buffer?.content ?? loaded.1)
             dirty = migrateDraft || editor.attributedString() != loaded.1 || snapshot.visible.contains { $0.starred || !$0.archive || $0.text.contains("\u{fffc}") }
             editor.setSelectedRange(NSRange(location: 0, length: 0)); editor.typingAttributes = baseAttributes
             editor.fitAttachments(); editor.scrollToBeginningOfDocument(nil); editor.needsDisplay = true
-            if dirty { scheduleSave() }
-        } catch { editor.isEditable = false; fail(error) }
+            if unreadableImages > 0 {
+                dirty = false
+                showLoadFailure("\(unreadableImages) 张笔记图片缺失或损坏，文字已保留，只读查看。恢复原图片后可重新读取。", code: "notes_image_load_failed")
+            } else if dirty { scheduleSave() }
+        } catch { showLoadFailure("笔记读取失败，原文件未改动。修复文件或访问权限后可重新读取。", code: String(describing: error)) }
+    }
+    private func showLoadFailure(_ message: String, code: String) {
+        loadFailureMessage = message; lastError = code; editor.isEditable = false
+        status.stringValue = message; status.isHidden = false; retryLoadButton.isHidden = false
     }
     @objc func togglePanel() {
         expanded.toggle(); (owner?.workspaceOwner ?? owner)?.notesExpanded = expanded; applyExpansion()

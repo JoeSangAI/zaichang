@@ -2,6 +2,8 @@
 
 目前提供源码安装。需要一台 Apple Silicon Mac、macOS 15 或更新版本、Python 3.12、Xcode Command Line Tools 和 Swift 6。Codex 助理还需要安装并登录 Codex CLI。
 
+也可直接请你的 agent 按 [AGENT_SETUP.md](AGENT_SETUP.md) 安装。
+
 ## 首次安装
 
 1. 安装 Python 3.12。若本机没有合适版本，可从 [Python for macOS](https://www.python.org/downloads/macos/) 下载 Python 3.12 的 universal2 安装器。
@@ -13,10 +15,9 @@
    codex
    ```
 
-4. 在终端运行以下命令。`requirements.txt` 会先安装依赖下载器所需的证书包，以及说话人辅助工具需要的 NumPy；随后下载并校验约 570 MB 的锁定依赖，最后构建、运行离线自检并安装应用：
+4. 先从仓库首页克隆本仓库，然后在终端运行以下命令。`requirements.txt` 会先安装依赖下载器所需的证书包，以及说话人辅助工具需要的 NumPy；随后下载并校验约 570 MB 的锁定依赖，最后构建、运行离线自检并安装应用：
 
    ```sh
-   git clone https://github.com/JoeSangAI/zaichang.git
    cd zaichang
    python3 --version
    swift --version
@@ -46,12 +47,24 @@ python3 scripts/install_standalone.py
 
 安装器更新 `~/Applications/在场.app`，并保留 `ZaichangStandalone` 数据目录。若当前在场仍在运行，请先退出应用再更新。
 
+## 依赖下载失败
+
+安装 Python 依赖时若出现 `CERTIFICATE_VERIFY_FAILED`，运行 Python 安装目录里的 `Install Certificates.command`（例如 `open "/Applications/Python 3.12/Install Certificates.command"`）后重试。
+
+下载脚本会自动重试网络错误，已校验的文件再次运行时复用，直接重跑即可。若始终在 huggingface.co 失败而其他站点正常，通常是本机代理无法访问 Hugging Face：能直连时可去掉代理环境变量重跑，例如 `env -u HTTPS_PROXY -u HTTP_PROXY python3 scripts/bootstrap_dependencies.py`。
+
 ## 自检
 
 如果只需要验证已构建的离线测试应用，可运行：
 
 ```sh
-python3 scripts/offline_check.py
+python3 scripts/offline_check.py --edition standalone
+```
+
+修改源码后，另运行 Python 测试套件：
+
+```sh
+python3 -m unittest discover -s tests -t .
 ```
 
 安装脚本本身会先完成构建和离线自检。依赖来源、固定版本和许可证见[依赖与许可证](DEPENDENCIES.md)。

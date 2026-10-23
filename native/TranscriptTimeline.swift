@@ -93,7 +93,8 @@ struct TranscriptTimeline {
             cursor = hi; text += body
             var next = run
             next["session"] = item["session"]; next["source_id"] = item["source_id"]; next["epoch"] = item["epoch"]; next["track"] = item["track"]
-            next["reading_echo_of"] = item["reading_echo_of"]
+            next["reading_echo_of"] = item["reading_echo_of"] ?? speaker["echo_of"]
+            next["reading_draft"] = item["reading_draft"]
             next["coarse_source_word_spans"] = item["coarse_source_word_spans"];next["parent_segment_id"] = item["segment_id"];next["revision"] = item["revision"];next["final"] = item["final"];next["end_time_known"] = item["end_time_known"];next["quality_flags"] = item["quality_flags"]
             func identity(_ value: [String: Any]) -> NSDictionary {
                 var copy = value; copy.removeValue(forKey: "revision"); copy.removeValue(forKey: "label"); if copy["basis"] as? String == "unknown" { copy.removeValue(forKey: "reason") }; return NSDictionary(dictionary: copy)
@@ -125,6 +126,7 @@ struct TranscriptTimeline {
             // borrow reading context; never spread a multiple-speaker label
             // over the clear speech on either side.
             guard (item["speaker"] as? [String:Any])?["basis"] as? String=="unknown",
+                  (item["speaker"] as? [String:Any])?["reason"] as? String != "acoustic_unresolved",
                   let start=item["start"] as? Double,let end=item["end"] as? Double,
                   start.isFinite,end.isFinite,end>start,end-start<=3,
                   let body=item["text"] as? String else{return false}
@@ -140,7 +142,7 @@ struct TranscriptTimeline {
         }
         func isManual(_ token:String?)->Bool {token?.hasPrefix("manual:")==true}
         var groups:[Group]=[]
-        for row in rows where row.item["reading_echo_of"] == nil {
+        for row in rows where row.item["reading_draft"] as? Bool != true && row.item["reading_echo_of"] == nil && (row.item["speaker"] as? [String:Any])?["echo_of"] == nil {
             let token=identity(row.id,row.item)
             let brief=token==nil && shortAmbiguity(row.item)
             if var current=groups.last,current.parent==row.parent,closeEnough(current,row.item) {
@@ -174,6 +176,21 @@ struct TranscriptTimeline {
             item["text"]=group.parts.map{$0.1["text"] as? String ?? ""}.joined()
             return ReadingTurn(id:id,parent:group.parent,item:item,parts:group.parts,
                                uncertain:group.knownPart != nil && group.uncertain)
+        }
+    }
+
+    /// Raw-text mode reveals every retained utterance, including echo copies.
+    /// This only removes reading metadata; stored evidence remains unchanged.
+    static func revealReadingEchoes(_ events:[[String:Any]])->[[String:Any]] {
+        func reveal(_ input:[String:Any])->[String:Any] {
+            var row=input;row.removeValue(forKey:"reading_echo_of");row.removeValue(forKey:"reading_draft");row.removeValue(forKey:"reading_projection_notice")
+            if var speaker=row["speaker"] as? [String:Any] {speaker.removeValue(forKey:"echo_of");row["speaker"]=speaker}
+            return row
+        }
+        return events.map {event in
+            var row=reveal(event)
+            if let runs=event["speaker_runs"] as? [[String:Any]] {row["speaker_runs"]=runs.map(reveal)}
+            return row
         }
     }
 
@@ -217,20 +234,20 @@ func readingTurnChecks()->Int {
     typealias Row=(id:String,parent:String,item:[String:Any])
     func leaf(_ id:String,_ parent:String,_ start:Double,_ end:Double,_ text:String,_ who:String?)->Row {
         var speaker:[String:Any]=["basis":"unknown"]
-        if let who=who {speaker=["basis":"anonymous_cluster","cluster_id":who=="说话人甲" ? 0:1]}
+        if let who=who {speaker=["basis":"anonymous_cluster","cluster_id":who=="Alice" ? 0:1]}
         var item:[String:Any]=["start":start,"end":end,"text":text,
                                "speaker":speaker]
         item["test_identity"]=who
         return (id,parent,item)
     }
     let rows:[Row]=[
-        leaf("a1","p",0,0.6,"说话人甲先说，","说话人甲"),
+        leaf("a1","p",0,0.6,"Alice先说，","Alice"),
         leaf("u1","p",0.6,0.8,"嗯，",nil),
-        leaf("a2","p",0.8,1.4,"继续解释。","说话人甲"),
-        leaf("j1","p",1.4,2.0,"说话人乙回应。","说话人乙"),
+        leaf("a2","p",0.8,1.4,"继续解释。","Alice"),
+        leaf("j1","p",1.4,2.0,"Bob回应。","Bob"),
         leaf("u2","p",2.0,3.5,"这里有一长段暂时无法判断的发言。",nil),
-        leaf("a3","p",3.5,4.0,"说话人甲补充。","说话人甲"),
-        leaf("j2","p",4.0,4.5,"说话人乙收尾。","说话人乙")]
+        leaf("a3","p",3.5,4.0,"Alice补充。","Alice"),
+        leaf("j2","p",4.0,4.5,"Bob收尾。","Bob")]
     let identity:(String,[String:Any])->String?={_,item in item["test_identity"] as? String}
     let turns=TranscriptTimeline.readingTurns(rows,identity:identity)
     precondition(turns.count==5 && turns.map{$0.parts.count}==[3,1,1,1,1] &&
@@ -242,25 +259,25 @@ func readingTurnChecks()->Int {
     precondition(turns.map{$0.item["text"] as! String}.joined()==original &&
                  turns.flatMap{$0.parts}.map{$0.1["text"] as! String}.joined()==original &&
                  turns[0].id=="p:turn:0" && turns[1].id=="j1");checks+=1
-    let leading:[Row]=[leaf("lead","q",10,10.2,"嗯",nil),leaf("known","q",10.2,11,"接着说。","说话人甲")]
+    let leading:[Row]=[leaf("lead","q",10,10.2,"嗯",nil),leaf("known","q",10.2,11,"接着说。","Alice")]
     let attached=TranscriptTimeline.readingTurns(leading,identity:identity)
     precondition(attached.count==1 && attached[0].uncertain && attached[0].parts.map{$0.0}==["lead","known"] &&
                  (attached[0].item["speaker"] as! [String:Any])["cluster_id"] as? Int==0);checks+=1
-    let interleaved:[Row]=[leaf("p1","p",0,1,"甲","说话人甲"),leaf("q1","q",1,2,"乙","说话人乙"),leaf("p2","p",2,3,"丙","说话人甲")]
+    let interleaved:[Row]=[leaf("p1","p",0,1,"甲","Alice"),leaf("q1","q",1,2,"乙","Bob"),leaf("p2","p",2,3,"丙","Alice")]
     precondition(TranscriptTimeline.readingTurns(interleaved,identity:identity).map{$0.id}==["p1","q1","p2"]);checks+=1
-    let manual:[Row]=[leaf("m1","r",0,1,"同一人","说话人甲"),leaf("m2","r",1,2,"人工独立确认","manual:m2"),leaf("m3","r",2,3,"仍为同一人","说话人甲")]
+    let manual:[Row]=[leaf("m1","r",0,1,"同一人","Alice"),leaf("m2","r",1,2,"人工独立确认","manual:m2"),leaf("m3","r",2,3,"仍为同一人","Alice")]
     precondition(TranscriptTimeline.readingTurns(manual,identity:identity).count==3);checks+=1
     let manualBoundary:[Row]=[leaf("before","b",0,0.2,"嗯",nil),leaf("confirmed","b",0.2,1,"人工已确认","manual:confirmed"),leaf("after","b",1,1.2,"啊",nil)]
     let separated=TranscriptTimeline.readingTurns(manualBoundary,identity:identity)
     precondition(separated.map{$0.parts.count}==[1,1,1] && separated.allSatisfy{!$0.uncertain});checks+=1
-    let longGap:[Row]=[leaf("g1","g",0,1,"前句","说话人甲"),leaf("g2","g",4.5,5.5,"后句","说话人甲")]
+    let longGap:[Row]=[leaf("g1","g",0,1,"前句","Alice"),leaf("g2","g",4.5,5.5,"后句","Alice")]
     precondition(TranscriptTimeline.readingTurns(longGap,identity:identity).count==2);checks+=1
     // A short confirmed acoustic boundary must stay local. Otherwise one
     // overlapped word would label an entire clear paragraph as multiple voices.
     for reason in ["overlap","speaker_change"] {
         var boundary=leaf("boundary","edge",2,2.2,"对。",nil)
         boundary.item["speaker"]=["basis":"multiple","reason":reason,"cluster_ids":[0,1]]
-        let source:[Row]=[leaf("left","edge",0,2,"甲清楚解释。","说话人甲"),boundary,leaf("right","edge",2.2,4,"甲继续解释。","说话人甲")]
+        let source:[Row]=[leaf("left","edge",0,2,"甲清楚解释。","Alice"),boundary,leaf("right","edge",2.2,4,"甲继续解释。","Alice")]
         let bounded=TranscriptTimeline.readingTurns(source,identity:identity)
         precondition(bounded.count==3 && bounded.allSatisfy{!$0.uncertain} && bounded.map{$0.parts.count}==[1,1,1]);checks+=1
         precondition((bounded[0].item["speaker"] as? [String:Any])?["basis"] as? String=="anonymous_cluster" &&
@@ -280,7 +297,7 @@ func readingTurnChecks()->Int {
                      manualTurns[0].item["test_identity"] as? String=="manual:left" &&
                      manualTurns[2].item["test_identity"] as? String=="manual:right");checks+=1
     }
-    let ordinaryUnknown:[Row]=[leaf("clear-before","unknown",0,2,"解释前半句。","说话人甲"),leaf("brief-unknown","unknown",2,2.2,"嗯。",nil),leaf("clear-after","unknown",2.2,4,"解释后半句。","说话人甲")]
+    let ordinaryUnknown:[Row]=[leaf("clear-before","unknown",0,2,"解释前半句。","Alice"),leaf("brief-unknown","unknown",2,2.2,"嗯。",nil),leaf("clear-after","unknown",2.2,4,"解释后半句。","Alice")]
     let ordinaryTurns=TranscriptTimeline.readingTurns(ordinaryUnknown,identity:identity)
     precondition(ordinaryTurns.count==1 && ordinaryTurns[0].uncertain && ordinaryTurns[0].parts.map{$0.0}==ordinaryUnknown.map{$0.id});checks+=1
     let sharedText="这是同一段通过电脑播放又被麦克风录到的发言。"

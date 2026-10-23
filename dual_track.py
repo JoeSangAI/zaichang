@@ -53,7 +53,7 @@ class DualTrack:
             cluster = e.get("cluster_id")
             if cluster is not None and (not isinstance(cluster, str) or not cluster):
                 raise ValueError("invalid anonymous cluster")
-            # Identity from input is intentionally ignored; mic is a channel, not 说话人乙.
+            # Identity from input is intentionally ignored; mic is a channel, not a person.
             label = "本地麦克风" if track == "mic" else "远端混音"
             basis = "channel"
             if track == "remote" and cluster:

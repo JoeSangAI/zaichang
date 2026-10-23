@@ -247,11 +247,13 @@ extension Delegate {
                 if let message=speakerRefinementMessage,owner.coarseProcessingSummary==nil {text=prefix+" · "+message}
             }
             heading.stringValue=text+(currentCacheID != nil || phase.elapsed>0 ? " · "+phase.time:"")
-            heading.font = .systemFont(ofSize:12,weight:.medium)
+            heading.font = .systemFont(ofSize:12,weight:.regular)
             heading.textColor=phase.phase == .recording ? MeetingVisualStyle.accent:MeetingVisualStyle.muted
         }
         if sequence.isEmpty && recoveredArchiveText==nil {
-            if current || (phase.phase == .idle && localOnlyMode) {
+            if showsMissingCredentialHint && currentCacheID==nil && !localOnlyMode {
+                empty.stringValue="去设置里填写百炼密钥"
+            } else if current || (phase.phase == .idle && localOnlyMode) {
                 empty.stringValue=phase.phase == .recording ? "正在保存声音，下方波形显示收音状态":phase.phase == .paused ? "录音已暂停，声音保存在本机":currentCacheID != nil ? "录音已保存，右键会议选择“打开会议文件…”即可查看":"点击开始录音，声音将保存在本机"
             } else {
                 switch phase.phase {

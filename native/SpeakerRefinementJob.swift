@@ -67,6 +67,13 @@ final class SpeakerRefinementJob {
         return token
     }
 
+    /// Continue a completed stage without changing its cancellation/commit scope.
+    func prepareNextProcess(_ token:UUID)throws {
+        lock.lock();defer{lock.unlock()}
+        guard generation==token,!busyValue,process==nil else{throw SpeakerRefinementJobError.cancelled}
+        waitingValue=true
+    }
+
     func isCurrent(_ token:UUID)->Bool {
         lock.lock();defer{lock.unlock()};return generation==token
     }
@@ -87,7 +94,7 @@ final class SpeakerRefinementJob {
 
     @discardableResult
     func startProcess(request:[String:Any],executable:URL,arguments:[String],maximumInput:Int=2*1024*1024,
-                      reservedToken:UUID?=nil,done:@escaping(UUID,Result<Data,Error>)->Void)->UUID {
+                      maximumOutput:Int?=nil,reservedToken:UUID?=nil,done:@escaping(UUID,Result<Data,Error>)->Void)->UUID {
         let token=reservedToken ?? reserve()
         pendingWork.enter()
         queue.async {
@@ -100,14 +107,15 @@ final class SpeakerRefinementJob {
             var result:Result<Data,Error>
             do {
                 guard self.isCurrent(token) else{throw SpeakerRefinementJobError.cancelled}
-                guard executable.isFileURL,maximumInput>0,maximumInput<=4*1024*1024 else{throw SpeakerRefinementJobError.invalidRequest}
+                let outputLimit=maximumOutput ?? self.outputLimit
+                guard executable.isFileURL,maximumInput>0,maximumInput<=4*1024*1024,outputLimit>0,outputLimit<=8*1024*1024 else{throw SpeakerRefinementJobError.invalidRequest}
                 let data=try JSONSerialization.data(withJSONObject:request,options:[.sortedKeys])
                 guard data.count+1<=maximumInput else{throw SpeakerRefinementJobError.invalidRequest}
 
                 let proc=Process(),stdin=Pipe(),stdout=Pipe()
                 proc.executableURL=executable
                 proc.arguments=arguments
-                var environment=ProcessInfo.processInfo.environment
+                var environment=RuntimeConfiguration.childEnvironment()
                 for name in ["DASHSCOPE_API_KEY","ALIYUN_API_KEY","BAILIAN_API_KEY"] {environment.removeValue(forKey:name)}
                 environment["PYTHONDONTWRITEBYTECODE"]="1"
                 proc.environment=environment
@@ -133,14 +141,14 @@ final class SpeakerRefinementJob {
                 let descriptor=stdout.fileHandleForReading.fileDescriptor
                 let flags=fcntl(descriptor,F_GETFL)
                 guard flags>=0,fcntl(descriptor,F_SETFL,flags | O_NONBLOCK)>=0 else{throw SpeakerRefinementJobError.invalidOutput}
-                var bytes=Data();bytes.reserveCapacity(min(self.outputLimit,64*1024))
+                var bytes=Data();bytes.reserveCapacity(min(outputLimit,64*1024))
                 var eof=false
                 while !eof {
                     var buffer=[UInt8](repeating:0,count:16*1024)
                     let count=buffer.withUnsafeMutableBytes{Darwin.read(descriptor,$0.baseAddress,$0.count)}
                     if count>0 {
                         bytes.append(contentsOf:buffer.prefix(count))
-                        if bytes.count>self.outputLimit {Self.stop(proc);throw SpeakerRefinementJobError.outputTooLarge}
+                        if bytes.count>outputLimit {Self.stop(proc);throw SpeakerRefinementJobError.outputTooLarge}
                     } else if count==0 {eof=true}
                     else if errno==EAGAIN || errno==EWOULDBLOCK {
                         // Once our child exits, don't wait for an unrelated
@@ -155,8 +163,8 @@ final class SpeakerRefinementJob {
                 guard stillCurrent else{throw SpeakerRefinementJobError.cancelled}
                 if expired {throw SpeakerRefinementJobError.timeout}
                 guard proc.terminationStatus==0 else {
-                    if let value=(try? JSONSerialization.jsonObject(with:bytes)) as? [String:Any],value["ok"] as? Bool==false,
-                       let code=value["error"] as? String,code.range(of:"^[a-z_0-9]{1,80}$",options:.regularExpression) != nil {throw SpeakerRefinementJobError.serviceFailure(code)}
+                    if let value=(try? JSONSerialization.jsonObject(with:bytes)) as? [String:Any],value["ok"] as? Bool==false || value["type"] as? String=="error",
+                       let code=(value["error"] ?? value["code"]) as? String,code.range(of:"^[a-z_0-9]{1,80}$",options:.regularExpression) != nil {throw SpeakerRefinementJobError.serviceFailure(code)}
                     throw SpeakerRefinementJobError.helperFailed(proc.terminationStatus)
                 }
                 do {

@@ -1,30 +1,41 @@
 """Build an isolated development QA app from project-owned sources; never launch or use a network API."""
 from pathlib import Path
-import argparse,os,shutil,subprocess,plistlib,json,hashlib,platform,sys
+import argparse,os,shutil,subprocess,plistlib,json,hashlib,atexit
+from build_guard import acquire_desktop_idle_lease
 root=Path(__file__).resolve().parents[1]
-if platform.system() != 'Darwin' or platform.machine() != 'arm64':
-    raise SystemExit('在场公开版构建需要 macOS 15+ 与 Apple Silicon。')
-if sys.version_info < (3, 12):
-    raise SystemExit('在场公开版构建需要 Python 3.12 或更新版本。')
 native=root/'native'
 work=root/'.runtime/build'
-work.mkdir(parents=True,exist_ok=True)
 parser=argparse.ArgumentParser()
+parser.add_argument('--edition',choices=['joe','standalone'],default='joe')
 parser.add_argument('--ui-only',action='store_true')
 parser.add_argument('--helper-only',action='store_true')
+parser.add_argument('--desktop-idle-confirmed',action='store_true',help='After explicit user confirmation that recorders are stopped, hold the installed desktop startup lock throughout the build.')
 args=parser.parse_args()
+if args.edition=='standalone':work=work/'standalone'
+work.mkdir(parents=True,exist_ok=True)
 if args.ui_only and args.helper_only:
     parser.error('--ui-only and --helper-only cannot be combined')
 
 # Development must yield to the installed recorder. Inspect executable names,
 # never command arguments (which may contain provider configuration).
-processes=subprocess.run(['ps','-axo','comm='],capture_output=True,text=True,check=True).stdout.splitlines()
-if any(Path(name.strip()).name in {'MeetingCapture','IntegratedCapture'} for name in processes):
-    raise SystemExit('正在录音或处理已录音频，暂不编译。请等在场完成后再运行。')
-os.nice(10)
+if args.desktop_idle_confirmed:
+    desktop_idle_lease=acquire_desktop_idle_lease()
+    atexit.register(os.close,desktop_idle_lease)
+else:
+    processes=subprocess.run(['ps','-axo','comm='],capture_output=True,text=True,check=True).stdout.splitlines()
+    if any(Path(name.strip()).name in {'MeetingCapture','IntegratedCapture'} for name in processes):
+        raise SystemExit('正在录音或处理已录音频，暂不编译。请等在场完成后再运行。')
+priority_lowered=False
+try:
+    os.nice(10);priority_lowered=True
+except PermissionError:
+    if not args.desktop_idle_confirmed:
+        raise
+    print('CPU priority adjustment unavailable; desktop idle lease remains held throughout compilation.',flush=True)
 
-final_app=work/'会议助理开发QA.app'
-staging=work/'.会议助理开发QA.staging.app'
+app_name='在场独立版QA' if args.edition=='standalone' else '会议助理开发QA'
+final_app=work/(app_name+'.app')
+staging=work/('.'+app_name+'.staging.app')
 if staging.exists(): shutil.rmtree(staging)
 partial=args.ui_only or args.helper_only
 helper_app=final_app/'Contents/Helpers/会议采集离线QA.app'
@@ -68,30 +79,30 @@ def source_file(name):
 icon_source=native/'assets/MeetingAssistantIcon.icns';icon_target=app/'Contents/Resources/MeetingAssistantIcon.icns'
 icon_target.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(icon_source,icon_target)
 if not args.helper_only:
- ui=['RecordingAttention','RecordingAttentionChecks','MeetingCoarseRefinement','MeetingCoarseRefinementChecks','MeetingCoarseRefinementUI','MeetingCoarseRefinementUIChecks','MeetingArchiveUI','MeetingArchiveUIChecks','OfflineSpeakerBackend','WholeMeetingSpeakerRefinement','SpeakerRefinement','SpeakerRefinementChecks','SpeakerRefinementArtifact','SpeakerRefinementArtifactChecks','SpeakerRefinementJob','SpeakerRefinementJobChecks','MeetingSpeakerRefinementUI','MeetingSpeakerRefinementUIChecks','MeetingAudioAssets','MeetingAudioAssetsChecks','MeetingAudioAssetsUI','MeetingAudioAssetsUIChecks','VoiceprintAcousticContext','HistoricalVoiceLearning','HistoricalVoiceLearningChecks','ASRTermsChecks','ASRTermVocabulary','ASRTermsUI','MeetingSidebarSizing','MeetingFilesExport','MeetingFilesExportChecks','MeetingLibraryManagement','SpeakerConfirmationUI','SpeakerConfirmationChecks','SharedPersonIdentity','SharedPersonIdentityChecks','VoiceprintLearningChecks','LocalSemanticNames','MeetingDeletion','MeetingLibraryActions','MeetingLibraryChecks','MeetingAgentContext','MeetingAgentContextChecks','VoiceprintRecommendations','VoiceprintRecommendationUI','VoiceprintRecommendationChecks','MeetingAbsoluteTime','SessionSpeakerKey','RecordingStartChoice','RecordingDashboard','RecordingDashboardChecks','CoarseProgressChecks','StartupFlowChecks','MeetingVisualStyle','SpeakerAudioPreview','SpeakerAudioPreviewChecks','MinimalSpeakerUI','MeetingCardSummary','SpeakerReview','SpeakerReviewChecks','MeetingAutoTitle','MeetingAutoTitleFixture','MinimalUIFlowChecks','MeetingTitleUI','MeetingRecordDetails','IncrementalTranscript','SpeakerHistoryChecks','AudioSourceIdentity','RecordingControlChecks','WorkspaceChecks','MeetingWorkspace','MeetingWorkspaceTranscriptionStopChecks','MergedMeetingChecks','TranscriptTimeline','RealtimeTimelineChecks','ReviewRender','WallClockFixture','MeetingUIModel','IdentityArchive','BalanceClient','ProfileArchiveStore','LocalSpeakerBackend','SpeakerPipeline','SessionRecovery','RecordingJournal','SessionCacheRecoveryChecks','CapturePrimitives','PipelineFixture','ASRDecoder','SpeakerEmbeddingBackend','OfflineQASupport','MeetingTranslation','MeetingAssistantUI'];binary=work/'MeetingAssistant'
+ ui=['RecordingAttention','RecordingAttentionChecks','MeetingCoarseRefinement','MeetingCoarseRefinementChecks','MeetingCoarseRefinementUI','MeetingCoarseRefinementUIChecks','MeetingArchiveUI','MeetingArchiveUIChecks','OfflineSpeakerBackend','WholeMeetingSpeakerRefinement','SpeakerRefinement','SpeakerRefinementChecks','SpeakerRefinementArtifact','SpeakerRefinementArtifactChecks','SpeakerRefinementJob','SpeakerRefinementJobChecks','MeetingSpeakerRefinementUI','MeetingSpeakerRefinementUIChecks','MeetingAudioAssets','MeetingAudioAssetsChecks','MeetingAudioAssetsUI','MeetingAudioAssetsUIChecks','VoiceprintAcousticContext','HistoricalVoiceLearning','HistoricalVoiceLearningChecks','MeetingSidebarSizing','MeetingFilesExport','MeetingFilesExportChecks','MeetingLibraryManagement','SpeakerConfirmationUI','SpeakerConfirmationChecks','SharedPersonIdentity','SharedPersonIdentityChecks','VoiceprintLearningChecks','LocalSemanticNames','MeetingDeletion','MeetingLibraryActions','MeetingLibraryChecks','MeetingAgentContext','MeetingAgentContextChecks','VoiceprintRecommendations','VoiceprintRecommendationUI','VoiceprintRecommendationChecks','MeetingAbsoluteTime','SessionSpeakerKey','RecordingStartChoice','RecordingDashboard','RecordingDashboardChecks','CoarseProgressChecks','StartupFlowChecks','MeetingVisualStyle','SpeakerAudioPreview','SpeakerAudioPreviewChecks','MinimalSpeakerUI','MeetingCardSummary','SpeakerReview','SpeakerReviewChecks','MeetingAutoTitle','MeetingAutoTitleFixture','MinimalUIFlowChecks','MeetingTitleUI','MeetingRecordDetails','IncrementalTranscript','SpeakerHistoryChecks','AudioSourceIdentity','RecordingControlChecks','WorkspaceChecks','MeetingWorkspace','MeetingWorkspaceTranscriptionStopChecks','MergedMeetingChecks','TranscriptTimeline','RealtimeTimelineChecks','ReviewRender','WallClockFixture','MeetingUIModel','IdentityArchive','BalanceClient','ProfileArchiveStore','LocalSpeakerBackend','SpeakerPipeline','SessionRecovery','RecordingJournal','SessionCacheRecoveryChecks','CapturePrimitives','PipelineFixture','ASRDecoder','SpeakerEmbeddingBackend','OfflineQASupport','MeetingTranslation','MeetingTranslationChecks','MeetingAssistantUI'];binary=work/'MeetingAssistant'
  ui_sources=work/'ui-sources';ui_sources.mkdir(parents=True,exist_ok=True)
  for stale in ui_sources.glob('*.swift'):stale.unlink()
- ui+=['MeetingAssistantLinks','MeetingAgentPanel','MeetingAgentBridge','MeetingAgentChecks']
- ui+=['RuntimeConfiguration','RuntimeConfigurationChecks','PublicDemoRender','MeetingTranslationChecks']
- ui+=['MeetingNotes','MeetingNotesUI','MeetingNotesChecks','MeetingMinutes','MeetingMinutesUI','MeetingMinutesChecks']
- ui+=['SavedVoiceRecognition','SavedVoiceRecognitionUI','SavedVoiceRecognitionChecks','VoiceSuggestionPersistenceChecks','HistoricalVoiceEnrollment','VoiceprintAutomaticLearning','VoiceprintAutomaticLearningChecks']
+ ui+=['MeetingAssistantLinks','MeetingMarkdown','MeetingMarkdownChecks','MeetingAgentPanel','MeetingAgentBridge','MeetingAgentChecks']
+ ui+=['RuntimeConfiguration','RuntimeConfigurationChecks','MeetingMinutes','MeetingMinutesUI','MeetingMinutesChecks','EditionUIChecks']
+ ui+=['MeetingNotes','MeetingNotesUI','MeetingNotesChecks']
+ ui+=['MeetingSpeechIntervals','MeetingAcousticRefinement','SavedVoiceRecognition','SavedVoiceRecognitionUI','SavedVoiceRecognitionChecks','VoiceSuggestionPersistenceChecks','HistoricalVoiceEnrollment','VoiceprintAutomaticLearning','VoiceprintAutomaticLearningChecks']
  for name in ui:shutil.copy2(source_file(name),ui_sources/(name+'.swift'))
  subprocess.run(['xcrun','swiftc','-whole-module-optimization','-parse-as-library','-swift-version','5','-module-cache-path',str(work/'module-cache'),*[str(ui_sources/(f+'.swift')) for f in ui],'-o',str(binary)],check=True)
  shutil.copy2(binary,app/'Contents/MacOS/MeetingAssistant')
 if not args.ui_only:
  h=work/'harness';s=h/'Sources/IntegratedCapture';s.mkdir(parents=True,exist_ok=True)
  for stale in s.glob('*.swift'):stale.unlink()
- files=['MeetingCoarseRefinement','OfflineSpeakerBackend','WholeMeetingSpeakerRefinement','SpeakerRefinement','SpeakerRefinementArtifact','VoiceprintAcousticContext','HistoricalVoiceLearning','ASRTermProtocolChecks','ASRTermVocabulary','MeetingAbsoluteTime','SessionSpeakerKey','CaptureSafetyChecks','SpeakerHistoryChecks','SourcePipelineFixture','AudioSourceIdentity','ProcessAudioSources','SourceCaptureSession','EchoPreprocessor','TranscriptTimeline','LocalSpeakerBackend','SpeakerPipeline','SessionRecovery','RecordingJournal','SessionCacheRecoveryChecks','CapturePrimitives','PipelineFixture','ASRDecoder','SpeakerEmbeddingBackend','IndependentClockFixture','OfflineSpeechProbe','BufferedCaptureFixture','LocalRecording','MeetingCapture','NetworkRecoveryFixture']
- files+=['SavedVoiceRecognition','RuntimeConfiguration','RuntimeConfigurationChecks']
+ files=['MeetingCoarseRefinement','OfflineSpeakerBackend','WholeMeetingSpeakerRefinement','SpeakerRefinement','SpeakerRefinementArtifact','VoiceprintAcousticContext','HistoricalVoiceLearning','MeetingAbsoluteTime','SessionSpeakerKey','CaptureSafetyChecks','SpeakerHistoryChecks','SourcePipelineFixture','AudioSourceIdentity','ProcessAudioSources','SourceCaptureSession','EchoPreprocessor','TranscriptTimeline','LocalSpeakerBackend','SpeakerPipeline','SessionRecovery','RecordingJournal','SessionCacheRecoveryChecks','CapturePrimitives','PipelineFixture','ASRDecoder','SpeakerEmbeddingBackend','IndependentClockFixture','OfflineSpeechProbe','BufferedCaptureFixture','PublicAudioTrial','LocalRecording','MeetingCapture','NetworkRecoveryFixture']
+ files+=['RuntimeConfiguration','RuntimeConfigurationChecks']
+ files+=['SavedVoiceRecognition','MeetingAcousticRefinement','MeetingSpeechIntervals']
  for f in files:shutil.copy2(source_file(f),s/(f+'.swift'))
  c=h/'Sources/SherpaC';c.mkdir(parents=True,exist_ok=True);shutil.copy2(native/'local-embedding-install/c-api.h',c/'c-api.h');(c/'module.modulemap').write_text('module SherpaC { header "c-api.h" link "sherpa-onnx-c-api" export * }\n')
  sdk=native/'local-speaker-install/sdk';lib=native/'local-embedding-install/runtime/lib'
- # Keep the generated Swift package relocatable; dependency sources remain ignored project-local inputs.
- sdk_relative=os.path.relpath(sdk,h);lib_relative=os.path.relpath(lib,h)
- (h/'Package.swift').write_text('// swift-tools-version: 6.0\nimport PackageDescription\nlet package=Package(name:"MeetingDevelopment",platforms:[.macOS(.v15)],dependencies:[.package(path:'+json.dumps(sdk_relative,ensure_ascii=False)+')],targets:[.systemLibrary(name:"SherpaC"),.executableTarget(name:"IntegratedCapture",dependencies:[.product(name:"FluidAudio",package:"sdk"),"SherpaC"],linkerSettings:[.unsafeFlags(["-L",'+json.dumps(lib_relative,ensure_ascii=False)+',"-Xlinker","-rpath","-Xlinker",'+json.dumps(lib_relative,ensure_ascii=False)+'])])],swiftLanguageModes:[.v5])\n')
+ # SDK and its binary dependency NemoTextProcessing are both in the project; no remote Swift package.
+ (h/'Package.swift').write_text('// swift-tools-version: 6.0\nimport PackageDescription\nlet package=Package(name:"MeetingDevelopment",platforms:[.macOS(.v15)],dependencies:[.package(path:'+json.dumps(str(sdk),ensure_ascii=False)+')],targets:[.systemLibrary(name:"SherpaC"),.executableTarget(name:"IntegratedCapture",dependencies:[.product(name:"FluidAudio",package:"sdk"),"SherpaC"],linkerSettings:[.unsafeFlags(["-L",'+json.dumps(str(lib),ensure_ascii=False)+',"-Xlinker","-rpath","-Xlinker",'+json.dumps(str(lib),ensure_ascii=False)+'])])],swiftLanguageModes:[.v5])\n')
  build_env=dict(os.environ,CLANG_MODULE_CACHE_PATH=str(work/'module-cache'),SWIFT_MODULECACHE_PATH=str(work/'module-cache'))
  subprocess.run(['xcrun','swift','build','--disable-sandbox','--package-path',str(h),'--scratch-path',str(work/'sdk-build'),'--cache-path',str(work/'cache'),'--config-path',str(work/'config'),'--security-path',str(work/'security'),'--jobs','2'],check=True,env=build_env)
- helper=app/'Contents/Helpers/会议采集离线QA.app';cap=helper/'Contents/MacOS/MeetingCapture';shutil.copy2(work/'sdk-build/arm64-apple-macosx/debug/IntegratedCapture',cap);cap.chmod(0o755);subprocess.run(['install_name_tool','-rpath',lib_relative,'@executable_path/../Frameworks',str(cap)],check=True)
+ helper=app/'Contents/Helpers/会议采集离线QA.app';cap=helper/'Contents/MacOS/MeetingCapture';shutil.copy2(work/'sdk-build/arm64-apple-macosx/debug/IntegratedCapture',cap);cap.chmod(0o755);subprocess.run(['install_name_tool','-rpath',str(lib),'@executable_path/../Frameworks',str(cap)],check=True)
  resources=work/'sdk-build/arm64-apple-macosx/debug/FluidAudio_FluidAudio.bundle'
  helper_resources=helper/'Contents/Resources'
  if not resources.is_dir(): raise FileNotFoundError(f'FluidAudio resources missing from current build: {resources}')
@@ -132,6 +143,9 @@ helper_info={
  'NSMicrophoneUsageDescription':'收录会议中的麦克风声音，并保存在本机；选择转写时生成会议文字。',
  'NSAudioCaptureUsageDescription':'收录电脑播放的会议声音，并区分应用来源。',
 }
+helper_info['ZaichangEdition']=args.edition
+if args.edition=='standalone':
+ helper_info.update(DataRootName='ZaichangStandalone',CFBundleIdentifier='com.joesang.zaichang.standalone.capture.development-qa')
 helper_plist=helper/'Contents/Info.plist'
 helper_plist.write_bytes(plistlib.dumps(helper_info,sort_keys=True))
 subprocess.run(['codesign','--force','--sign','-',str(helper)],check=True)
@@ -160,6 +174,9 @@ info={
  'NSMicrophoneUsageDescription':helper_info['NSMicrophoneUsageDescription'],
  'NSAudioCaptureUsageDescription':helper_info['NSAudioCaptureUsageDescription'],
 }
+info['ZaichangEdition']=args.edition
+if args.edition=='standalone':
+ info.update(DataRootName='ZaichangStandalone',CFBundleIdentifier='com.joesang.zaichang.standalone.development-qa')
 (app/'Contents/Info.plist').write_bytes(plistlib.dumps(info,sort_keys=True))
 runtime=app/'Contents/Resources/Runtime'
 if runtime.is_symlink(): runtime.unlink()
@@ -179,7 +196,7 @@ for snapshot in [work/'ui-sources',work/'harness/Sources/IntegratedCapture']:
   built_sources[str(current.relative_to(root))]=digest
 
 if final_app.exists():
- replaced=work/'.会议助理开发QA.previous.app'
+ replaced=work/('.'+app_name+'.previous.app')
  if replaced.exists(): shutil.rmtree(replaced)
  final_app.rename(replaced)
  try:
@@ -191,7 +208,7 @@ if final_app.exists():
 else:
  staging.rename(final_app)
 (work/'source-receipt.json').write_text(json.dumps({
- 'schema':1,'sources':built_sources,
+ 'schema':1,'edition':args.edition,'sources':built_sources,
  'ui_sha256':hashlib.sha256((final_app/'Contents/MacOS/MeetingAssistant').read_bytes()).hexdigest(),
  'helper_sha256':hashlib.sha256((final_app/'Contents/Helpers/会议采集离线QA.app/Contents/MacOS/MeetingCapture').read_bytes()).hexdigest(),
 },ensure_ascii=False,indent=2)+'\n')

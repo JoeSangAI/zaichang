@@ -100,12 +100,55 @@ extension Delegate {
         let code=coarseErrorCode(error)
         if code=="coarse_key_unavailable" {return "整理服务未连接，请检查服务设置"}
         if code=="previous_attempt_unknown" {return "上次整理中断，可点击重新整理"}
+        if code=="provider_timeout" {return "整理服务连接超时，可重试；原音与原文保留"}
+        if code=="provider_dns_unavailable" {return "整理服务地址解析失败，请检查网络；原音与原文保留"}
+        if code=="provider_tls_unavailable" {return "整理服务安全连接失败；原音与原文保留"}
+        if code=="provider_connection_unavailable" {return "整理服务连接中断，可重试；原音与原文保留"}
         if code=="provider_http_400" || code=="provider_http_404" {return "整理服务暂不支持本次请求，已有文字保留"}
         if code=="provider_http_401" || code=="provider_http_403" {return "整理服务无访问权限，请检查服务设置"}
         if code=="coarse_audio_incomplete" {return "录音尚有文字待补齐，暂未整理"}
         if code=="coarse_no_complete_text" {return "这段录音尚无可整理的完整转写；原音已保留，补齐转写后可重试"}
         return "AI整理未完成，已有文字保留"
     }
+    /// Local acoustic reconciliation always precedes text-only presentation.
+    /// It uses the same cancellable job as the following cloud stage.
+    func runAutomaticAcoustic(folder:URL,session:String,allowUnsealed:Bool,job:SpeakerRefinementJob,token:UUID,
+                              done:@escaping(Result<Void,Error>)->Void) {
+        // Existing injected text-worker tests have no PCM/model. Real meeting
+        // validation exercises this helper and the same validated commit below.
+        if coarseRefinementExecutorOverride != nil {done(.success(()));return}
+        if currentCacheID==folder.lastPathComponent,activeSession==session {savedVoiceRecognitionJob.cancel()}
+        let namesFile=folder.appendingPathComponent("session-names.json")
+        func manualState()->Data? {
+            guard let data=try? Data(contentsOf:namesFile),let object=(try? JSONSerialization.jsonObject(with:data)) as? [String:Any] else{return nil}
+            let fields=Set(["schema","session","sentences","speakers","assignments","runAnchors","aliases","voiceConfirmations","personReferences","autoSuppressed"])
+            return try? JSONSerialization.data(withJSONObject:object.filter{fields.contains($0.key)},options:[.sortedKeys])
+        }
+        let namesBefore=manualState()
+        let model=URL(fileURLWithPath:root).appendingPathComponent("native/local-embedding-install/3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx")
+        job.startProcess(request:["folder":folder.path,"session":session,"allow_unsealed":allowUnsealed],executable:captureExecutableURL,
+            arguments:["--automatic-acoustic-refinement",model.path],maximumInput:65536,maximumOutput:SpeakerRefinementArtifact.maximumBytes,reservedToken:token) { returned,result in
+            self.cacheWriteQueue.async {
+                guard job.isCurrent(returned) else{return}
+                do {
+                    let data=try result.get()
+                    guard manualState()==namesBefore else{throw Failure(code:"acoustic_names_changed")}
+                    guard let meeting=try cachedMeetings(in:folder.deletingLastPathComponent()).first(where:{$0.id==folder.lastPathComponent}) else{throw Failure(code:"acoustic_meeting_missing")}
+                    let events=try meeting.events(includeAutomaticRefinement:false),hashes=try meeting.transcriptHashes()
+                    let prepared=try SpeakerRefinementArtifact.prepareValidated(data:data,events:events,sourceHashes:hashes,directory:folder,cacheID:meeting.id)
+                    try job.commitIfCurrent(returned) {try SpeakerRefinementArtifact.writePrepared(prepared)}
+                    try job.prepareNextProcess(returned)
+                    DispatchQueue.main.async {
+                        if self.currentCacheID==meeting.id,self.activeSession==session {
+                            self.refreshSpeakerRefinementProjection(cacheID:meeting.id,session:session)
+                        }
+                    }
+                    done(.success(()))
+                } catch {done(.failure(error))}
+            }
+        }
+    }
+
     func scheduleCoarseRefinement(trigger:String,allowUnsealed:Bool,cutoff:Double?=nil,savedScope:SavedCoarseBatchScope?=nil) {
         guard (!Credential.offline || coarseRefinementExecutorOverride != nil),!quitting,!meetingDeletionBusy else{return}
         let cacheID:String,session:String,boundary:Double?,isSavedScope:Bool
@@ -123,7 +166,7 @@ extension Delegate {
         if owner.savedCoarseJobs[cacheID] != nil {
             // Let the earlier pause commit its finished windows. Its completion
             // schedules one fresh snapshot for audio appended since that pause.
-            owner.pendingCoarseCutoffs[cacheID]=max(owner.pendingCoarseCutoffs[cacheID] ?? 0,boundary ?? 0)
+            owner.pendingCoarseCutoffs[cacheID]=max(owner.pendingCoarseCutoffs[cacheID] ?? 0,boundary ?? self.phase.elapsed)
             if !isSavedScope {
                 speakerRefinementNeedsRetry=true
                 speakerRefinementMessage="正在完成上一段整理"
@@ -158,6 +201,14 @@ extension Delegate {
         prepareSavedNames { saved in
             guard job.isCurrent(token) else{return}
             if case .failure(let error)=saved {self.failSpeakerRefinement(token:token,cacheID:cacheID,session:session,generation:generation,revision:revision,error:error,job:job);return}
+            self.runAutomaticAcoustic(folder:folder,session:session,allowUnsealed:allowUnsealed,job:job,token:token) { acoustic in
+            if case .failure(let error)=acoustic {
+                DispatchQueue.main.async {
+                    self.failSpeakerRefinement(token:token,cacheID:cacheID,session:session,generation:generation,revision:revision,error:error,job:job)
+                    self.continuePendingCoarseBatch(cacheID:cacheID,session:session)
+                }
+                return
+            }
             self.cacheWriteQueue.async {
                 guard job.isCurrent(token) else{return}
                 do {
@@ -239,13 +290,14 @@ extension Delegate {
                         }
                     }
                     if let injected {injected(request,token,completed)}
-                    else {guard let python=PythonRuntime.executable() else{throw Failure(code:"python_runtime_missing")};job.startProcess(request:["key":key,"request":request],executable:python,arguments:["-u",self.root+"/coarse_audio.py"],maximumInput:4*1024*1024,reservedToken:token,done:completed)}
+                    else {job.startProcess(request:["key":key,"request":request],executable:URL(fileURLWithPath:"/usr/local/bin/python3"),arguments:["-u",self.root+"/coarse_audio.py"],maximumInput:4*1024*1024,reservedToken:token,done:completed)}
                 } catch {DispatchQueue.main.async{
                     self.failSpeakerRefinement(token:token,cacheID:cacheID,session:session,generation:generation,revision:revision,error:error,job:job)
                     self.showCoarseFailureIfCurrent(cacheID:cacheID,session:session,error:error)
                                 self.continuePendingCoarseBatch(cacheID:cacheID,session:session)
                 }}
             }
+        }
         }
     }
     func continuePendingCoarseBatch(cacheID:String,session:String) {
@@ -327,4 +379,62 @@ extension Delegate {
             else {self.showTransientFeedback("切换未完成，当前文字保留")}
         }
     }
+}
+
+/// Real saved-audio acceptance: only isolated runtime copies, no capture/cloud.
+@MainActor
+func automaticAcousticMeetingCheck(directory:URL) async throws->[String:Any] {
+    guard Credential.offline,directory.path.contains("/.runtime/automatic-speakers-"),
+          let meeting=try cachedMeetings(in:directory.deletingLastPathComponent()).first(where:{$0.id==directory.lastPathComponent}),
+          let session=try meeting.metadata()["session"] as? String else{throw Failure(code:"acoustic_check_scope")}
+    let raw=try meeting.events(includeAutomaticRefinement:false),before=try meeting.transcriptHashes()
+    let readingBefore=MeetingCoarseRefinement.loadApply(events:raw,directory:directory,session:session,cacheID:meeting.id,transcriptHashes:before)
+    let namesFile=directory.appendingPathComponent("session-names.json"),namesBefore=try? Data(contentsOf:namesFile)
+    let view=Delegate();view.speakerRefinementCheckMode=true
+    let job=SpeakerRefinementJob(),token=job.reserve()
+    try await withCheckedThrowingContinuation { (continuation:CheckedContinuation<Void,Error>) in
+        view.runAutomaticAcoustic(folder:directory,session:session,allowUnsealed:false,job:job,token:token) {result in continuation.resume(with:result)}
+    }
+    guard job.waiting,job.isCurrent(token) else{throw Failure(code:"acoustic_stage_did_not_rearm")}
+    let _:Data=try await withCheckedThrowingContinuation { continuation in
+        job.startProcess(request:[:],executable:view.captureExecutableURL,arguments:[],reservedToken:token) {_,result in continuation.resume(with:result)}
+    }
+    guard job.isCurrent(token),!job.busy,!job.waiting else{throw Failure(code:"acoustic_second_stage_failed")}
+    job.cancel()
+    do {try job.prepareNextProcess(token);throw Failure(code:"acoustic_stale_stage_rearmed")} catch SpeakerRefinementJobError.cancelled {}
+    let events=try meeting.events(includeCoarseRefinement:false)
+    guard events.count==raw.count,try meeting.transcriptHashes()==before,(try? Data(contentsOf:namesFile))==namesBefore,
+          !events.contains(where:{$0["speaker_refinement_warning"] != nil}) else{throw Failure(code:"acoustic_check_projection")}
+    for (a,b) in zip(raw,events) {
+        for field in ["text","start","end","segment_id","source_id","epoch","revision"] {
+            guard String(describing:a[field] ?? "")==String(describing:b[field] ?? "") else{throw Failure(code:"acoustic_source_mutated")}
+        }
+    }
+    func register(_ rows:[[String:Any]],_ names:inout SessionNames) {
+        for event in rows {
+            guard let id=event["segment_id"] as? String else{continue}
+            names.register(segment:id,item:event)
+            for run in TranscriptTimeline.speakerRuns(event) {names.register(segment:TranscriptTimeline.runID(parent:id,run:run),item:run)}
+        }
+    }
+    var incremental=SessionNames(),fresh=SessionNames()
+    register(raw,&incremental);register(events,&incremental);register(events,&fresh)
+    guard Set(incremental.choices(session:session))==Set(fresh.choices(session:session)) else{throw Failure(code:"acoustic_stale_identity_bindings")}
+    let readingAfter=try meeting.events()
+    guard readingBefore.count==readingAfter.count,
+          zip(readingBefore,readingAfter).allSatisfy({($0["text"] as? String)==($1["text"] as? String)}) else{throw Failure(code:"acoustic_clean_text_changed")}
+    guard !readingAfter.contains(where:{$0["coarse_refinement_warning"] != nil || $0["speaker_refinement_warning"] != nil}) else{throw Failure(code:"acoustic_clean_text_warning")}
+    let artifact=try SpeakerRefinement.object(directory.appendingPathComponent(SpeakerRefinementArtifact.filename))
+    let units=events.flatMap{event -> [[String:Any]] in
+        let rows=event["speaker_runs"] as? [[String:Any]] ?? []
+        return (rows.isEmpty ? [event]:rows).map { row in
+            var unit=row
+            for field in ["session","source_id","epoch"] {unit[field]=event[field]}
+            unit["segment_id"]=rows.isEmpty ? event["segment_id"]:TranscriptTimeline.runID(parent:event["segment_id"] as! String,run:row)
+            return unit
+        }
+    }
+    return ["cache_id":meeting.id,"summary":artifact["summary"] ?? [:],"units":units,
+            "original_preserved":true,"names_preserved":true,"clean_text_preserved":true,"incremental_identities_match_reopen":true,
+            "validated_ui_commit":true,"cancelled_stage_rejected":true,"capture":false,"cloud":false]
 }

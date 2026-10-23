@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 from runtime_config import data_root
 from audio_sources import is_transcript_track, transcript_tracks, recording_control_signal
-from shared_terms import request_vocabulary, validate_vocabulary, merged_vocabulary, meeting_project
+from shared_terms import meeting_project
 from capture_supervisor import CaptureControlAckChannel, CaptureSupervisor
 from identity_session import IdentitySession
 from identity_bridge import PARTITION
@@ -49,13 +49,6 @@ def candidate_binary(request):
     return CANDIDATE
 
 
-def asr_terms_status_event(event):
-    if event.get('type')!='asr_terms' or event.get('state')!='rejected' or event.get('ordinary_asr_retry') is not True:return None
-    session=event.get('session');track=event.get('track')
-    if not isinstance(session,str) or not 1<=len(session)<=128 or any(ord(c)<32 for c in session) or not is_transcript_track(track):return None
-    return dict(type='asr_terms',session=session,track=track,state='rejected',ordinary_asr_retry=True,audio_retained=True)
-
-
 def local_recording_config(request):
     import uuid
     if request.get('local_recording_confirmed') is not True or request.get('user_launch_confirmed') is not True or request.get('local_only') is not True:
@@ -83,24 +76,7 @@ def append_capture_config(request,config,*,local_only):
     if previous_local!=local_only or metadata.get('bundle')!=config['bundle'] or metadata.get('asr_model')!=config['model'] or not isinstance(metadata.get('session'),str) or not metadata['session']:
         raise ValueError('append_capture_scope_invalid')
     config.update(session=metadata['session'],appendCaptureCacheID=cache_id)
-    if not local_only and request.get('asr_vocabulary') is None and metadata.get('asr_vocabulary_confirmed') is True:
-        saved=validate_vocabulary(metadata.get('asr_vocabulary',{}))
-        if saved:config.update(asrVocabulary=saved,asrVocabularyConfirmed=True)
-    if not local_only:
-        automatic=automatic_terms(request,config.get('asrVocabulary'),directory)
-        if automatic:config.update(asrVocabulary=automatic,asrVocabularyConfirmed=True)
     return config
-
-def automatic_terms(request,saved=None,directory=None):
-    """Use only local project and saved terms; explicit empty selection opts out."""
-    explicit=request_vocabulary(request)
-    if request.get('asr_vocabulary') is not None and not explicit:return None
-    try:
-        project=meeting_project(directory) if directory is not None else None
-        return merged_vocabulary(explicit,project,None if request.get('asr_vocabulary') is not None else saved)
-    except Exception:
-        # Term owners unavailable: keep what the meeting already had; transcription still runs.
-        return explicit or saved or None
 
 def cloud_session_config(request):
     import uuid
@@ -111,12 +87,6 @@ def cloud_session_config(request):
     if not isinstance(key,str) or not key or '\n' in key or '\r' in key:raise ValueError('cloud_session_scope_invalid')
     root=Path(__file__).resolve().parent
     config=dict(session=str(uuid.uuid4()),bundle=request['bundle'],key=key,confirmed=True,maxSeconds=7200,unlimitedSession=True,model='qwen-audio-3.0-asr-flash-streaming',silenceMS=1300,micEnabled=True,userLaunchConfirmed=True,cloudSessionConfirmed=True,localSpeakerDirectory=str(root/'native/local-speaker-install/runtime-models'),localEmbeddingModel=str(root/'native/local-embedding-install/3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx'))
-    vocabulary=request_vocabulary(request)
-    if request.get('asr_vocabulary') is not None:config.update(asrVocabulary=vocabulary,asrVocabularyConfirmed=True)
-    target=request.get('resume_cache_id') or request.get('append_capture_cache_id')
-    if not isinstance(target,str):
-        automatic=automatic_terms(request)
-        if automatic:config.update(asrVocabulary=automatic,asrVocabularyConfirmed=True)
     if request.get('resume_cache_id') is not None:
         cache_id=request['resume_cache_id']
         if not isinstance(cache_id,str) or str(uuid.UUID(cache_id)).lower()!=cache_id.lower():raise ValueError('resume_scope_invalid')
@@ -133,12 +103,8 @@ def cloud_session_config(request):
         # unlimitedSession and does not gate on cumulative duration.
         config.update(session=metadata['session'],resumeCacheID=cache_id,maxSeconds=7200,unlimitedSession=True)
         if local_pending:config['resumeUploadConfirmed']=True
-        if not vocabulary and request.get('asr_vocabulary') is None and metadata.get('asr_vocabulary_confirmed') is True:
-            saved=validate_vocabulary(metadata.get('asr_vocabulary',{}))
-            if saved:config.update(asrVocabulary=saved,asrVocabularyConfirmed=True)
-        automatic=automatic_terms(request,config.get('asrVocabulary'),directory)
-        if automatic:config.update(asrVocabulary=automatic,asrVocabularyConfirmed=True)
-    return append_capture_config(request,config,local_only=False)
+    config=append_capture_config(request,config,local_only=False)
+    return config
 
 def validate_request(request, prior_audio, prior_wall):
     if request.get("cloud_session_confirmed") is True:return cloud_session_config(request)
@@ -146,7 +112,7 @@ def validate_request(request, prior_audio, prior_wall):
     if request.get('user_launch_confirmed') is not True:
         raise ValueError('缺少本人启动意图')
     bundle=request.get('bundle')
-    if not isinstance(bundle,str) or not bundle or bundle.startswith('com.zaichang.'):
+    if not isinstance(bundle,str) or not bundle or bundle.startswith('com.joesang.'):
         raise ValueError('音源选择无效')
     if bundle != 'com.tencent.meeting' and request.get('source_scope_confirmed') is not True:
         raise ValueError('新音源范围需要本人确认')
@@ -203,7 +169,7 @@ def main():
     if sys.argv[1:]:
         if sys.argv[1:] not in (['--candidate-repair'],['--candidate-nightly']):raise ValueError('candidate_revision_invalid')
         CANDIDATE=Path(__file__).resolve().parent/('native/nightly-build/会议采集候选.app/Contents/MacOS/MeetingCapture' if sys.argv[1:]==['--candidate-nightly'] else 'native/candidate-repair-build/会议采集候选.app/Contents/MacOS/MeetingCapture')
-    lock=single_instance(Path(tempfile.gettempdir())/("zaichang-meeting-worker-"+str(os.getuid())+".lock"))
+    lock=single_instance(Path(tempfile.gettempdir())/("joesang-meeting-worker-"+str(os.getuid())+".lock"))
     request=json.loads(sys.stdin.readline())
     if request.get('mode')=='prepare':
         from model_standby import ModelStandby
@@ -322,6 +288,8 @@ def recording_control_snapshot(event, previous, session):
         if type(revision) is not int or revision <= result.get('control_revision', -1):
             return None
         result['control_revision'] = revision
+        # A reason belongs to this ACK, not to a prior device-change pause.
+        result.pop('reason', None)
         result['pause_tracks'] = ({track: 'processing' for track in event.get('draining_tracks', [])
                                    if isinstance(track, str) and is_transcript_track(track)}
                                   if kind == 'recording_paused' else {})
@@ -823,8 +791,6 @@ def run_independent_session(config,binary,cloud=False):
             activity=capture_status_event(event)
             if activity is not None:emit_ui(activity)
             if cloud:
-                term_status=asr_terms_status_event(event)
-                if term_status is not None:emit_ui(term_status)
                 meter.observe(event)
                 if kind in {'health','usage_local','usage_provider','stopped'}:
                     snapshot=meter.snapshot();usage_snapshot=session_usage_snapshot(snapshot,previous_input,previous_fee,config['session'])

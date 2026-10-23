@@ -106,7 +106,7 @@ class CodexTransportTests(unittest.IsolatedAsyncioTestCase):
     async def test_thread_start_passes_role_permissions_and_experimental_dynamic_tools(self):
         runtime = CodexRuntime()
         runtime.request = AsyncMock(return_value={"thread": {"id": "t"}})
-        tools = [{"type": "function", "name": "assistant_job_list", "description": "list", "inputSchema": {"type": "object"}}]
+        tools = [{"type": "function", "name": "meeting_read", "description": "list", "inputSchema": {"type": "object"}}]
         await runtime.start_thread("/project", sandbox="workspace-write", approval_policy="on-request",
                                    dynamic_tools=tools, developer_instructions="task scope")
         method, params = runtime.request.await_args.args[:2]

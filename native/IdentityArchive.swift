@@ -26,7 +26,7 @@ struct BalanceConnectionDraft {
     let endpoint="https://business.aliyuncs.com/"
     let action="bss:DescribeAcccount"
     var personAuthorized=false
-    var credentialService="com.zaichang.app.balance"
+    var credentialService="com.joesang.meeting-assistant.balance"
     var connected:Bool {false} // network client deliberately absent until RAM authorization
 }
 func identityArchiveChecks()->Int {

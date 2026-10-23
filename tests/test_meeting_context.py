@@ -37,6 +37,50 @@ def linked_turn(text="确认的合成会议文字", *, start=0.0):
 
 
 class MeetingContextTests(unittest.TestCase):
+    def test_quality_provenance_survives_all_reader_routes_and_blocks_summary(self):
+        from assistant_runtime import overview_evidence_eligible
+        value = turn("需要核对的会议原文", start=0)
+        value["parts"][0].update(final=True, quality_flags=["audio_timing_mismatch"],
+                                  text_quality="needs_review")
+        self.meeting("s-live", phase="paused"); self.state("s-live", phase="paused")
+        metadata = json.loads(self.writer.execute("SELECT metadata FROM meetings").fetchone()[0])
+        metadata["transcription_complete"] = True
+        self.writer.execute("UPDATE meetings SET metadata=?", (json.dumps(metadata),))
+        self.writer.commit()
+        self.segment("s-live", "quality", start=0, payload=[value])
+        original = self.writer.execute("SELECT payload FROM segments").fetchone()[0]
+        reader = self.reader()
+        try:
+            outputs = [reader.current(), reader.read("s-live"), reader.search("s-live", "核对"),
+                       reader.changes("s-live", 0)]
+            rows = [r["segments"][0]["turns"][0] for r in outputs]
+            rows += [json.loads(reader.archive_snapshot("s-live")["text"])[0]["turns"][0]]
+            for kind in ["turns", "parts"]:
+                token = {"session": "s-live", "parent": "quality", "parent_revision": 1,
+                         "kind": kind, "index": 0, "turn_index": 0}
+                item = reader.read("s-live", cursor=mc._encode_cursor(token))["continuation_chunk"]["item"]
+                self.assertIn("audio_timing_mismatch", item["quality_flags"])
+                self.assertFalse(overview_evidence_eligible(item))
+            for actual in rows:
+                self.assertEqual(actual["text"], value["text"])
+                self.assertTrue(actual["final"])
+                self.assertIn("audio_timing_mismatch", actual["quality_flags"])
+                self.assertEqual(actual["parts"][0]["text_quality"], "needs_review")
+                self.assertFalse(overview_evidence_eligible(actual))
+            self.assertEqual(self.writer.execute("SELECT payload FROM segments").fetchone()[0], original)
+        finally:
+            reader.close()
+
+    def test_quality_metadata_is_fail_closed_and_nonfinal_parts_are_not_promoted(self):
+        value = turn("需要保留的原文")
+        value["parts"][0].update(final=False, quality_flags=["private /secret", 42])
+        safe = mc._safe_turn(value)
+        self.assertIn("quality_metadata_invalid", safe["quality_flags"])
+        self.assertIn("contains_nonfinal_part", safe["quality_flags"])
+        self.assertNotIn("private", json.dumps(safe))
+        value["quality_flags"] = "unexpected"
+        self.assertIn("quality_metadata_invalid", mc._safe_turn(value)["quality_flags"])
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.db = Path(self.temp.name) / "context.sqlite"
@@ -369,7 +413,7 @@ class MeetingContextTests(unittest.TestCase):
 
     def test_changes_include_correction_and_deletion_tombstone(self):
         self.meeting("s-live", revision=4)
-        self.segment("s-live", "p1", start=1, payload=[turn("更正后的内容", speaker="合成说话人甲", confirmed=True)],
+        self.segment("s-live", "p1", start=1, payload=[turn("更正后的内容", speaker="张三", confirmed=True)],
                      revision=2, updated_revision=3)
         self.segment("s-live", "p2", start=2, payload=[], revision=2, updated_revision=4, deleted=1)
         reader = self.reader()
@@ -381,7 +425,7 @@ class MeetingContextTests(unittest.TestCase):
         self.assertEqual(result["next_revision"], 4)
         self.assertEqual(len(result["segments"]), 2)
         correction, deletion = result["segments"]
-        self.assertEqual(correction["turns"][0]["speaker"], "合成说话人甲")
+        self.assertEqual(correction["turns"][0]["speaker"], "张三")
         self.assertTrue(correction["turns"][0]["speaker_confirmed"])
         self.assertTrue(deletion["deleted"])
 
@@ -501,18 +545,18 @@ class MeetingContextTests(unittest.TestCase):
 
     def test_search_preserves_repeated_text_by_different_speakers_and_neighborhood(self):
         self.meeting("s-live")
-        self.segment("s-live", "p1", start=1, payload=[turn("开始", speaker="测试人物甲", start=1)])
-        self.segment("s-live", "p2", start=5, payload=[turn("示例产品季报", speaker="合成说话人乙", start=5)])
-        self.segment("s-live", "p3", start=6, payload=[turn("示例产品季报", speaker="合成说话人甲", start=6)])
-        self.segment("s-live", "p4", start=9, payload=[turn("继续讨论", speaker="测试人物甲", start=9)])
+        self.segment("s-live", "p1", start=1, payload=[turn("开始", speaker="示例人", start=1)])
+        self.segment("s-live", "p2", start=5, payload=[turn("敷尔佳财报", speaker="李四", start=5)])
+        self.segment("s-live", "p3", start=6, payload=[turn("敷尔佳财报", speaker="张三", start=6)])
+        self.segment("s-live", "p4", start=9, payload=[turn("继续讨论", speaker="示例人", start=9)])
         reader = self.reader()
         try:
-            result = reader.search("s-live", "示例产品季报", limit=20)
+            result = reader.search("s-live", "敷尔佳财报", limit=20)
         finally:
             reader.close()
         self.assertEqual([row["parent"] for row in result["segments"]], ["p1", "p2", "p3", "p4"])
-        hits = [row for row in result["segments"] if "示例产品" in row["turns"][0]["text"]]
-        self.assertEqual({r["turns"][0]["speaker"] for r in hits}, {"合成说话人乙", "合成说话人甲"})
+        hits = [row for row in result["segments"] if "敷尔佳" in row["turns"][0]["text"]]
+        self.assertEqual({r["turns"][0]["speaker"] for r in hits}, {"李四", "张三"})
 
     def test_search_prefers_recent_hits_in_a_long_repeated_topic(self):
         self.meeting("s-live")
@@ -637,6 +681,10 @@ class MeetingContextTests(unittest.TestCase):
             cursor = next(value for value in result["continuations"]
                           if mc._decode_cursor(value)["kind"] == "turns")
             while cursor:
+                # A cursor is a new CLI read request in production. Each request
+                # retains the real deadline; 200 requests do not share one timer.
+                reader.close()
+                reader = self.reader()
                 chunk = reader.read("s-live", cursor=cursor)
                 self.assertEqual(chunk["continuation_chunk"]["kind"], "turns")
                 seen += 1
@@ -646,6 +694,8 @@ class MeetingContextTests(unittest.TestCase):
                     text_cursor = chunk["continuations"][0]
                     pieces = []
                     while text_cursor:
+                        reader.close()
+                        reader = self.reader()
                         piece = reader.read("s-live", cursor=text_cursor)
                         pieces.append(piece["continuation_chunk"]["text"])
                         text_cursor = piece["next_cursor"]

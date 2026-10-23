@@ -74,16 +74,16 @@ async def probe(out):
             report["checks"]["actual_tool_used"] = any(i.get("type") in {"commandExecution", "mcpToolCall", "dynamicToolCall"} for i in items)
             report["foreground_answer"] = "\n".join(i.get("text", "") for i in items if i.get("type") == "agentMessage")
             save()
-        # A new process resumes a persisted thread; it does not replay the first turn.
+        # A new process receives local context in a fresh ephemeral thread.
         async with CodexRuntime() as second:
-            resumed = await second.request("thread/resume", {"threadId": aid,
-                "cwd": str(ROOT), "approvalPolicy": "on-request", "sandbox": "read-only"})
-            report["checks"]["resume_same_thread"] = resumed["thread"]["id"] == aid
-            follow = await second.start_turn(aid, "接着刚才的结果，只回答QA构建入口。无需再用工具。")
+            fresh = await second.start_thread(str(ROOT), ephemeral=True)
+            fresh_id = fresh["thread"]["id"]
+            report["checks"]["restart_fresh_thread"] = fresh_id != aid
+            follow = await second.start_turn(fresh_id, "已有回答（历史上下文）：\n" + report.get("foreground_answer", "") + "\n只回答QA构建入口。无需再用工具。")
             ef = []
-            final = await completed(second, aid, follow["turn"]["id"], ef)
+            final = await completed(second, fresh_id, follow["turn"]["id"], ef)
             report["checks"]["followup_completed"] = final["status"] == "completed"
-            report["resume_events"] = ef
+            report["restart_events"] = ef
         report["ok"] = all(report["checks"].values())
         save()
         print(json.dumps({"ok": report["ok"], "checks": report["checks"], "model": report.get("model")}, ensure_ascii=False), flush=True)
@@ -94,11 +94,29 @@ async def probe(out):
         raise
 
 
+async def connection_probe(out):
+    """Handshake and login metadata only; no turns, files, audio or model calls."""
+    report = {'schema':1, 'kind':'codex_connection_only', 'model_calls':False}
+    out.mkdir(parents=True, exist_ok=True)
+    try:
+        async with CodexRuntime() as runtime:
+            account = await runtime.request('account/read', {'refreshToken':False})
+            report['initialized'] = True
+            report['logged_in'] = bool(account.get('account'))
+            report['ok'] = report['logged_in']
+    except Exception as exc:
+        report.update(ok=False,error=exc.code if isinstance(exc,RuntimeErrorCode) else type(exc).__name__)
+    (out/'result.json').write_text(json.dumps(report,ensure_ascii=False,indent=2))
+    print(json.dumps(report,ensure_ascii=False))
+    if not report['ok']: raise SystemExit(1)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
+    parser.add_argument("--connection-only", action="store_true", help="verify local handshake and login without model turns")
     parser.add_argument("--live", action="store_true", help="explicitly authorize this subscription-only probe")
     parser.add_argument("--output", type=Path, default=ROOT / ".runtime/codex-integration-1021")
     args = parser.parse_args()
-    if not args.live:
-        parser.error("--live is required; this probe starts real Codex turns")
-    asyncio.run(probe(args.output))
+    if args.live == args.connection_only:
+        parser.error("choose --connection-only or --live")
+    asyncio.run(connection_probe(args.output) if args.connection_only else probe(args.output))

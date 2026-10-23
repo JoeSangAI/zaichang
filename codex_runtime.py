@@ -1,4 +1,4 @@
-"""Local Codex app-server transport. Codex owns reasoning, tools and history.
+"""Local Codex app-server transport. Codex owns reasoning and native tools; the app owns durable chat history.
 
 No credential files are read, no provider fallback is selected, and reconnecting
 never replays turns. Callers route approval requests to the appropriate task.
@@ -86,7 +86,7 @@ class CodexRuntime:
         except (asyncio.TimeoutError, asyncio.CancelledError) as exc:
             # A lost response is not evidence that the server did nothing.
             # Keep the thread blocked against another start in this connection;
-            # callers must recover its Codex history, never replay the prompt.
+            # callers must report interruption, never replay the prompt.
             if method == "turn/start" and params and params.get("threadId"):
                 self.uncertain_starts.add(params["threadId"])
             if isinstance(exc, asyncio.CancelledError):
@@ -125,8 +125,11 @@ class CodexRuntime:
                     future = self._pending.get(message["id"])
                     if future is not None and not future.done():
                         if "error" in message:
-                            future.set_exception(RuntimeErrorCode("rpc_error_" +
-                                str(message["error"].get("code", "unknown"))))
+                            error = message["error"]
+                            detail = str(error.get("message", "")).lower()
+                            missing_thread = "thread" in detail and ("not found" in detail or "no such thread" in detail)
+                            future.set_exception(RuntimeErrorCode("thread_not_found" if missing_thread else
+                                "rpc_error_" + str(error.get("code", "unknown"))))
                         else:
                             future.set_result(message.get("result"))
                 else:
@@ -177,13 +180,14 @@ class CodexRuntime:
                 return self._events[thread_id].popleft()
         return await asyncio.wait_for(take(), timeout)
 
-    async def start_thread(self, cwd: str, *, ephemeral: bool = False,
+    async def start_thread(self, cwd: str, *, ephemeral: bool = True,
                            sandbox: str = "read-only", approval_policy: str = "on-request",
                            dynamic_tools: list[dict] | None = None,
                            developer_instructions: str | None = None):
         # Keep the user's configured model/effort; don't choose a cheaper model.
         params = {"cwd": cwd, "approvalPolicy": approval_policy,
-                  "sandbox": sandbox, "ephemeral": ephemeral}
+                  "sandbox": sandbox, "ephemeral": True,
+                  "config": {"features.multi_agent": False, "features.multi_agent_v2": False}}
         if dynamic_tools:
             if not self.experimental_api:
                 raise RuntimeErrorCode("dynamic_tools_require_experimental_api")
@@ -193,22 +197,18 @@ class CodexRuntime:
         result = await self.request("thread/start", params)
         return result
 
-    async def resume_thread(self, thread_id: str, cwd: str, *, sandbox: str = "read-only",
-                            approval_policy: str = "on-request"):
-        return await self.request("thread/resume", {"threadId": thread_id, "cwd": cwd,
-            "approvalPolicy": approval_policy, "sandbox": sandbox})
-
-    async def read_thread(self, thread_id: str):
-        # Read history only. Callers must never infer that a prior turn is safe to replay.
-        return await self.request("thread/read", {"threadId": thread_id, "includeTurns": True})
-
     async def start_turn(self, thread_id: str, text: str, *, output_schema: dict | None = None):
         if thread_id in self.uncertain_starts:
             raise RuntimeErrorCode("turn_start_requires_reconciliation")
-        params = {"threadId": thread_id, "input": [{"type": "text", "text": text}]}
+        params = {"threadId": thread_id, "input": [{"type": "text", "text": text}],
+                  "sandboxPolicy": {"type": "readOnly", "networkAccess": output_schema is None}}
         if output_schema:
             params["outputSchema"] = output_schema
         return await self.request("turn/start", params)
+
+    async def steer(self, thread_id: str, turn_id: str, text: str):
+        return await self.request("turn/steer", {"threadId": thread_id, "expectedTurnId": turn_id,
+            "input": [{"type": "text", "text": text}]})
 
     async def interrupt(self, thread_id: str, turn_id: str):
         return await self.request("turn/interrupt", {"threadId": thread_id, "turnId": turn_id})

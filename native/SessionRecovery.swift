@@ -77,24 +77,6 @@ func offlineQACacheRoot()->URL {
     return RuntimeConfiguration.dataRoot().appendingPathComponent("OfflineQA/SessionCache")
 }
 func meetingCacheRoot()->URL {RuntimeConfiguration.dataRoot().appendingPathComponent("SessionCache")}
-func prepareMeetingCacheRoot(at root:URL=meetingCacheRoot())throws->URL {
-    let fm=FileManager.default,standard=root.standardizedFileURL
-    let parent=standard.deletingLastPathComponent()
-    if !fm.fileExists(atPath:parent.path) {
-        do {try fm.createDirectory(at:parent,withIntermediateDirectories:true,attributes:[.posixPermissions:0o700])}
-        catch {guard fm.fileExists(atPath:parent.path) else{throw error}}
-    }
-    let parentValues=try parent.resourceValues(forKeys:[.isDirectoryKey,.isSymbolicLinkKey])
-    guard parentValues.isDirectory==true,parentValues.isSymbolicLink != true else{throw Failure(code:"cache_root_parent_invalid")}
-    if !fm.fileExists(atPath:standard.path) {
-        do {try fm.createDirectory(at:standard,withIntermediateDirectories:false,attributes:[.posixPermissions:0o700])}
-        catch {guard fm.fileExists(atPath:standard.path) else{throw error}}
-    }
-    let values=try standard.resourceValues(forKeys:[.isDirectoryKey,.isSymbolicLinkKey])
-    guard values.isDirectory==true,values.isSymbolicLink != true else{throw Failure(code:"cache_root_invalid")}
-    try fm.setAttributes([.posixPermissions:0o700],ofItemAtPath:standard.path)
-    return standard
-}
 func cachedMeetings(in root:URL,recoverInterrupted:Bool=true)throws->[CachedMeeting] {
     guard FileManager.default.fileExists(atPath:root.path) else{return []}
     var result:[CachedMeeting]=[]

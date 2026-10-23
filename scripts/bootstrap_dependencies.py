@@ -8,8 +8,10 @@ import fcntl
 import json
 import shutil
 import ssl
+import time
 import tarfile
 import urllib.parse
+import urllib.error
 import urllib.request
 import zipfile
 from pathlib import Path, PurePosixPath
@@ -69,9 +71,6 @@ def fetch(spec: dict, target: Path, *, force: bool = False) -> None:
         raise RuntimeError(f"Existing dependency fails its pinned hash: {target.relative_to(ROOT)}")
     partial = target.with_name(target.name + ".partial")
     partial.unlink(missing_ok=True)
-    digest = hashlib.sha256()
-    count = 0
-    last_report = 0
     try:
         import certifi
         tls_context = ssl.create_default_context(cafile=certifi.where())
@@ -79,6 +78,29 @@ def fetch(spec: dict, target: Path, *, force: bool = False) -> None:
         tls_context = ssl.create_default_context()
     opener = urllib.request.build_opener(ApprovedRedirects(), urllib.request.HTTPSHandler(context=tls_context))
     request = urllib.request.Request(spec["url"], headers={"User-Agent": "zaichang-open-source-bootstrap/1"})
+    for attempt in range(1, NETWORK_ATTEMPTS + 1):
+        try:
+            _download(opener, request, spec, target, partial)
+            return
+        except (urllib.error.URLError, OSError, TimeoutError) as exc:
+            partial.unlink(missing_ok=True)
+            if attempt == NETWORK_ATTEMPTS:
+                raise RuntimeError(f"Network error while downloading {target.name}: {exc}. "
+                                   "Check the network or proxy, then rerun; verified files are reused.") from exc
+            wait = NETWORK_BACKOFF_SECONDS[attempt - 1]
+            print(f"network error on {target.name} ({exc}); retrying in {wait}s ({attempt}/{NETWORK_ATTEMPTS - 1})",
+                  flush=True)
+            time.sleep(wait)
+
+
+NETWORK_ATTEMPTS = 4
+NETWORK_BACKOFF_SECONDS = (3, 10, 30)
+
+
+def _download(opener, request, spec: dict, target: Path, partial: Path) -> None:
+    digest = hashlib.sha256()
+    count = 0
+    last_report = 0
     try:
         with opener.open(request, timeout=60) as response, partial.open("wb") as output:
             while chunk := response.read(1024 * 1024):

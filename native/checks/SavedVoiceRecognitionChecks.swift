@@ -68,6 +68,19 @@ import AppKit
     do {try SavedVoiceRecognition.validate(result,request:request);throw Failure(code:"saved_changed_audio_accepted")}catch let error as Failure {try check(error.code=="saved_voice_source_changed","changed_pcm_invalidates_inflight_result")}
     try pcm.write(to:folder.appendingPathComponent("mic-000000.pcm"))
     let cleanEvents=events
+    events[2]["speaker"]=["basis":"anonymous_cluster","source_id":"mic","epoch":key.epoch,"cluster_id":1]
+    try writeEvents()
+    let acousticMeeting=CachedMeeting(id:folder.lastPathComponent,directory:folder,date:Date(),writtenBytes:pcm.count,pendingBytes:0,occupiedBytes:pcm.count,tracks:["mic"],audioCleaned:false,warning:false,retiredBytes:0)
+    let acousticHashes=try acousticMeeting.transcriptHashes()
+    let acousticRequest=try MeetingCoarseRefinement.prepareRequest(directory:folder,session:session,cacheID:folder.lastPathComponent,events:events,transcriptHashes:acousticHashes)
+    let guessedKey=try JSONSerialization.jsonObject(with:JSONEncoder().encode(key))
+    let guessedRecords=acousticRequest.units.map{["unit_id":$0.unit_id,"original_text_sha256":$0.original_text_sha256,"text":$0.text,"speaker_key":guessedKey] as [String:Any]}
+    let guessed=try MeetingCoarseRefinement.project(events:events,session:session,cacheID:folder.lastPathComponent,sourceSHA256:acousticRequest.source_sha256,snapshotSHA256:acousticRequest.snapshot_sha256,records:guessedRecords,directory:folder,transcriptHashes:acousticHashes)
+    try write(guessed.artifact,MeetingCoarseRefinement.filename)
+    let independent=try SavedVoiceRecognition.run(request,extract:{_ in vector(0)})
+    try check(independent.evidence.map(\.id)==["saved-0","saved-1"],"text_inferred_speaker_never_contaminates_acoustic_voice_group")
+    try FileManager.default.removeItem(at:folder.appendingPathComponent(MeetingCoarseRefinement.filename))
+    events=cleanEvents
     events[0]["speaker"]=["basis":"multiple","reason":"overlap"]
     events[1]["quality_flags"]=["low_quality"]
     events[2]["final"]=false;try writeEvents()

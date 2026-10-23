@@ -1,6 +1,11 @@
 import Foundation
 // Mockable message decoder: task + sentence, partial replacement, no inferred speaker.
 final class Decoder {
+    /// A language/spelling warning does not invalidate independent audio.
+    /// Capture corruption and unknown quality flags still block attribution.
+    static func speakerEvidenceAllowed(_ item:[String:Any])->Bool {
+        (item["quality_flags"] as? [String] ?? []).allSatisfy{$0=="language_shift_needs_review"}
+    }
     var revisions: [String: Int] = [:]
     var payloads: [String: String] = [:]
     var sequence = 0

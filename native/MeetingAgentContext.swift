@@ -139,6 +139,7 @@ final class MeetingContextPublisher {
     // Only successfully committed notes are acknowledged here. Source I/O and
     // these signatures stay on the publisher queue, outside the mailbox lock.
     private var noteFingerprints:[String:String]=[:]
+    private var noteReadFailures=Set<String>() // Accessed only on the publisher queue.
     private var noteValues:[String:[String:Data]]=[:]
     private var metadata:[String:[String:Any]]=[:]
     private var dirtyMetadata=Set<String>()
@@ -184,58 +185,62 @@ final class MeetingContextPublisher {
         guard !deletedSessions.contains(session),noteSources[session] != directory else{return}
         noteSources[session]=directory;scheduleLocked()
     }
-    private func collectNotes()throws->[String:String] {
+    private func collectNotes()->[String:String] {
         lock.lock();let sources=noteSources;lock.unlock()
         var observed:[String:String]=[:]
         for (session,directory) in sources {
-            let source=MeetingNotesStore(directory:directory)
-            func safe(_ file:URL)throws {
-                guard file.standardizedFileURL.path.hasPrefix(directory.standardizedFileURL.path+"/") else{throw Failure(code:"context_notes_path")}
-                var part=file
-                while part.path != "/" {
-                    if (try? FileManager.default.attributesOfItem(atPath:part.path)[.type]) as? FileAttributeType == .typeSymbolicLink {throw Failure(code:"context_notes_symlink")}
-                    part.deleteLastPathComponent()
-                }
-            }
-            let log=source.notes.appendingPathComponent("notes.jsonl"),ocr=source.notes.appendingPathComponent("ocr")
-            try safe(log);try safe(ocr)
-            let fingerprint=[log,ocr].map { file -> String in
-                let attrs=try? FileManager.default.attributesOfItem(atPath:file.path)
-                return "\(attrs?[.modificationDate] as? Date ?? .distantPast)|\((attrs?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0)|\(attrs?[.size] ?? 0)|\(attrs?[.systemFileNumber] ?? 0)"
-            }.joined(separator:";")
-            if noteFingerprints[session]==fingerprint {continue}
-            let snapshot=try MeetingNotesStore.queue.sync {try source.snapshot()}
-            var changed:[String:[String:Any]]=[:]
-            for note in snapshot.latest {
-                var images:[[String:Any]]=[]
-                for image in note.images {
-                    guard image.sha256.count==64,image.sha256.allSatisfy({$0.isHexDigit}),
-                          ["assets/\(image.sha256).png","assets/\(image.sha256).jpg"].contains(image.file) else{throw Failure(code:"context_notes_image_path")}
-                    try safe(source.notes.appendingPathComponent(image.file))
-                    let file=ocr.appendingPathComponent(image.sha256+".json");try safe(file)
-                    var text=""
-                    if FileManager.default.fileExists(atPath:file.path) {
-                        let value=try JSONSerialization.jsonObject(with:Data(contentsOf:file)) as? [String:Any]
-                        if value?["sha256"] as? String==image.sha256 {text=value?["text"] as? String ?? ""}
+            do {
+                let source=MeetingNotesStore(directory:directory)
+                func safe(_ file:URL)throws {try source.safe(file)}
+                let log=source.notes.appendingPathComponent("notes.jsonl"),ocr=source.notes.appendingPathComponent("ocr")
+                try safe(log);try safe(ocr)
+                let fingerprint=[log,ocr].map { file -> String in
+                    let attrs=try? FileManager.default.attributesOfItem(atPath:file.path)
+                    return "\(attrs?[.modificationDate] as? Date ?? .distantPast)|\((attrs?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0)|\(attrs?[.size] ?? 0)|\(attrs?[.systemFileNumber] ?? 0)"
+                }.joined(separator:";")
+                if noteFingerprints[session]==fingerprint {noteReadFailures.remove(session);continue}
+                let snapshot=try MeetingNotesStore.queue.sync {try source.snapshot()}
+                var changed:[String:[String:Any]]=[:]
+                for note in snapshot.latest {
+                    var images:[[String:Any]]=[]
+                    for image in note.images {
+                        guard image.sha256.count==64,image.sha256.allSatisfy({$0.isHexDigit}),
+                              ["assets/\(image.sha256).png","assets/\(image.sha256).jpg"].contains(image.file) else{throw Failure(code:"context_notes_image_path")}
+                        try safe(source.notes.appendingPathComponent(image.file))
+                        let file=ocr.appendingPathComponent(image.sha256+".json");try safe(file)
+                        var text=""
+                        if FileManager.default.fileExists(atPath:file.path) {
+                            let value=try JSONSerialization.jsonObject(with:Data(contentsOf:file)) as? [String:Any]
+                            if value?["sha256"] as? String==image.sha256 {text=value?["text"] as? String ?? ""}
+                        }
+                        images.append(["sha256":image.sha256,"cache_path":"notes/"+image.file,"ocr_text":text])
                     }
-                    images.append(["sha256":image.sha256,"cache_path":"notes/"+image.file,"ocr_text":text])
+                    let value:[String:Any]=["rev":note.rev,"anchor_relative":note.anchor?.relative as Any? ?? NSNull(),"state":note.anchor?.state ?? "after","text":note.text,"starred":note.starred ? 1:0,"archive":note.archive ? 1:0,"images":images,"deleted":note.op=="delete" ? 1:0]
+                    let data=try JSONSerialization.data(withJSONObject:value,options:[.sortedKeys])
+                    if noteValues[session]?[note.note_id] != data {changed[note.note_id]=value}
                 }
-                let value:[String:Any]=["rev":note.rev,"anchor_relative":note.anchor?.relative as Any? ?? NSNull(),"state":note.anchor?.state ?? "after","text":note.text,"starred":note.starred ? 1:0,"archive":note.archive ? 1:0,"images":images,"deleted":note.op=="delete" ? 1:0]
-                let data=try JSONSerialization.data(withJSONObject:value,options:[.sortedKeys])
-                if noteValues[session]?[note.note_id] != data {changed[note.note_id]=value}
+                lock.lock()
+                if !deletedSessions.contains(session) {
+                    // Rebuild the unpublished set from the durable source, rather
+                    // than merging a failed batch that may contain older revisions.
+                    if changed.isEmpty {pendingNotes.removeValue(forKey:session)}
+                    else {pendingNotes[session]=changed}
+                }
+                lock.unlock()
+                noteReadFailures.remove(session)
+                observed[session]=fingerprint
+                // A touch with no content change needs no new SQLite transaction:
+                // every source value already matches a successful commit.
+                if changed.isEmpty {noteFingerprints[session]=fingerprint}
+            } catch {
+                // A damaged note/OCR artifact in one saved meeting must not
+                // stop new speech, other meetings, or the current heartbeat.
+                // Do not acknowledge its fingerprint or publish an older queued
+                // note revision: re-read the durable source after recovery.
+                noteReadFailures.insert(session)
+                noteFingerprints.removeValue(forKey:session)
+                lock.lock();pendingNotes.removeValue(forKey:session);lock.unlock()
             }
-            lock.lock()
-            if !deletedSessions.contains(session) {
-                // Rebuild the unpublished set from the durable source, rather
-                // than merging a failed batch that may contain older revisions.
-                if changed.isEmpty {pendingNotes.removeValue(forKey:session)}
-                else {pendingNotes[session]=changed}
-            }
-            lock.unlock()
-            observed[session]=fingerprint
-            // A touch with no content change needs no new SQLite transaction:
-            // every source value already matches a successful commit.
-            if changed.isEmpty {noteFingerprints[session]=fingerprint}
         }
         return observed
     }
@@ -256,8 +261,7 @@ final class MeetingContextPublisher {
     private func drain() {
         if store==nil {open()}
         guard let store else{return} // Reader sees no data/stale heartbeat, never a false live claim.
-        let observed:[String:String]
-        do {observed=try collectNotes()} catch {lastError="context_notes_read_failed";return}
+        let observed=collectNotes()
         lock.lock()
         scheduled=false
         let dirty=dirtyMetadata.union(pending.keys).union(pendingNotes.keys)
@@ -293,7 +297,7 @@ final class MeetingContextPublisher {
                 if complete,let fingerprint=observed[session] {noteFingerprints[session]=fingerprint}
             }
             for update in recoveryJobs {_ = try store.reconcileRecordingRecovery(session:update.session,cacheID:update.cacheID,transcriptionComplete:update.complete,recovery:update.metadata)}
-            try store.heartbeat(state);lastError=nil
+            try store.heartbeat(state);lastError=noteReadFailures.isEmpty ? nil:"context_notes_read_failed"
         } catch {
             lastError="context_write_failed"
             // Preserve undelivered latest values. Do not replace a newer queued correction.
@@ -342,7 +346,7 @@ final class MeetingContextPublisher {
             try store.deleteSession(session)
             lock.lock();deletedSessions.insert(session);metadata.removeValue(forKey:session);pending.removeValue(forKey:session);dirtyMetadata.remove(session)
             pendingNotes.removeValue(forKey:session);noteSources.removeValue(forKey:session)
-            noteFingerprints.removeValue(forKey:session);noteValues.removeValue(forKey:session)
+            noteFingerprints.removeValue(forKey:session);noteValues.removeValue(forKey:session);noteReadFailures.remove(session)
             if current["session"] as? String==session {current["session"]=NSNull();current["phase"]="idle"}
             lock.unlock()
         }
@@ -435,6 +439,9 @@ extension Delegate {
                 let resolved=naming.displayName(segment:id) ?? (naming.key(segment:id) ?? SessionSpeakerKey.from(part)).flatMap{naming.displayName(speaker:$0)}
                 let confirmed=resolved?.origin == .manual
                 var row:[String:Any]=["id":id,"text":part["text"] as? String ?? "","speaker":speakerLabel(id,part),"speaker_confirmed":confirmed,"speaker_name_origin":resolved?.origin.rawValue ?? "anonymous","start":TranscriptTimeline.start(part),"end":part["end_time_known"] as? Bool==false ? NSNull():part["end"] ?? NSNull()]
+                if let final=part["final"] as? Bool {row["final"]=final}
+                row["quality_flags"]=part["quality_flags"] as? [String] ?? []
+                if let quality=part["text_quality"] as? String {row["text_quality"]=quality}
                 if confirmed,let reference=naming.personReference(segment:id),reference.name==resolved?.value {
                     row["shared_person_id"]=reference.id;row["shared_person_evidence"]=reference.evidence
                 }
@@ -442,6 +449,11 @@ extension Delegate {
             }
             let origins=Set(parts.compactMap{$0["speaker_name_origin"] as? String})
             var row:[String:Any]=["id":turn.id,"parent":parent,"text":item["text"] as? String ?? "","speaker":readingTurnLabel(turn),"speaker_confirmed":!turn.uncertain && parts.allSatisfy{$0["speaker_confirmed"] as? Bool==true},"speaker_name_origin":origins.count==1 ? origins.first! : "mixed","uncertain":turn.uncertain,"final":item["final"] as? Bool ?? false,"start":start,"end":end as Any? ?? NSNull(),"absolute_start":absoluteTime?.iso(start) as Any? ?? NSNull(),"absolute_end":end.flatMap{absoluteTime?.iso($0,endBoundary:true)} as Any? ?? NSNull(),"source":audioSourceLabel(item),"parts":parts]
+            var flags=(item["quality_flags"] as? [String] ?? []) + parts.flatMap{$0["quality_flags"] as? [String] ?? []}
+            if parts.contains(where:{$0["final"] as? Bool==false}) {flags.append("contains_nonfinal_part")}
+            if parts.contains(where:{["unreliable","needs_review"].contains($0["text_quality"] as? String ?? "")}) {flags.append("text_needs_review")}
+            row["quality_flags"]=Array(Set(flags)).sorted()
+            if let quality=item["text_quality"] as? String {row["text_quality"]=quality}
             // A turn-level identity is safe only if every constituent part was
             // manually linked to the same person and the same source evidence.
             if !turn.uncertain,let first=parts.first,let id=first["shared_person_id"] as? String,

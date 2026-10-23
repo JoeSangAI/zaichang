@@ -36,7 +36,7 @@ private final class MeetingLibraryMouseProbe:NSTableView {
         return try cachedMeetings(in:base).first{$0.id==folder.lastPathComponent}!
     }
     let old=try fixture("品牌讨论",true),pending=try fixture("待转写会议",false),current=try fixture("当前会议",false)
-    let preferenceDomain="com.zaichang.app.sidebar-fixture."+UUID().uuidString
+    let preferenceDomain="com.joesang.meeting-assistant.sidebar-fixture."+UUID().uuidString
     let sidebarDefaults=UserDefaults(suiteName:preferenceDomain)!
     defer{sidebarDefaults.removePersistentDomain(forName:preferenceDomain)}
     let app=Delegate();app.sidebarPreferencesOverride=sidebarDefaults;app.previewRenderOnly=true;app.applicationDidFinishLaunching(Notification(name:NSApplication.didFinishLaunchingNotification));app.recoveryRootOverride=base
@@ -162,16 +162,16 @@ private final class MeetingLibraryMouseProbe:NSTableView {
     try check(reader.previewRenderOnly && !reader.documentIsPreview && reader.workspaceOwner===app,"real_workspace_history_enables_confirmation_without_startup_side_effects")
     app.previewRenderOnly=true
     app.receive(event(current.id,"继续到达的当前发言","remote",0,12));try check(app.sequence.count==3 && !reader.output.string.contains("继续到达的当前发言"),"live_events_continue_while_browsing_history")
-    reader.beginInlineName("历史专属关键词");reader.inlineField!.stringValue="合成说话人甲";reader.commitInlineName();reader.cacheWriteQueue.sync{}
-    try check(reader.naming.name(segment:"历史专属关键词")=="合成说话人甲" && app.naming.name(segment:"当前发言一")==nil,"history_speaker_correction_does_not_change_live_names")
+    reader.beginInlineName("历史专属关键词");reader.inlineField!.stringValue="张宇";reader.commitInlineName();reader.cacheWriteQueue.sync{}
+    try check(reader.naming.name(segment:"历史专属关键词")=="张宇" && app.naming.name(segment:"当前发言一")==nil,"history_speaker_correction_does_not_change_live_names")
     let independentlySaved=directory.appendingPathComponent("本人另存的原文.txt")
     try reader.saveTranscript(to:independentlySaved);let independentBytes=try Data(contentsOf:independentlySaved)
-    reader.renameMeeting("示例项目周会");try wait{app.libraryManagement?.busy==false && reader.meetingTitle=="示例项目周会"};try wait{!app.libraryJob.busy};settle()
-    try check(try! MeetingLibraryInfo.loadTitle(in:old.directory)=="示例项目周会" && app.meetingTitle=="当前会议","rename_persists_without_changing_live_meeting")
-    try check(app.displayedDocument.transcriptSuggestedFilename=="示例项目周会－转写原文.txt","renamed_meeting_drives_new_export_filename")
+    reader.renameMeeting("品牌周会");try wait{app.libraryManagement?.busy==false && reader.meetingTitle=="品牌周会"};try wait{!app.libraryJob.busy};settle()
+    try check(try! MeetingLibraryInfo.loadTitle(in:old.directory)=="品牌周会" && app.meetingTitle=="当前会议","rename_persists_without_changing_live_meeting")
+    try check(app.displayedDocument.transcriptSuggestedFilename=="品牌周会－转写原文.txt","renamed_meeting_drives_new_export_filename")
     let independentAfterRename=try Data(contentsOf:independentlySaved)
     try check(independentAfterRename==independentBytes,"rename_preserves_existing_user_saved_export_filename_and_bytes")
-    let exported=app.displayedDocument.transcriptExport();try check(exported.contains("示例项目周会") && exported.contains("合成说话人甲") && !exported.contains("当前发言"),"export_targets_visible_document")
+    let exported=app.displayedDocument.transcriptExport();try check(exported.contains("品牌周会") && exported.contains("张宇") && !exported.contains("当前发言"),"export_targets_visible_document")
     try check(app.historyReader?.action.isHidden==false && app.historyReader?.action.title=="继续这场录音" && app.historyReader?.historyLiveButton.isHidden==false && app.newButton?.isEnabled==true,"history_offers_append_capture_and_keeps_new_meeting_entry_available")
     app.returnToCurrent();try check(app.historyReader==nil && !app.currentDocument.isHidden && app.output.string.contains("继续到达的当前发言"),"return_to_current_preserves_incoming_text")
     app.openLibraryMeeting(old);app.openLibraryMeeting(pending);try wait{app.historyReader?.currentCacheID==pending.id};try check(app.historyReader?.action.isHidden==false && app.historyReader?.historyLiveButton.isHidden==false,"rapid_switch_keeps_latest_selection_and_live_controls")
@@ -219,7 +219,7 @@ private final class MeetingLibraryMouseProbe:NSTableView {
     app.receive(added);app.receive(["type":"stopped","session":old.id,"reason":"user_stop","transcription_complete":true,"recording_elapsed_seconds":23.0])
     try app.settleTranscriptForOfflineReview();app.contextPublisher?.flushForChecks()
     let appendedExport=app.transcriptExport()
-    try check(appendedExport.contains("历史专属关键词") && appendedExport.contains("合成说话人甲") && appendedExport.contains("续录新发言") &&
+    try check(appendedExport.contains("历史专属关键词") && appendedExport.contains("张宇") && appendedExport.contains("续录新发言") &&
               appendedExport.range(of:"历史专属关键词")!.lowerBound < appendedExport.range(of:"续录新发言")!.lowerBound,
               "append_capture_export_retains_original_manual_name_and_new_text_in_order")
     try check(try! Data(contentsOf:current.directory.appendingPathComponent("mic-transcript.jsonl"))==bTranscriptBefore &&
@@ -233,7 +233,7 @@ private final class MeetingLibraryMouseProbe:NSTableView {
     reopenedA.applicationDidFinishLaunching(Notification(name:NSApplication.didFinishLaunchingNotification))
     try reopenedA.applyRecovery(aAfter,payload:RecoveryPayload(aAfter));try reopenedA.settleTranscriptForOfflineReview()
     let reopenedAExport=reopenedA.transcriptExport()
-    try check(reopenedA.currentCacheID==old.id && reopenedA.activeSession==old.id && reopenedAExport.contains("历史专属关键词") && reopenedAExport.contains("合成说话人甲") && reopenedAExport.contains("续录新发言"),
+    try check(reopenedA.currentCacheID==old.id && reopenedA.activeSession==old.id && reopenedAExport.contains("历史专属关键词") && reopenedAExport.contains("张宇") && reopenedAExport.contains("续录新发言"),
               "append_capture_reopens_same_session_with_old_name_and_new_text")
     reopenedA.window.orderOut(nil)
     app.processingAudio=false;app.resumeBusy=false;app.phase.phase = .stopped;app.updateUI();try check(app.action.title=="继续这场录音" && app.action.isEnabled,"saved_current_meeting_can_append")
@@ -296,18 +296,19 @@ private final class MeetingLibraryMouseProbe:NSTableView {
     let contentRoot=app.window.contentView!
     let dividerHitPoint=divider.convert(NSPoint(x:divider.bounds.midX,y:divider.bounds.midY),to:contentRoot.superview)
     try check(contentRoot.hitTest(dividerHitPoint) === divider,"sidebar_real_window_hit_reaches_divider")
+    let dragTarget=app.preferredSidebarWidth+80
     divider.mouseDown(with:try dividerMouse(.leftMouseDown,x:start))
     divider.mouseDragged(with:try dividerMouse(.leftMouseDragged,x:start+80))
-    try check(app.sidebarWidth.constant==304 && app.preferredSidebarWidth==304,"sidebar_drag_event_changes_actual_constraint")
+    try check(app.sidebarWidth.constant==dragTarget && app.preferredSidebarWidth==dragTarget,"sidebar_drag_event_changes_actual_constraint")
     try check(sidebarDefaults.object(forKey:MeetingSidebarSizing.preferenceKey)==nil,"sidebar_drag_does_not_write_preferences_on_each_frame")
     divider.mouseUp(with:try dividerMouse(.leftMouseUp,x:start+80))
-    try check(sidebarDefaults.double(forKey:MeetingSidebarSizing.preferenceKey)==304,"sidebar_drag_end_persists_user_width")
+    try check(sidebarDefaults.double(forKey:MeetingSidebarSizing.preferenceKey)==Double(dragTarget),"sidebar_drag_end_persists_user_width")
     try check(app.selectedLibraryManagementItem?.id==originalSelection && app.displayedDocument === originalDocument,"sidebar_drag_preserves_selection_and_document")
     let reopened=Delegate();reopened.sidebarPreferencesOverride=UserDefaults(suiteName:preferenceDomain);reopened.restoreSidebarWidth()
-    try check(reopened.preferredSidebarWidth==304,"sidebar_width_restores_from_independent_defaults_instance")
+    try check(reopened.preferredSidebarWidth==dragTarget,"sidebar_width_restores_from_independent_defaults_instance")
     guard let left=NSEvent.keyEvent(with:.keyDown,location:.zero,modifierFlags:[],timestamp:6,windowNumber:app.window.windowNumber,context:nil,characters:"",charactersIgnoringModifiers:"",isARepeat:false,keyCode:123) else{throw Failure(code:"sidebar_key_fixture")}
     divider.keyDown(with:left)
-    try check(app.sidebarWidth.constant==292 && sidebarDefaults.double(forKey:MeetingSidebarSizing.preferenceKey)==292,"sidebar_arrow_key_adjustment_persists")
+    try check(app.sidebarWidth.constant==dragTarget-12 && sidebarDefaults.double(forKey:MeetingSidebarSizing.preferenceKey)==Double(dragTarget-12),"sidebar_arrow_key_adjustment_persists")
     divider.mouseDown(with:try dividerMouse(.leftMouseDown,x:start))
     divider.mouseDragged(with:try dividerMouse(.leftMouseDragged,x:start+10000))
     divider.mouseUp(with:try dividerMouse(.leftMouseUp,x:start+10000))
@@ -329,16 +330,16 @@ private final class MeetingLibraryMouseProbe:NSTableView {
     divider.mouseDragged(with:try dividerMouse(.leftMouseDragged,x:start-10000))
     divider.mouseUp(with:try dividerMouse(.leftMouseUp,x:start-10000))
     try check(app.sidebarWidth.constant==200 && app.preferredSidebarWidth==200,"sidebar_drag_clamps_lower_bound")
-    for (value,expected) in [(Double.nan,224.0),(Double.infinity,224.0),(-50.0,200.0),(99999.0,360.0)] {
+    for (value,expected) in [(Double.nan,200.0),(Double.infinity,200.0),(-50.0,200.0),(99999.0,360.0)] {
         sidebarDefaults.set(value,forKey:MeetingSidebarSizing.preferenceKey);reopened.restoreSidebarWidth()
         try check(reopened.preferredSidebarWidth==CGFloat(expected),"sidebar_invalid_stored_width_"+String(value)+"_normalized")
     }
     sidebarDefaults.set("untrusted width",forKey:MeetingSidebarSizing.preferenceKey);reopened.restoreSidebarWidth()
-    try check(reopened.preferredSidebarWidth==224,"sidebar_non_numeric_preference_ignored")
+    try check(reopened.preferredSidebarWidth==200,"sidebar_non_numeric_preference_ignored")
     sidebarDefaults.set(true,forKey:MeetingSidebarSizing.preferenceKey);reopened.restoreSidebarWidth()
-    try check(reopened.preferredSidebarWidth==224,"sidebar_boolean_preference_ignored")
+    try check(reopened.preferredSidebarWidth==200,"sidebar_boolean_preference_ignored")
     divider.mouseDown(with:try dividerMouse(.leftMouseDown,x:start,clicks:2))
-    try check(app.preferredSidebarWidth==224 && sidebarDefaults.double(forKey:MeetingSidebarSizing.preferenceKey)==224,"sidebar_double_click_restores_default")
+    try check(app.preferredSidebarWidth==200 && sidebarDefaults.double(forKey:MeetingSidebarSizing.preferenceKey)==200,"sidebar_double_click_restores_default")
     app.window.makeFirstResponder(app.output)
     for (name,size,appearance) in [("workspace-wide",NSSize(width:1040,height:720),NSAppearance.Name.aqua),("workspace-compact",NSSize(width:640,height:480),NSAppearance.Name.aqua),("workspace-dark",NSSize(width:1040,height:720),NSAppearance.Name.darkAqua)] {
         app.window.appearance=NSAppearance(named:appearance);app.window.setContentSize(size);app.layoutWorkspace();settle();app.renderText();app.window.contentView!.layoutSubtreeIfNeeded()

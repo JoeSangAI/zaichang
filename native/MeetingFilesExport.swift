@@ -1,6 +1,7 @@
 import Foundation
 import AppKit
 import CryptoKit
+import SQLite3
 
 struct MeetingFilesBuildResult {
     let folder:URL
@@ -117,7 +118,8 @@ final class MeetingFilesExportStore {
         let snapshot=TranscriptExportSnapshot(turns:turns,names:names,meetingTitle:item.displayTitle,sessionSource:source,phase:phase,incomplete:!complete,observedTracks:observed,applicationNames:applications.sorted(),recoveredArchiveText:events.isEmpty ? archive:nil,absoluteTime:MeetingAbsoluteTime(metadata["absolute_clock"]))
         let state=complete ? "转写完整":(rows.isEmpty ? "尚未转写":"部分转写，仍有内容待核对或录音待处理")
         let summary=["会议："+item.displayTitle,"转写状态："+state,"待转录音："+String(format:"%.1f",Double(item.pendingBytes)/32000)+" 秒"]
-        return (snapshot.text(),state,summary)
+        let reminders = try meetingAssistantReminderExport(cacheID: item.id, assistantDirectory: cacheRoot.deletingLastPathComponent().appendingPathComponent("Assistant"))
+        return (snapshot.text() + reminders,state,summary)
     }
     private func duration(_ seconds:Double)->String {
         let value=max(0,Int(seconds.rounded()));return String(format:"%02d:%02d:%02d",value/3600,(value/60)%60,value%60)
@@ -232,4 +234,30 @@ final class MeetingFilesExportStore {
         }
         return MeetingFilesBuildResult(folder:folder,audioCount:wavs.count,transcriptState:state)
     }
+}
+
+/// A read-only export view of validated reminders items. Never starts the service.
+func meetingAssistantReminderExport(cacheID: String, assistantDirectory: URL) throws -> String {
+    let file = assistantDirectory.appendingPathComponent("assistant.sqlite3")
+    guard FileManager.default.fileExists(atPath: file.path) else { return "" }
+    var db: OpaquePointer?
+    guard sqlite3_open_v2(file.path, &db, SQLITE_OPEN_READONLY, nil) == SQLITE_OK else {
+        sqlite3_close(db); throw Failure(code: "reminders_export_open")
+    }
+    defer { sqlite3_close(db) }
+    var statement: OpaquePointer?
+    let sql = "SELECT m.text,m.created FROM message m JOIN task t ON t.id=m.task_id JOIN workspace w ON w.id=t.workspace_id WHERE w.cache_id=? AND t.kind='chat' AND m.origin='say' AND m.role='assistant' ORDER BY m.created,m.rowid"
+    guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else { throw Failure(code: "reminders_export_read") }
+    defer { sqlite3_finalize(statement) }
+    sqlite3_bind_text(statement, 1, cacheID, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+    var lines: [String] = []
+    while true {
+        let status = sqlite3_step(statement)
+        if status == SQLITE_DONE { break }
+        guard status == SQLITE_ROW, let pointer = sqlite3_column_text(statement, 0) else { throw Failure(code: "assistant_export_item") }
+        let formatter = DateFormatter(); formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        let timestamp = formatter.string(from: Date(timeIntervalSince1970: sqlite3_column_double(statement, 1)))
+        lines.append("[\(timestamp)] " + String(cString: pointer))
+    }
+    return lines.isEmpty ? "" : "\n\n助理提醒\n" + lines.joined(separator: "\n")
 }

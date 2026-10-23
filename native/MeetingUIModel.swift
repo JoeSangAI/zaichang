@@ -72,6 +72,7 @@ struct SessionNames {
     private var segmentRevisions:[String:Int]=[:]
     private var runAnchors:[String:RunAnchor]=[:]
     private var anchorsByParent:[String:Set<String>]=[:]
+    private var registeredChildren:[String:Set<String>]=[:]
     private(set) var correctionRevision=0
     private(set) var restoredAutoNameInvalidated=false
     private(set) var lastUndoSegmentIDs:[String]=[]
@@ -178,6 +179,16 @@ struct SessionNames {
         runAnchors[anchor.id]=anchor;anchorsByParent[anchor.parent,default:[]].insert(anchor.id)
     }
     mutating func register(segment:String,item:[String:Any]) {
+        if let parent=item["parent_segment_id"] as? String,parent != segment {
+            registeredChildren[parent,default:[]].insert(segment)
+        } else if item["segment_id"] as? String==segment {
+            // Reprojection may coalesce old words into a different set of runs.
+            // Retire only derived bindings; human corrections keep their anchors.
+            for id in registeredChildren.removeValue(forKey:segment) ?? [] where !confirmed(id) {
+                bindings.removeValue(forKey:id);sessions.removeValue(forKey:id);segmentRevisions.removeValue(forKey:id)
+                if let anchor=runAnchors.removeValue(forKey:id) {anchorsByParent[anchor.parent]?.remove(id)}
+            }
+        }
         let session=item["session"] as? String
         if !correctedBindings.contains(segment) || sessions[segment] != session {bindings[segment]=SessionSpeakerKey.from(item);correctedBindings.remove(segment)};sessions[segment]=session
         segmentRevisions[segment]=item["revision"] as? Int
@@ -463,6 +474,7 @@ struct SessionNames {
         }
     }
     mutating func discard(segment:String) {
+        registeredChildren.removeValue(forKey:segment)
         correctionRevision &+= 1
         let ids=[segment]+Array(anchorsByParent[segment] ?? [])
         for id in ids {personReferences.removeValue(forKey:id)}
@@ -547,25 +559,25 @@ func sessionSpeakerMappingChecks()->Int {
     var n=SessionNames();var checks=0
     func item(_ slot:Int,_ source:String="remote",_ epoch:String="e",_ session:String="s")->[String:Any] {["session":session,"source_id":source,"epoch":epoch,"speaker":["basis":"anonymous_cluster","cluster_id":slot,"source_id":source,"epoch":epoch]]}
     n.register(segment:"a",item:item(0));n.register(segment:"b",item:item(0));n.register(segment:"other",item:item(1));n.register(segment:"mic",item:item(0,"mic"))
-    n.setSpeaker(segment:"a",name:"说话人甲");precondition(n.name(segment:"a")=="说话人甲" && n.name(segment:"b")=="说话人甲" && n.name(segment:"other")==nil && n.name(segment:"mic")==nil);checks+=1
-    n.register(segment:"future",item:item(0));precondition(n.name(segment:"future")=="说话人甲");checks+=1
-    n.setSpeaker(segment:"other",name:"说话人甲");n.setSpeaker(segment:"a",name:"Corrected");precondition(n.name(segment:"b")=="Corrected" && n.name(segment:"future")=="Corrected" && n.name(segment:"other")=="说话人甲");checks+=1
-    n.undo();precondition(n.name(segment:"a")=="说话人甲" && n.name(segment:"b")=="说话人甲");checks+=1
-    n.set(segment:"b",name:"One sentence only");precondition(n.name(segment:"b")=="One sentence only" && n.name(segment:"a")=="说话人甲");checks+=1
-    n.undo();precondition(n.name(segment:"b")=="说话人甲");checks+=1
+    n.setSpeaker(segment:"a",name:"Alice");precondition(n.name(segment:"a")=="Alice" && n.name(segment:"b")=="Alice" && n.name(segment:"other")==nil && n.name(segment:"mic")==nil);checks+=1
+    n.register(segment:"future",item:item(0));precondition(n.name(segment:"future")=="Alice");checks+=1
+    n.setSpeaker(segment:"other",name:"Alice");n.setSpeaker(segment:"a",name:"Corrected");precondition(n.name(segment:"b")=="Corrected" && n.name(segment:"future")=="Corrected" && n.name(segment:"other")=="Alice");checks+=1
+    n.undo();precondition(n.name(segment:"a")=="Alice" && n.name(segment:"b")=="Alice");checks+=1
+    n.set(segment:"b",name:"One sentence only");precondition(n.name(segment:"b")=="One sentence only" && n.name(segment:"a")=="Alice");checks+=1
+    n.undo();precondition(n.name(segment:"b")=="Alice");checks+=1
     let target=n.key(segment:"other")!;precondition(!n.assign(segment:"b",to:target,humanConfirmed:false));checks+=1
-    precondition(n.assign(segment:"b",to:target,humanConfirmed:true,name:"Second person"));precondition(n.name(segment:"b")=="Second person" && n.name(segment:"other")=="Second person" && n.name(segment:"a")=="说话人甲");checks+=1
+    precondition(n.assign(segment:"b",to:target,humanConfirmed:true,name:"Second person"));precondition(n.name(segment:"b")=="Second person" && n.name(segment:"other")=="Second person" && n.name(segment:"a")=="Alice");checks+=1
     n.register(segment:"b",item:item(0));precondition(n.name(segment:"b")=="Second person");checks+=1
-    n.undo();precondition(n.name(segment:"b")=="说话人甲" && n.key(segment:"b") != target && n.name(segment:"other")=="说话人甲");checks+=1
+    n.undo();precondition(n.name(segment:"b")=="Alice" && n.key(segment:"b") != target && n.name(segment:"other")=="Alice");checks+=1
     n.register(segment:"foreign",item:item(0,"remote","e","different-session"));precondition(!n.assign(segment:"b",to:n.key(segment:"foreign")!,humanConfirmed:true));checks+=1
     n.register(segment:"unknown",item:["session":"s","source_id":"remote","epoch":"e","speaker":["basis":"unknown"]]);n.setSpeaker(segment:"unknown",name:"Only unknown sentence");n.register(segment:"next-unknown",item:["session":"s","speaker":["basis":"unknown"]]);precondition(n.name(segment:"next-unknown")==nil && n.key(segment:"unknown")==nil);checks+=1
     let old=n.key(segment:"a")!;let stable=SessionSpeakerKey(session:"s",source:"remote",epoch:"e",identity:"stable:test")
     precondition(!n.migrate(from:old,to:stable,continuityConfirmed:false));checks+=1
-    precondition(n.migrate(from:old,to:stable,continuityConfirmed:true));precondition(n.name(segment:"a")=="说话人甲" && n.name(segment:"future")=="说话人甲" && n.key(segment:"b")==stable);checks+=1
+    precondition(n.migrate(from:old,to:stable,continuityConfirmed:true));precondition(n.name(segment:"a")=="Alice" && n.name(segment:"future")=="Alice" && n.key(segment:"b")==stable);checks+=1
     n.setSpeaker(segment:"other",name:"Conflicting person");precondition(!n.migrate(from:stable,to:target,continuityConfirmed:true));checks+=1
     let changedEpoch=SessionSpeakerKey(session:"s",source:"remote",epoch:"new-epoch",identity:"stable:test");precondition(!n.migrate(from:stable,to:changedEpoch,continuityConfirmed:true));checks+=1
-    n.setSpeaker(segment:"a",name:"");precondition(n.name(segment:"b")==nil && n.name(segment:"future")==nil && n.name(segment:"other")=="Conflicting person");n.undo();precondition(n.name(segment:"b")=="说话人甲");checks+=1
-    n.discard(segment:"a");precondition(n.name(segment:"future")=="说话人甲");checks+=1
+    n.setSpeaker(segment:"a",name:"");precondition(n.name(segment:"b")==nil && n.name(segment:"future")==nil && n.name(segment:"other")=="Conflicting person");n.undo();precondition(n.name(segment:"b")=="Alice");checks+=1
+    n.discard(segment:"a");precondition(n.name(segment:"future")=="Alice");checks+=1
     func namedParent(_ runs:[[String:Any]])->[String:Any] {
         ["type":"segment","segment_id":"turn","session":"s","source_id":"remote","epoch":"e",
          "start":0.0,"end":0.3,"end_time_known":true,"text":"甲乙丙","word_spans":[["start":0.0,"end":0.1,"text":"甲"],["start":0.1,"end":0.2,"text":"乙"],["start":0.2,"end":0.3,"text":"丙"]],"speaker_runs":runs]
@@ -643,9 +655,9 @@ func modelSelfTest() {
     precondition(state.stop() && !state.stop());state.phase = .stopped
     precondition(state.time=="00:12" && state.price=="<¥0.01");checks+=1
     state.phase = .ended;precondition(!state.start());checks+=1
-    var names=SessionNames();names.set(segment:"a",name:"说话人甲");names.set(segment:"b",name:"龚灵");precondition(names.values["a"]=="说话人甲" && names.values["b"]=="龚灵");checks+=1
-    names.set(segment:"a",name:"顾问甲");names.undo();precondition(names.values["a"]=="说话人甲");checks+=1
-    names.set(segment:"a",name:"");precondition(names.values["a"]==nil);names.undo();precondition(names.values["a"]=="说话人甲");checks+=1
+    var names=SessionNames();names.set(segment:"a",name:"Alice");names.set(segment:"b",name:"李四");precondition(names.values["a"]=="Alice" && names.values["b"]=="李四");checks+=1
+    names.set(segment:"a",name:"张三");names.undo();precondition(names.values["a"]=="Alice");checks+=1
+    names.set(segment:"a",name:"");precondition(names.values["a"]==nil);names.undo();precondition(names.values["a"]=="Alice");checks+=1
     names.reset();names.undo();precondition(names.values.isEmpty);checks+=1
     print("{\"type\":\"ui_model_validation\",\"passed\":\(checks),\"keychain\":false,\"clipboard\":false,\"capture\":false,\"network\":false}")
 }

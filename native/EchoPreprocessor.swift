@@ -9,7 +9,7 @@ import Foundation
 /// first sample, in seconds, from the same monotonic clock for both sources.
 /// Call `process` on one bounded serial worker and await each call in capture
 /// order; never call it from an audio render callback.
-enum EchoPreprocessorStatus: String, Sendable {
+enum EchoPreprocessorStatus: String, Sendable, CaseIterable {
     case processed
     case processedWithRawEdges
     case bufferedForModelLatency
@@ -210,6 +210,7 @@ actor EchoPreprocessor {
 
     func diagnostics() -> [String: Any] {
         ["echo_model_available": stream != nil,
+         "echo_model_detail": unavailableDetail.map { $0 as Any } ?? (NSNull() as Any),
          "echo_processed_frames": frameCount - bypassCount,
          "echo_bypassed_frames": bypassCount]
     }

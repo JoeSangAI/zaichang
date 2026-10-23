@@ -2,7 +2,7 @@ import AppKit
 
 enum MeetingSidebarSizing {
     static let preferenceKey="MeetingSidebarWidth"
-    static let defaultWidth:CGFloat=224
+    static let defaultWidth:CGFloat=200
     static let minimum:CGFloat=200
     static let maximum:CGFloat=360
     static func preferred(_ width:CGFloat)->CGFloat {width.isFinite ? min(maximum,max(minimum,width)):defaultWidth}

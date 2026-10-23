@@ -18,9 +18,10 @@ final class MeetingAgentBridge {
     private var stopping = false
     init(root: String, store: URL, offline: Bool) {
         let child = Process(), stdin = Pipe(), stdout = Pipe()
+        child.executableURL = URL(fileURLWithPath: "/usr/local/bin/python3")
         child.arguments = ["-u", root + "/assistant_runtime.py", "--store", store.path, "--cwd", NSHomeDirectory()] + (offline ? ["--offline"] : [])
         var env = RuntimeConfiguration.childEnvironment()
-        env["PATH"] = NSHomeDirectory() + "/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:" + (env["PATH"] ?? "")
+        env["PATH"] = "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:" + (env["PATH"] ?? "")
         child.environment = env; child.standardInput = stdin; child.standardOutput = stdout
         // Retain startup diagnostics locally; never send them into the chat.
         // Replaced on launch so repeated failures cannot grow an unbounded log.
@@ -43,12 +44,7 @@ final class MeetingAgentBridge {
             for callback in pending.values { callback(["ok": false, "error": ["message": self.error ?? "助理已关闭"]]) }
             for observer in self.observers.values { observer("", ["runtime_status": "unavailable", "runtime_message": self.error ?? "助理已关闭"]) }
         } }
-        do {
-            guard let python=PythonRuntime.executable() else {throw Failure(code:"python_runtime_missing")}
-            child.executableURL=python
-            try FileManager.default.createDirectory(at: store, withIntermediateDirectories: true)
-            try child.run(); process = child; input = stdin.fileHandleForWriting
-        }
+        do { try FileManager.default.createDirectory(at: store, withIntermediateDirectories: true); try child.run(); process = child; input = stdin.fileHandleForWriting }
         catch { self.error = "助理未能启动：\(error.localizedDescription)"; stdout.fileHandleForReading.readabilityHandler = nil }
     }
     private func receive(_ data: Data) {
@@ -73,7 +69,7 @@ final class MeetingAgentBridge {
         if let completion {
             callbacks[id] = completion
             DispatchQueue.main.asyncAfter(deadline: .now() + 40) { [weak self] in
-                self?.callbacks.removeValue(forKey: id)?(["ok": false, "error": ["message": "操作状态尚未确认；请勿重复提交，重新连接后核对任务。"]])
+                self?.callbacks.removeValue(forKey: id)?(["ok": false, "error": ["message": "操作状态尚未确认；请勿重复提交，重新连接后核对对话。"]])
             }
         }
         io.async { [weak self] in do { try input.write(contentsOf: data + Data([10])) } catch {
@@ -98,12 +94,16 @@ final class MeetingAgentController: NSObject {
     private let token = UUID()
     private var timer: Timer?
     private var binding = false
+    private var bindingSucceeded = false
+    private var bindGeneration = 0
+    private var suspended = false
     private var boundCache: String?
     private var boundSession: String?
     private var fingerprint: Data?
     private var contextDirty = true
     private var lastTitle = ""
     private var lastNotes = ""
+    private var lastMeetingState = ""
     private var width: NSLayoutConstraint!
     private let widthPreferenceKey = "MeetingAgentPanelWidth"
     private var preferredPanelWidth: CGFloat = 370
@@ -112,7 +112,6 @@ final class MeetingAgentController: NSObject {
     private let minimumTranscriptWidth: CGFloat = 300
     private var manualVisible: Bool?
     private var draftReadOnly = false
-    private var overviewActive = false
     private var workspaces: [[String: Any]] = []
     var expanded = true
     init(owner: Delegate) {
@@ -123,6 +122,7 @@ final class MeetingAgentController: NSObject {
         if !owner.isHistoryReader { UserDefaults.standard.set(workspaceID, forKey: key) }
         service = MeetingAgentBridge.shared(root: owner.root, store: base, offline: Credential.offline && !owner.agentLiveProbe)
         super.init()
+        panel.activateWorkspace(workspaceID)
         let preferenceOwner = owner.workspaceOwner ?? owner
         if let saved = preferenceOwner.sidebarPreferences?.object(forKey: widthPreferenceKey) as? NSNumber,
            CFGetTypeID(saved) != CFBooleanGetTypeID() {
@@ -130,7 +130,7 @@ final class MeetingAgentController: NSObject {
             if value.isFinite { preferredPanelWidth = min(maximumPanelWidth, max(minimumPanelWidth, value)) }
         }
         width = panel.widthAnchor.constraint(equalToConstant: 370)
-        width.priority = NSLayoutConstraint.Priority(749)
+        width.priority = NSLayoutConstraint.Priority(999)
         panel.onCommand = { [weak self] method, params in self?.command(method, params) }
         panel.onResize = { [weak self] proposed, persist in self?.resizePanel(to: proposed, persist: persist) }
         service.observers[token] = { [weak self] id, snapshot in
@@ -139,13 +139,14 @@ final class MeetingAgentController: NSObject {
             else { self.state = snapshot }
             self.state["workspaces"] = self.owner?.currentCacheID == nil ? self.workspaces : []
             self.panel.apply(self.state)
-            let active=(self.state["tasks"] as? [[String:Any]] ?? []).filter{["running","waiting","queued","cancelling"].contains($0["status"] as? String ?? "")}.count
-            self.owner?.agentSidebarButton?.toolTip = active > 0 ? "右侧栏 · \(active) 个任务进行中（收起不停止任务）" : "显示或隐藏右侧栏"
+            self.owner?.agentSidebarButton?.toolTip = self.state["listening"] as? Bool == true ? "正在旁听 · 收起不停止旁听" : "显示或隐藏右侧栏"
         }
-        timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.sync() }
+        timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            self?.sync(); self?.updateOverviewVisibility()
+        }
         bind()
     }
-    deinit { timer?.invalidate(); service.observers.removeValue(forKey: token); if overviewActive { service.send("overview", workspace: workspaceID, params: ["active": false]) } }
+    deinit { timer?.invalidate(); service.observers.removeValue(forKey: token) }
     func installNotes(_ notes: MeetingNotesController) {
         notes.embeddedInAssistant = true; notes.panelWidth.isActive = false; notes.panel.isHidden = false
         panel.installNotes(notes.panel)
@@ -179,23 +180,30 @@ final class MeetingAgentController: NSObject {
     var requestedPanelWidth: CGFloat { width.constant }
     func toggle() { manualVisible = !(manualVisible ?? expanded); layout(); owner?.window.contentView?.layoutSubtreeIfNeeded(); owner?.resizeTranscript() }
     func newWorkspace() {
-        stopOverview()
-        binding = false; workspaceID = UUID().uuidString; boundCache = nil; boundSession = nil; fingerprint = nil; contextDirty = true; state = [:]; draftReadOnly = false
+
+        binding = false; bindingSucceeded = false; workspaceID = UUID().uuidString; boundCache = nil; boundSession = nil; fingerprint = nil; contextDirty = true; state = [:]; draftReadOnly = false
         if let owner { let base = owner.agentStoreOverride ?? meetingCacheRoot().deletingLastPathComponent().appendingPathComponent(Credential.offline ? "DevelopmentQA/Assistant" : "Assistant"); UserDefaults.standard.set(workspaceID, forKey: "assistant.draft." + base.path) }
-        panel.apply(state); bind()
+        panel.activateWorkspace(workspaceID); panel.apply(state); bind()
     }
     private func bind() {
-        guard !binding, let owner else { return }; binding = true
+        guard !suspended, !binding, let owner else { return }; binding = true
+        bindingSucceeded = false
+
+        bindGeneration += 1; let generation = bindGeneration
+        let resolvesTemporary = boundCache == nil && boundSession == nil && !draftReadOnly
         let requested = workspaceID, cache = owner.currentCacheID, session = owner.activeSession
         var params: [String: Any] = ["title": owner.meetingTitle]
         if let cache { params["cache_id"] = cache }; if let session { params["session_id"] = session }
         if let database = owner.documentContextPublisher?.databaseURL, FileManager.default.fileExists(atPath:database.path) { params["context_database"] = database.path }
         service.send("bind", workspace: requested, params: params) { [weak self] response in
-            guard let self, self.workspaceID == requested else { return }; self.binding = false
+            guard let self, !self.suspended, self.bindGeneration == generation, self.workspaceID == requested else { return }; self.binding = false
             if response["ok"] as? Bool == true {
                 let result = response["result"] as? [String: Any] ?? [:]
                 self.workspaceID = result["workspace_id"] as? String ?? requested
+                if resolvesTemporary { self.panel.resolveDraftWorkspace(from: requested, to: self.workspaceID) }
+                self.panel.activateWorkspace(self.workspaceID)
                 self.boundCache = cache; self.boundSession = session
+                self.bindingSucceeded = true
                 if cache != nil, let owner = self.owner, !owner.isHistoryReader {
                     let base = owner.agentStoreOverride ?? meetingCacheRoot().deletingLastPathComponent().appendingPathComponent(Credential.offline ? "DevelopmentQA/Assistant" : "Assistant")
                     UserDefaults.standard.removeObject(forKey: "assistant.draft." + base.path)
@@ -206,19 +214,24 @@ final class MeetingAgentController: NSObject {
         }
     }
     func invalidateContext() {contextDirty=true}
+    private var currentBindingReady: Bool {
+        guard !suspended, !binding, bindingSucceeded, let owner else { return false }
+        if draftReadOnly { return owner.currentCacheID == nil }
+        return boundCache == owner.currentCacheID && boundSession == owner.activeSession
+    }
     func sync(force: Bool = false) {
-        guard let owner, !binding, !owner.quitting else { return }
+        guard let owner, !suspended, !binding, !owner.quitting else { return }
+        if !bindingSucceeded { bind(); return }
         if !draftReadOnly && (boundCache != owner.currentCacheID || boundSession != owner.activeSession) { bind(); return }
         if draftReadOnly, owner.currentCacheID != nil {draftReadOnly=false;bind();return}
         guard !draftReadOnly else { return }
         let notes=owner.notesController?.editor.string ?? ""
-        guard force || contextDirty || lastTitle != owner.meetingTitle || lastNotes != notes else{return}
+        let meetingState = owner.phase.phase.rawValue
+        guard force || contextDirty || lastTitle != owner.meetingTitle || lastNotes != notes || lastMeetingState != meetingState else{return}
+        lastMeetingState = meetingState
         contextDirty=false;lastTitle=owner.meetingTitle;lastNotes=notes
-        let turns = owner.readingTurns(owner.sequence)
-        let rows: [[String: Any]] = turns.filter { $0.item["final"] as? Bool == true }.map {
-            ["id": $0.id, "revision": $0.item["revision"] ?? 0, "text": $0.item["text"] as? String ?? "", "speaker": owner.readingTurnLabel($0), "final": true]
-        }
-        var context: [String: Any] = ["title": owner.meetingTitle, "segments": rows, "notes": notes]
+        let rows = meetingAssistantSegments(owner: owner, turns: owner.readingTurns(owner.sequence))
+        var context: [String: Any] = ["title": owner.meetingTitle, "segments": rows, "notes": notes, "meeting_state": meetingState]
         if let cache = owner.currentCacheID { context["cache_id"] = cache }; if let session = owner.activeSession { context["session_id"] = session }
         guard let data = try? JSONSerialization.data(withJSONObject: context, options: [.sortedKeys]), force || data != fingerprint else { return }
         fingerprint = data; service.send("context", workspace: workspaceID, params: context)
@@ -231,34 +244,46 @@ final class MeetingAgentController: NSObject {
             self.state["workspaces"]=self.owner?.currentCacheID == nil ? self.workspaces : [];self.panel.apply(self.state)
         }
     }
-    private func stopOverview() {
-        if overviewActive { service.send("overview", workspace: workspaceID, params: ["active": false]) }
-        overviewActive = false
+    func suspend() {
+        suspended = true; bindGeneration += 1; binding = false; bindingSucceeded = false
+        timer?.invalidate();
     }
     private func updateOverviewVisibility(refresh: Bool = false) {
-        guard !binding else { return }
-        let active = expanded && panel.selectedTab == "概览"
-        guard active != overviewActive || refresh else { return }
-        overviewActive = active
-        if active { sync(force: true) }
-        service.send("overview", workspace: workspaceID, params: ["active": active, "refresh": refresh])
+        guard refresh, !suspended, !binding else { return }
+        sync(force: true)
+        guard currentBindingReady else { return }
+        service.send("overview", workspace: workspaceID, params: ["refresh": true])
     }
     func command(_ method: String, _ params: [String: Any]) {
         if method == "overview" { updateOverviewVisibility(refresh: params["refresh"] as? Bool ?? false); return }
         if method == "open_workspace" {
             guard owner?.currentCacheID == nil, let id = params["workspace_id"] as? String else { return }
             guard workspaces.contains(where:{$0["id"] as? String == id}) else{return}
-            stopOverview()
-            binding=true;workspaceID = id; draftReadOnly = true;fingerprint=nil;state=["runtime_status":"starting"];panel.apply(state)
+
+            bindGeneration += 1; let generation = bindGeneration
+            binding=true;bindingSucceeded=false;workspaceID = id; panel.activateWorkspace(id); draftReadOnly = true;fingerprint=nil;state=["runtime_status":"starting"];panel.apply(state)
             service.send("bind", workspace:id) { [weak self] response in
-                guard let self,self.workspaceID == id else{return};self.binding=false
-                if response["ok"] as? Bool != true {self.showError(response)} else {self.updateOverviewVisibility()}
+                guard let self,!self.suspended,self.bindGeneration == generation,self.workspaceID == id else{return};self.binding=false
+                if response["ok"] as? Bool != true {self.showError(response)} else {self.bindingSucceeded=true;self.updateOverviewVisibility()}
             };return
         }
         guard !binding else {state["runtime_message"]="助理正在连接，请稍后发送。";panel.apply(state);if let text=params["text"] as? String {panel.restoreDraft(text)};return}
         sync(force: true)
-        service.send(method, workspace: workspaceID, params: params) { [weak self] response in
-            if response["ok"] as? Bool != true { self?.showError(response);if let text=params["text"] as? String {self?.panel.restoreDraft(text)} } else if method == "send" {self?.refreshWorkspaces()}
+        // sync may start a bind after the user switches the visible meeting.
+        // Do not send this input with the preceding meeting's binding.
+        guard currentBindingReady else {
+            if let text = params["text"] as? String { panel.restoreDraft(text) }
+            state["runtime_message"] = "助理尚未连接到当前会议，输入已保留，请连接后发送。"
+            panel.apply(state)
+            return
+        }
+        let requestedWorkspace = workspaceID
+        service.send(method, workspace: requestedWorkspace, params: params) { [weak self] response in
+            guard let self else { return }
+            if response["ok"] as? Bool != true {
+                if let text = params["text"] as? String { self.panel.restoreDraft(text, workspace: requestedWorkspace) }
+                if self.workspaceID == requestedWorkspace { self.showError(response) }
+            } else if method == "send", self.workspaceID == requestedWorkspace { self.refreshWorkspaces() }
         }
     }
     private func showError(_ response: [String: Any]) {
@@ -286,7 +311,22 @@ extension Delegate {
     @objc func toggleAssistantPanel() { agentController?.toggle() }
     @objc func toggleVisibleAssistant() {displayedDocument.agentController?.toggle()}
     @objc func showAssistantMore(_ sender:NSButton) {
-        let menu=NSMenu();let details=NSMenuItem(title:"会议详情",action:#selector(showWorkspaceDetails),keyEquivalent:"");details.target=self;menu.addItem(details)
+        let menu=NSMenu()
+        let search=NSMenuItem(title:"搜索原文",action:#selector(showDocumentSearch),keyEquivalent:"");search.target=self;menu.addItem(search)
+        let details=NSMenuItem(title:"会议详情",action:#selector(showWorkspaceDetails),keyEquivalent:"");details.target=self;menu.addItem(details)
+        let document=displayedDocument
+        let archive=NSMenuItem(title:"归档",action:#selector(openMeetingArchive),keyEquivalent:"");archive.target=document;archive.isEnabled=document.meetingArchiveEligible
+        menu.autoenablesItems=false;menu.addItem(.separator());menu.addItem(archive)
         NSMenu.popUpContextMenu(menu,with:NSApp.currentEvent ?? NSEvent(),for:sender)
     }
+}
+
+/// Shared by the live bridge and read-only replay projection.
+func meetingAssistantSegments(owner: Delegate, turns: [ReadingTurn]) -> [[String: Any]] {
+        return turns.filter { $0.item["final"] as? Bool == true }.map {
+            var flags=($0.item["quality_flags"] as? [String] ?? []) + $0.parts.flatMap { part in part.1["quality_flags"] as? [String] ?? [] }
+            if $0.parts.contains(where:{$0.1["final"] as? Bool==false}) {flags.append("contains_nonfinal_part")}
+            if $0.parts.contains(where:{["unreliable","needs_review"].contains($0.1["text_quality"] as? String ?? "")}) {flags.append("text_needs_review")}
+            return ["id": $0.id, "revision": $0.item["revision"] ?? 0, "text": $0.item["text"] as? String ?? "", "speaker": owner.readingTurnLabel($0), "speaker_uncertain": $0.uncertain, "quality_flags": Array(Set(flags)).sorted(), "text_quality": $0.item["text_quality"] ?? NSNull(), "final": true, "start": $0.item["start"] ?? 0, "end": $0.item["end"] ?? 0]
+        }
 }

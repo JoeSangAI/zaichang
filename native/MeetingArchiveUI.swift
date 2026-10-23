@@ -27,51 +27,43 @@ enum MeetingArchiveEligibility {
 }
 
 enum MeetingArchiveRequest {
-    static func origin(environment:[String:String]=ProcessInfo.processInfo.environment)->String? {
-        guard let value=environment["ZAICHANG_ARCHIVE_ORIGIN"],let url=URL(string:value),
-              ["http","https"].contains(url.scheme?.lowercased() ?? ""),url.host != nil,
-              url.user==nil,url.password==nil else{return nil}
-        return value.trimmingCharacters(in:CharacterSet(charactersIn:"/"))
-    }
+    static var origin:String {RuntimeConfiguration.archiveConfiguration?.url ?? ""}
     static let acceptedMessage="已发起归档准备，正在读取最新进度。"
     static let requestTimeout:TimeInterval=8
     static let resourceTimeout:TimeInterval=15
     static let bootstrapPath="/api/meeting-archives-bootstrap"
 
-    static func bootstrapURL(environment:[String:String]=ProcessInfo.processInfo.environment)->URL? {
-        guard let origin=origin(environment:environment) else{return nil};return URL(string:origin+bootstrapPath)
-    }
+    static func bootstrapURL()->URL? {RuntimeConfiguration.archiveEnabled ? URL(string:origin+bootstrapPath):nil}
 
     static func validatedCSRFToken(data:Data?,response:URLResponse?,error:Error?)throws->String {
         guard error==nil,let response=response as? HTTPURLResponse,(200..<300).contains(response.statusCode),
               let data,let value=(try? JSONSerialization.jsonObject(with:data)) as? [String:Any],
-              value["app_id"] as? String=="zaichang-workbench",
+              RuntimeConfiguration.archiveEnabled,
+              value["app_id"] as? String==RuntimeConfiguration.archiveConfiguration?.appID,
               let token=value["csrf_token"] as? String,!token.isEmpty else{throw Failure(code:"meeting_archive_bootstrap_invalid")}
         return token
     }
 
-    static func pageURL(session:String,environment:[String:String]=ProcessInfo.processInfo.environment)throws->URL {
-        guard let origin=origin(environment:environment) else{throw Failure(code:"meeting_archive_not_configured")}
-        var components=URLComponents(string:origin+"/")!
+    static func pageURL(session:String)throws->URL {
+        guard RuntimeConfiguration.archiveEnabled,var components=URLComponents(string:origin+"/") else{throw Failure(code:"meeting_archive_unconfigured")}
         components.queryItems=[URLQueryItem(name:"page",value:"archive"),URLQueryItem(name:"session",value:session)]
         guard let url=components.url else{throw Failure(code:"meeting_archive_url_invalid")}
         return url
     }
 
-    static func prepareURL(session:String,environment:[String:String]=ProcessInfo.processInfo.environment)throws->URL {
-        guard let origin=origin(environment:environment),let safe=session.addingPercentEncoding(withAllowedCharacters:CharacterSet(charactersIn:"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_")),
+    static func prepareURL(session:String)throws->URL {
+        guard RuntimeConfiguration.archiveEnabled,let safe=session.addingPercentEncoding(withAllowedCharacters:CharacterSet(charactersIn:"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_")),
               let url=URL(string:origin+"/api/meeting-archives/"+safe+"/prepare") else {
             throw Failure(code:"meeting_archive_url_invalid")
         }
         return url
     }
 
-    static func prepareRequest(session:String,csrfToken:String,environment:[String:String]=ProcessInfo.processInfo.environment)throws->URLRequest {
+    static func prepareRequest(session:String,csrfToken:String)throws->URLRequest {
         guard !csrfToken.isEmpty else{throw Failure(code:"meeting_archive_csrf_missing")}
-        guard let requestOrigin=origin(environment:environment) else{throw Failure(code:"meeting_archive_not_configured")}
-        var request=URLRequest(url:try prepareURL(session:session,environment:environment));request.httpMethod="POST"
+        var request=URLRequest(url:try prepareURL(session:session));request.httpMethod="POST"
         request.setValue("application/json",forHTTPHeaderField:"Content-Type")
-        request.setValue(requestOrigin,forHTTPHeaderField:"Origin")
+        request.setValue(origin,forHTTPHeaderField:"Origin")
         request.setValue(csrfToken,forHTTPHeaderField:"X-CSRF-Token")
         request.httpBody=Data("{}".utf8)
         return request
@@ -105,6 +97,7 @@ private final class MeetingArchivePanel:NSObject,NSWindowDelegate,WKNavigationDe
     init(owner:Delegate){self.owner=owner}
 
     func eligible(_ owner:Delegate,requireCoarse:Bool)->Bool {
+        guard RuntimeConfiguration.archiveEnabled else{return false}
         let transcriptionComplete=MeetingArchiveEligibility.transcriptComplete(phase:owner.phase.phase,cachedComplete:owner.cachedTranscriptionComplete,pausedTail:owner.pausedTailStates,historyReader:owner.isHistoryReader)
         let settledFailure=owner.speakerRefinementFailureRevision==owner.naming.correctionRevision ? owner.speakerRefinementFailureCode:nil
         let coarseSettled=MeetingArchiveEligibility.coarseSettled(hasArtifact:owner.hasCurrentCoarseResult,errorCode:settledFailure)
@@ -130,6 +123,7 @@ private final class MeetingArchivePanel:NSObject,NSWindowDelegate,WKNavigationDe
     }
 
     func open() {
+        guard RuntimeConfiguration.archiveEnabled else{return}
         guard let owner else{return}
         present()
         if let session=owner.activeSession,let url=try? MeetingArchiveRequest.pageURL(session:session) {webView?.load(URLRequest(url:url))}
@@ -137,6 +131,7 @@ private final class MeetingArchivePanel:NSObject,NSWindowDelegate,WKNavigationDe
     }
 
     func present() {
+        guard RuntimeConfiguration.archiveEnabled else{return}
         guard let owner else{return}
         if window == nil {buildPanel()}
         if let window,window.sheetParent == nil,window.isVisible==false {owner.window?.beginSheet(window,completionHandler:nil)}
@@ -191,7 +186,7 @@ private final class MeetingArchivePanel:NSObject,NSWindowDelegate,WKNavigationDe
     }
 
     private func requestPreparation(key:String,owner:Delegate,session:String,requireCoarse:Bool) {
-        guard let bootstrapURL=MeetingArchiveRequest.bootstrapURL() else{fail(key,"归档服务尚未配置。");return}
+        guard let bootstrapURL=MeetingArchiveRequest.bootstrapURL() else{fail(key,"工作台地址无效。稍后重试。");return}
         networkSession.dataTask(with:bootstrapURL) { [self,owner] data,response,error in
             DispatchQueue.main.async {
                 guard self.isCurrent(key,owner:owner,requireCoarse:requireCoarse) else{self.inFlight.remove(key);return}
@@ -235,6 +230,7 @@ private final class MeetingArchivePanel:NSObject,NSWindowDelegate,WKNavigationDe
 
     func refreshButton() {
         guard let owner else{return}
+        button?.isHidden = !RuntimeConfiguration.archiveEnabled
         button?.isEnabled=eligible(owner,requireCoarse:false)
         button?.toolTip=eligible(owner,requireCoarse:false) ? "查看本场归档内容":"文字整理后自动归档"
     }
@@ -286,7 +282,7 @@ extension Delegate {
         let button=NSButton(title:"归档",target:self,action:#selector(openMeetingArchive));button.bezelStyle = .inline
         button.image=NSImage(systemSymbolName:"archivebox",accessibilityDescription:"归档");button.imagePosition = .imageLeading
         button.toolTip="查看并确认本场归档内容";button.isEnabled=meetingArchiveEligible
-        button.isHidden=MeetingArchiveRequest.origin()==nil
+        button.isHidden = !RuntimeConfiguration.archiveEnabled
         meetingArchivePanel.button=button
         return button
     }

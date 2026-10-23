@@ -84,7 +84,7 @@ enum ProcessAudioInventory {
             let ownership = owner(pid: pid, running: apps[pid]?.first)
             // All variants of the assistant, including a helper inside its app,
             // must be excluded before the unknown-source fallback.
-            if ownership?.bundleID.hasPrefix("com.zaichang.app") == true { continue }
+            if ownership?.bundleID.hasPrefix("com.joesang.meeting-assistant") == true { continue }
             if executablePath(pid: pid).map({ isAssistantPath($0) }) == true { continue }
             observations.append(ProcessAudioObservation(pid: pid, objectID: object,
                                                          ownerBundleID: ownership?.bundleID,
@@ -167,8 +167,7 @@ extension ApplicationTap {
             var property = address(kAudioTapPropertyFormat)
             var size = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
             try check(AudioObjectGetPropertyData(tap, &property, 0, nil, &size, &asbd), "app_tap_format")
-            guard let format = AVAudioFormat(streamDescription: &asbd) else { throw Failure(code: "app_tap_format_unsupported") }
-            let converter = try PCMConverter(format)
+            let declaredTapSampleRate=asbd.mSampleRate
             var systemProperty = address(kAudioHardwarePropertyDefaultOutputDevice)
             var outputDevice: AudioObjectID = 0
             var outputSize = UInt32(MemoryLayout<AudioObjectID>.size)
@@ -190,8 +189,18 @@ extension ApplicationTap {
                 kAudioAggregateDeviceTapListKey: [[kAudioSubTapUIDKey: description.uuid.uuidString, kAudioSubTapDriftCompensationKey: true]]
             ]
             try check(AudioHardwareCreateAggregateDevice(aggregate as CFDictionary, &device), "create_app_aggregate")
+            let format=try applicationTapInputFormat(device:device)
+            asbd=format.streamDescription.pointee;capturedInputFormat=format
+            let converter=try PCMConverter(format)
+            var formatClock=ApplicationTapClockCheck()
+            let formatInfo:[String:Any]=["type":"capture_format","source_id":sourceID,"tap_sample_rate":declaredTapSampleRate,
+                  "input_sample_rate":format.sampleRate,"input_channels":format.channelCount,
+                  "input_bytes_per_frame":asbd.mBytesPerFrame]
+            box.journal?.recordCaptureFormat(formatInfo)
+            emit(formatInfo)
             try check(AudioDeviceCreateIOProcIDWithBlock(&io, device, queue) { _, input, inputTime, _, _ in
                 guard captureAdmissionOpen() else { return }
+                guard formatClock.accepts(inputTime.pointee,sampleRate:format.sampleRate) else{box.fail("app_tap_input_clock_changed");return}
                 let list = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: input))
                 guard let first = list.first, asbd.mBytesPerFrame > 0 else { box.fail("app_tap_empty_format"); return }
                 let frames = AVAudioFrameCount(first.mDataByteSize / asbd.mBytesPerFrame)
@@ -243,7 +252,7 @@ final class ProcessAudioSourceController {
         let clockChanged = outputClock != 0 && outputClock != clock
         let currentIDs = Set(desired.map(\.sourceID))
         let changedIDs = Set(changes.changed.map(\.sourceID))
-        for (id, entry) in active where !currentIDs.contains(id) || changedIDs.contains(id) || clockChanged {
+        for (id, entry) in active where !currentIDs.contains(id) || changedIDs.contains(id) || clockChanged || entry.tap.inputFormatChanged() {
             entry.tap.stop()
             active.removeValue(forKey: id)
         }
@@ -284,24 +293,24 @@ final class ProcessAudioSourceController {
 func processAudioSourceSyntheticChecks() -> [String] {
     var failures: [String] = []
     func expect(_ condition: Bool, _ code: String) { if !condition { failures.append(code) } }
-    let a = ProcessAudioObservation(pid: 101, objectID: 501, ownerBundleID: "com.example.recorderA", ownerName: "说话人甲")
-    let helper = ProcessAudioObservation(pid: 102, objectID: 502, ownerBundleID: "com.example.recorderA", ownerName: "说话人甲")
+    let a = ProcessAudioObservation(pid: 101, objectID: 501, ownerBundleID: "com.example.alpha", ownerName: "Alice")
+    let helper = ProcessAudioObservation(pid: 102, objectID: 502, ownerBundleID: "com.example.alpha", ownerName: "Alice")
     let unknown = ProcessAudioObservation(pid: 103, objectID: 503, ownerBundleID: nil, ownerName: nil)
-    let other = ProcessAudioObservation(pid: 104, objectID: 504, ownerBundleID: "com.example.recorderB", ownerName: "说话人乙")
+    let other = ProcessAudioObservation(pid: 104, objectID: 504, ownerBundleID: "com.example.beta", ownerName: "Bob")
     let first = ProcessAudioInventory.group([a, helper, unknown, other])
     expect(first.count == 3, "group_count")
-    expect(first.first(where: { $0.bundleID == "com.example.recorderA" })?.audioObjectIDs == [501, 502], "verified_helper_group")
+    expect(first.first(where: { $0.bundleID == "com.example.alpha" })?.audioObjectIDs == [501, 502], "verified_helper_group")
     expect(first.first(where: { $0.bundleID == nil })?.sourceID == ProcessAudioInventory.unknownSourceID, "unknown_fallback")
-    expect(first.first(where: { $0.bundleID == "com.example.recorderB" })?.audioObjectIDs == [504], "separate_apps")
+    expect(first.first(where: { $0.bundleID == "com.example.beta" })?.audioObjectIDs == [504], "separate_apps")
     expect(first.first(where: { $0.bundleID == nil })?.metadata["bundle_id"] == nil, "unknown_has_no_claimed_bundle")
     let changed = ProcessAudioInventory.group([a, unknown, other])
     let diff = ProcessAudioRoutePlanner.reconcile(previous: first, current: changed)
-    expect(diff.changed.count == 1 && diff.changed[0].bundleID == "com.example.recorderA", "process_exit_restarts_route")
+    expect(diff.changed.count == 1 && diff.changed[0].bundleID == "com.example.alpha", "process_exit_restarts_route")
     expect(diff.removed.isEmpty, "unknown_route_stable")
     let gone = ProcessAudioRoutePlanner.reconcile(previous: changed, current: [])
     expect(gone.removed.count == 3, "teardown_on_disappearance")
-    expect(ProcessAudioInventory.sourceID(for: "com.example.recorderA") == ProcessAudioInventory.sourceID(for: "com.example.recorderA"), "source_id_stable")
+    expect(ProcessAudioInventory.sourceID(for: "com.example.alpha") == ProcessAudioInventory.sourceID(for: "com.example.alpha"), "source_id_stable")
     expect(ProcessAudioInventory.group([helper]).first?.sourceID == ProcessAudioInventory.group([a]).first?.sourceID, "source_id_survives_reappearance")
-    expect(ProcessAudioInventory.sourceID(for: "com.example.recorderA") != ProcessAudioInventory.sourceID(for: "com.example.recorderB"), "source_ids_distinct")
+    expect(ProcessAudioInventory.sourceID(for: "com.example.alpha") != ProcessAudioInventory.sourceID(for: "com.example.beta"), "source_ids_distinct")
     return failures
 }

@@ -59,10 +59,10 @@ class Contract(unittest.TestCase):
             self.m.apply(ev("heartbeat", 51, "h2"))
 
     def test_unknown_identity_not_inferred_from_name(self):
-        self.m.apply(ev(speaker={"basis": "unknown", "label": "虚构姓名甲"}, text="我是虚构姓名甲"))
-        self.assertIn("未知说话人：我是虚构姓名甲", render(self.m.snapshot(1)))
+        self.m.apply(ev(speaker={"basis": "unknown", "label": "张三"}, text="我是张三"))
+        self.assertIn("未知说话人：我是张三", render(self.m.snapshot(1)))
         with self.assertRaises(ValueError):
-            self.m.apply(ev(at=2, eid="e2", speaker={"basis": "inferred", "label": "虚构姓名甲"}))
+            self.m.apply(ev(at=2, eid="e2", speaker={"basis": "inferred", "label": "张三"}))
 
     def request(self, at=1, rid="r1", expiry=10):
         return ev("research_request", at, rid, request_id=rid, query="财报", expires_at=expiry,

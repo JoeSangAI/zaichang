@@ -87,14 +87,14 @@ func speakerReviewChecks()->Int {
           "manually named overlap is separated, names both participants, and preserves the original turn without counting it as a single person")
     var samePersonOverlapNames=SessionNames()
     for (id,value) in [("overlap-slot-0",overlapSlot0),("overlap-slot-1",overlapSlot1)] {
-        samePersonOverlapNames.register(segment:id,item:value);samePersonOverlapNames.setSpeaker(segment:id,name:"顾问甲")
+        samePersonOverlapNames.register(segment:id,item:value);samePersonOverlapNames.setSpeaker(segment:id,name:"张三")
     }
     var samePersonOverlapItem=overlapItem;samePersonOverlapItem["speaker"]=["basis":"multiple","reason":"overlap","cluster_ids":[0,1]]
     samePersonOverlapNames.register(segment:"overlap-turn",item:samePersonOverlapItem)
     let samePersonOverlap=SpeakerReviewIndex.build(session:"review-session",turns:[turn("overlap-turn",[("overlap-turn",samePersonOverlapItem)])],names:samePersonOverlapNames)
     check(samePersonOverlap.simultaneous.isEmpty && samePersonOverlap.unassigned.isEmpty &&
-          samePersonOverlap.people.first?.title=="顾问甲" && samePersonOverlap.people.first?.entries.map(\.id)==["overlap-turn"] &&
-          SpeakerReviewIndex.simultaneousTitle(item:samePersonOverlapItem,session:"review-session",names:samePersonOverlapNames)=="顾问甲",
+          samePersonOverlap.people.first?.title=="张三" && samePersonOverlap.people.first?.entries.map(\.id)==["overlap-turn"] &&
+          SpeakerReviewIndex.simultaneousTitle(item:samePersonOverlapItem,session:"review-session",names:samePersonOverlapNames)=="张三",
           "same manually confirmed name across diarizer slots is one person, not false simultaneous speech")
     var oneUnnamed=SessionNames()
     oneUnnamed.register(segment:"overlap-slot-0",item:overlapSlot0);oneUnnamed.register(segment:"overlap-slot-1",item:overlapSlot1)
@@ -126,7 +126,7 @@ func speakerReviewChecks()->Int {
     var semanticOverlapNames=SessionNames()
     func introduction(_ id:String,_ start:Double)->[String:Any] {
         var value=overlapSlot0;value["segment_id"]=id;value["start"]=start;value["end"]=start+1.0
-        value["text"]="我叫林虚构。";value["revision"]=1;value["final"]=true;value["end_time_known"]=true;value["quality_flags"]=[]
+        value["text"]="我叫张三。";value["revision"]=1;value["final"]=true;value["end_time_known"]=true;value["quality_flags"]=[]
         return value
     }
     let introA=introduction("intro-a",20),introB=introduction("intro-b",25)

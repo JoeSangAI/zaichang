@@ -233,6 +233,16 @@ final class MeetingLibraryManagement:NSObject {
     }
     func openMeetingFiles(_ target:CachedMeeting) {
         guard let owner,enabled(.meetingFiles,for:target),let library=loadedID==target.id ? files:nil else{message(disabledReason(.meetingFiles,for:target));return}
+        // Export the editor's current revision, including the last debounced edit.
+        // Only flush editors belonging to this target; another meeting's notes
+        // must neither leak into the export nor block an unrelated export.
+        let editors = [owner.notesController, owner.historyReader?.notesController].compactMap { $0 }
+        for editor in editors where editor.cacheID == target.id {
+            guard editor.flushPendingChanges() else {
+                message("笔记尚未保存，暂未导出；请先重试保存笔记")
+                return
+            }
+        }
         let root=owner.recoveryBase(),audioStore=audioStoreOverride ?? MeetingAudioAssetsStore(cacheRoot:root),builder=MeetingFilesExportStore(cacheRoot:root,exportsRoot:audioStore.exportsRoot)
         busy=true;audioAssetOperationInFlight=true;refresh();owner.updateUI();message("正在整理会议文件；首次生成可能需要一些时间")
         owner.cacheWriteQueue.async { [weak self] in

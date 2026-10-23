@@ -23,12 +23,25 @@ import SQLite3
     func object(_ sql:String)throws->[String:Any] {let text=try rows(sql).first?.first ?? "{}";return try JSONSerialization.jsonObject(with:Data(text.utf8)) as! [String:Any]}
     var readerMS:[Double]=[]
     func readCLI(_ args:[String])throws->[String:Any] {
-        let task=Process(),pipe=Pipe();task.executableURL=PythonRuntime.executable()!
+        let diagnosticURL=folder.appendingPathComponent("reader-\(readerMS.count + 1).json")
+        let stderrURL=folder.appendingPathComponent("reader-\(readerMS.count + 1).stderr")
+        FileManager.default.createFile(atPath:stderrURL.path,contents:Data())
+        let stderr=try FileHandle(forWritingTo:stderrURL);defer{try? stderr.close()}
+        let beforeState=try object("SELECT value FROM state WHERE key='current'")
+        let beforeMetadata=try object("SELECT metadata FROM meetings WHERE session='context-meeting'")
+        let task=Process(),pipe=Pipe();task.executableURL=URL(fileURLWithPath:"/usr/local/bin/python3")
         task.arguments=[view.root+"/meeting_context.py","--database",file.path]+args
-        task.standardOutput=pipe;task.standardError=FileHandle.nullDevice
+        task.standardOutput=pipe;task.standardError=stderr
         let start=ProcessInfo.processInfo.systemUptime;try task.run()
         let data=pipe.fileHandleForReading.readDataToEndOfFile();task.waitUntilExit()
         readerMS.append((ProcessInfo.processInfo.systemUptime-start)*1000)
+        let diagnostic:[String:Any]=["arguments":args,"elapsed_ms":readerMS.last!,"exit_code":task.terminationStatus,
+            "stdout":String(data:data,encoding:.utf8) ?? "","observed_at":Date().timeIntervalSince1970,
+            "state_before":beforeState,"metadata_before":beforeMetadata,
+            "state_after":try object("SELECT value FROM state WHERE key='current'"),
+            "metadata_after":try object("SELECT metadata FROM meetings WHERE session='context-meeting'")]
+        try JSONSerialization.data(withJSONObject:diagnostic,options:[.prettyPrinted,.sortedKeys]).write(to:diagnosticURL)
+        print("context-cli-diagnostic: \(diagnosticURL.path)")
         guard task.terminationStatus==0 else{throw Failure(code:"context_cli_failed")}
         return try JSONSerialization.jsonObject(with:data) as! [String:Any]
     }
@@ -43,14 +56,14 @@ import SQLite3
     try check(try rows("PRAGMA user_version")[0][0]=="2","notes_projection_reopen_is_idempotent")
     try check(try state()["session"] is NSNull,"launch_has_no_current_meeting")
     view.receive(["type":"started","session":"context-meeting","cache_id":UUID().uuidString,"mode":"cloud","absolute_clock":["schema":1,"basis":"capture_clock","time_zone":"Asia/Shanghai","anchors":[["relative_start":0.0,"unix_time":1791200000.0]]]])
-    view.receive(event("first","讨论示例产品的使用反馈和支持成本。",10));try view.settleTranscriptForOfflineReview()
+    view.receive(event("first","讨论敷尔佳的销售费用和渠道。",10));try view.settleTranscriptForOfflineReview()
     let flushed=await withCheckedContinuation { continuation in view.flushMeetingContext{continuation.resume(returning:$0)} }
     try check(flushed,"async_context_flush_confirms_wal_commit")
     try check(try state()["session"] as? String=="context-meeting","recording_owner_activates_current_session")
     let payload=try rows("SELECT payload FROM segments WHERE parent='first'")[0][0]
-    try check(payload.contains("示例产品") && !payload.contains("VOICE_PRIVATE") && !payload.contains("identity_features"),"context_whitelist_excludes_voice_features")
+    try check(payload.contains("敷尔佳") && !payload.contains("VOICE_PRIVATE") && !payload.contains("identity_features"),"context_whitelist_excludes_voice_features")
     try check(payload.contains("absolute_start") && payload.contains("+08:00"),"actual_audio_time_is_preserved")
-    let live=try readCLI(["current","--query","示例产品"])
+    let live=try readCLI(["current","--query","敷尔佳"])
     try check(live["status"] as? String=="ok" && live["response_mode"] as? String=="live_meeting" && live["session"] as? String=="context-meeting","actual_cli_reads_live_delegate_projection")
     try check(readerMS.last!<1000,"cold_cli_returns_within_one_second")
     let originalRevision=try rows("SELECT updated_revision FROM segments WHERE parent='first'")[0][0]
@@ -61,11 +74,11 @@ import SQLite3
     try check(try rows("SELECT updated_revision FROM segments WHERE parent='first'")[0][0]==originalRevision,"new_segment_does_not_rewrite_prior_meeting")
     try check(try rows("SELECT payload FROM segments WHERE parent='second'")[0][0].contains("\"final\":false"),"partial_text_is_not_final")
     let before=try rows("SELECT revision FROM meetings WHERE session='context-meeting'")[0][0]
-    view.naming.setSpeaker(segment:"first",name:"合成说话人乙");view.markAllTranscriptParentsDirty();try view.settleTranscriptForOfflineReview();publisher.flushForChecks()
-    try check(try rows("SELECT payload FROM segments WHERE parent='first'")[0][0].contains("合成说话人乙"),"manual_speaker_correction_reaches_reader")
+    view.naming.setSpeaker(segment:"first",name:"测试乙方");view.markAllTranscriptParentsDirty();try view.settleTranscriptForOfflineReview();publisher.flushForChecks()
+    try check(try rows("SELECT payload FROM segments WHERE parent='first'")[0][0].contains("测试乙方"),"manual_speaker_correction_reaches_reader")
     try check(try rows("SELECT revision FROM meetings WHERE session='context-meeting'")[0][0] != before,"manual_change_advances_revision")
     try check(try metadata()["projection_updating"] as? Bool==false,"completed_projection_releases_reader")
-    let shared=SharedPersonReference(id:"person:1234567890abcdef1234",name:"合成说话人乙",evidence:["/synthetic/people.md"])
+    let shared=SharedPersonReference(id:"person:1234567890abcdef1234",name:"测试乙方",evidence:["/synthetic/people.md"])
     view.naming.attachConfirmation(segmentIDs:["first"],name:shared.name,person:shared,learn:false)
     view.markAllTranscriptParentsDirty();try view.settleTranscriptForOfflineReview();publisher.flushForChecks()
     try check(try rows("SELECT payload FROM segments WHERE parent='first'")[0][0].contains(shared.id),"actual_producer_exports_explicit_shared_person_identity")
@@ -120,6 +133,20 @@ import SQLite3
     try check(try rows("SELECT images FROM notes WHERE id='\(imageNote.note_id)'")[0][0].contains("本机OCR完成"),"ocr_completion_refreshes_original_session_after_switch")
     try check(try rows("SELECT COUNT(*) FROM notes WHERE session='other-notes'")[0][0]=="0","notes_never_cross_sessions")
     try check(try rows("SELECT state,anchor_relative FROM notes WHERE id='\(imageNote.note_id)'")[0]==["after",""],"after_meeting_note_has_no_capture_anchor")
+    // One broken historical note source must not freeze new speech or liveness.
+    let ocrFile = noteStore.notes.appendingPathComponent("ocr/" + imageNote.images[0].sha256 + ".json")
+    let originalOCR = try Data(contentsOf: ocrFile)
+    try Data("{invalid OCR".utf8).write(to: ocrFile, options: .atomic)
+    try MeetingNotesStore.queue.sync { _ = try noteStore.change(note.note_id, text:"修复后补回的最新笔记") }
+    let heartbeatBefore = try state()["heartbeat"] as? Double ?? 0
+    publisher.replace(session:"other-notes",parent:"healthy-after-notes-error",rows:[["id":"healthy-after-notes-error","text":"另一场会议继续发布","start":1.0,"final":true]])
+    publisher.replace(session:"context-meeting",parent:"speech-after-notes-error",rows:[["id":"speech-after-notes-error","text":"本场原文也继续发布","start":21.0,"final":true]])
+    publisher.flushForChecks()
+    try check(try rows("SELECT COUNT(*) FROM segments WHERE parent IN ('healthy-after-notes-error','speech-after-notes-error')")[0][0]=="2", "damaged_notes_do_not_block_same_or_other_meeting_speech")
+    try check((try state()["heartbeat"] as? Double ?? 0) > heartbeatBefore && publisher.lastError == "context_notes_read_failed", "damaged_notes_keep_heartbeat_and_report_partial_failure")
+    try check(try rows("SELECT text FROM notes WHERE id='\(note.note_id)'")[0][0] == "笔记修订", "failed_note_source_does_not_acknowledge_unpublished_revision")
+    try originalOCR.write(to: ocrFile, options: .atomic); publisher.flushForChecks()
+    try check(try rows("SELECT text FROM notes WHERE id='\(note.note_id)'")[0][0] == "修复后补回的最新笔记" && publisher.lastError == nil, "repaired_note_source_retries_latest_revision_and_clears_error")
     let history=Delegate();history.previewRenderOnly=true;history.isHistoryReader=true;history.applicationDidFinishLaunching(Notification(name:NSApplication.didFinishLaunchingNotification));history.contextPublisher=publisher
     history.receive(["type":"started","session":"wrong-history","cache_id":UUID().uuidString]);publisher.flushForChecks()
     try check(try state()["session"] as? String=="context-meeting","history_reader_cannot_steal_current_meeting")

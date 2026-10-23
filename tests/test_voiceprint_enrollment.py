@@ -17,8 +17,8 @@ class VoiceprintEnrollmentTests(unittest.TestCase):
     def test_ambiguous_manual_name_does_not_start_model_or_enroll(self):
         with tempfile.TemporaryDirectory() as d:
             p=Path(d);(p/'meeting.json').write_text(json.dumps({'session':'s'}))
-            (p/'session-names.json').write_text(json.dumps({'session':'s','speakers':[{'name':'虚构姓名甲'},{'name':'虚构姓名甲'}]}))
-            with self.assertRaisesRegex(ValueError,'Ambiguous'):build_archive(p,['虚构姓名甲','虚构姓名乙'],Path('.'),confirmed=True)
+            (p/'session-names.json').write_text(json.dumps({'session':'s','speakers':[{'name':'张三'},{'name':'张三'}]}))
+            with self.assertRaisesRegex(ValueError,'Ambiguous'):build_archive(p,['张三','李四'],Path('.'),confirmed=True)
             self.assertFalse((p/'voices.json').exists())
 
 if __name__=='__main__':unittest.main()

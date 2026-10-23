@@ -2,6 +2,40 @@ import Foundation
 import CryptoKit
 import Darwin
 
+// Converted PCM and capture timestamps must advance together. Detect repeated
+// short deficits before alignment can turn them into apparently healthy silence.
+// Long source absences reset the observation window and remain legitimate gaps.
+struct CaptureContinuityCheck {
+    private var lastStamp:Double?
+    private var lastDuration=0.0
+    private var windowStart:Double?
+    private var shortGapSeconds=0.0
+    private var shortGapCount=0
+    private(set) var failureObservation:[String:Double]?
+    mutating func accepts(bytes:Int,at stamp:Double)->Bool {
+        let duration=Double(bytes)/32000
+        if let last=lastStamp {
+            guard stamp>=last else{failureObservation=["timestamp_step":stamp-last];return false}
+            let gap=max(0,stamp-last-lastDuration)
+            if gap>0.25 {
+                windowStart=stamp;shortGapSeconds=0;shortGapCount=0
+            } else if gap>0.010 {
+                shortGapSeconds+=gap;shortGapCount+=1
+            }
+        }
+        if windowStart==nil {windowStart=stamp}
+        lastStamp=stamp;lastDuration=duration
+        let elapsed=stamp-(windowStart ?? stamp)+duration
+        if elapsed>=0.5 && (shortGapCount>=8 || elapsed>=2) {
+            let healthy=shortGapCount<8 || shortGapSeconds/elapsed<=0.20
+            if !healthy {failureObservation=["observed_seconds":elapsed,"short_gap_seconds":shortGapSeconds,"short_gap_count":Double(shortGapCount),"gap_fraction":shortGapSeconds/elapsed]}
+            windowStart=stamp+duration;shortGapSeconds=0;shortGapCount=0
+            return healthy
+        }
+        return true
+    }
+}
+
 /// One process owns every manifest and transcript append for a SessionCache at
 /// a time. Readers use the same nonblocking lease before repairing an abrupt
 /// shutdown, so a live writer is never mistaken for a recoverable tail.
@@ -266,6 +300,9 @@ final class RecordingJournal {
     private var closing=false;private var checkpointScheduled=false;private var checkpointWrites=0
     private var processingError:String?;private var previousProcessingError:String?
     private var pendingTranscriptBytes=0;private var pendingTranscriptEvents=0
+    private var captureInputFormat:[String:Any]?
+    private var continuity=CaptureContinuityCheck()
+    private var captureTimingFailure:[String:Any]?
     private var alignmentPaddingBytes=0;private var admittedPCMBytes=0;private var paddingCountersKnown=true
     private var written=0;private var offered=0;private var pending=0;private var ended=false;private var error:String?
     private var origin:Double?;private var chunks:[[String:Any]]=[];private var handle:FileHandle?;private var chunkIndex=0;private var chunkCount=0
@@ -285,6 +322,7 @@ final class RecordingJournal {
     private func digest(_ data:Data)->String {SHA256.hash(data:data).map{String(format:"%02x",$0)}.joined()}
     private func saveManifest() throws {
         lock.lock();var value:[String:Any]=["schema":1,"track":track,"format":"pcm_s16le","sample_rate":16000,"channels":1,"written_bytes":written,"offered_bytes":offered,"origin_uptime":origin.map{$0 as Any} ?? NSNull(),"ended":ended,"error":error.map{$0 as Any} ?? NSNull(),"chunks":chunks,"asr_committed_bytes":asrCommit,"model_committed_bytes":modelCommit,"archived":archived,"audio_cleaned":audioCleaned,"contains_voiceprint_embeddings":false,"alignment_padding_bytes":alignmentPaddingBytes,"admitted_pcm_bytes":admittedPCMBytes,"padding_counters_known":paddingCountersKnown];if let recoveryInfo {value["recovery"]=recoveryInfo};lock.unlock()
+        lock.lock();value["capture_input_format"]=captureInputFormat;value["capture_timing_failure"]=captureTimingFailure;lock.unlock()
         lock.lock();value["processing_error"]=processingError.map{$0 as Any} ?? NSNull();value["previous_processing_error"]=previousProcessingError.map{$0 as Any} ?? NSNull();lock.unlock()
         let file=directory.appendingPathComponent(track+"-manifest.json");try JSONSerialization.data(withJSONObject:value,options:[.sortedKeys]).write(to:file,options:.atomic);try FileManager.default.setAttributes([.posixPermissions:0o600],ofItemAtPath:file.path)
         lock.lock();checkpointWrites+=1;lock.unlock()
@@ -296,12 +334,15 @@ final class RecordingJournal {
             do {try saveManifest()}catch{setProcessingError("cache_checkpoint_write_failed")}
         }
     }
+    func recordCaptureFormat(_ info:[String:Any]) {lock.lock();captureInputFormat=info;lock.unlock();requestCheckpoint()}
     func setProcessingError(_ code:String) {lock.lock();let first=processingError==nil;if first {processingError=code};lock.unlock();if first {requestCheckpoint()}}
     func processingFault()->String? {lock.lock();defer{lock.unlock()};return processingError}
     private func recover() throws {
         guard let value=try JSONSerialization.jsonObject(with:Data(contentsOf:directory.appendingPathComponent(track+"-manifest.json"))) as? [String:Any] else{throw Failure(code:"cache_manifest_invalid")}
         guard value["schema"] as? Int==1,value["track"] as? String==track,value["format"] as? String=="pcm_s16le",value["sample_rate"] as? Int==16000,value["channels"] as? Int==1,let stored=value["chunks"] as? [[String:Any]] else{throw Failure(code:"cache_manifest_invalid")}
         alignmentPaddingBytes=value["alignment_padding_bytes"] as? Int ?? 0;admittedPCMBytes=value["admitted_pcm_bytes"] as? Int ?? 0;paddingCountersKnown=value["padding_counters_known"] as? Bool ?? false
+        captureInputFormat=value["capture_input_format"] as? [String:Any]
+        captureTimingFailure=value["capture_timing_failure"] as? [String:Any]
         recoveryInfo=value["recovery"] as? [String:Any]
         error=value["error"] as? String;origin=value["origin_uptime"] as? Double;asrCommit=value["asr_committed_bytes"] as? Int ?? 0;modelCommit=value["model_committed_bytes"] as? Int ?? 0;archived=value["archived"] as? Bool ?? false
         previousProcessingError=value["processing_error"] as? String ?? value["previous_processing_error"] as? String
@@ -335,6 +376,11 @@ final class RecordingJournal {
         lock.lock()
         if closing || ended || error != nil || data.count>maxBytes-offered {let code=error ?? ((closing || ended) ? "cache_after_stop":"cache_size_limit");lock.unlock();throw Failure(code:code)}
         guard pendingPCMBytes<=maxPendingPCMBytes-data.count,pendingPackets<65536 else{error="cache_writer_backpressure";lock.unlock();throw Failure(code:"cache_writer_backpressure")}
+        if alignCaptureTime && !continuity.accepts(bytes:data.count,at:stamp) {
+            captureTimingFailure=continuity.failureObservation
+            error="cache_audio_timing_mismatch";lock.unlock();requestCheckpoint()
+            throw Failure(code:"cache_audio_timing_mismatch")
+        }
         if origin==nil{origin=stamp}
         let expectedSamples=alignCaptureTime ? max(0,Int(((stamp-(origin ?? stamp))*16000).rounded())):offered/2
         // A disappeared app can return later. Preserve its meeting position with
@@ -437,7 +483,7 @@ final class RecordingJournal {
 // cleanup, no unrelated directory traversal, no biometric storage.
 @discardableResult func archiveAndCleanSession(_ id:String,text:String)throws->Bool {
     guard UUID(uuidString:id) != nil else{throw Failure(code:"cache_scope_invalid")}
-    let root=meetingCacheRoot().appendingPathComponent(id)
+    let root=RuntimeConfiguration.dataRoot().appendingPathComponent("SessionCache").appendingPathComponent(id)
     return try archiveAndCleanSessionAt(root,text:text)
 }
 @discardableResult func archiveAndCleanSessionAt(_ root:URL,text:String,retire:((URL)throws->URL)?=nil)throws->Bool {

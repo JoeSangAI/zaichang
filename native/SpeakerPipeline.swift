@@ -249,7 +249,7 @@ struct SpeakerTimeline {
     func join(_ item:[String:Any],source:String,epoch:String)->[String:Any] {
         guard item["source_id"] as? String==source,item["epoch"] as? String==epoch else{return ["basis":"unknown","reason":"source_or_epoch_mismatch"]}
         guard item["end_time_known"] as? Bool==true,let lo=item["start"] as? Double,let hi=item["end"] as? Double,lo.isFinite,hi.isFinite,hi>lo else{return ["basis":"unknown","reason":"no_reliable_span"]}
-        if (item["quality_flags"] as? [String])?.isEmpty==false {return ["basis":"unknown","reason":"asr_quality"]}
+        if !Decoder.speakerEvidenceAllowed(item) {return ["basis":"unknown","reason":"asr_quality"]}
         if let limit=historyEndLimit,hi>limit+Self.timeTolerance {return ["basis":"unknown","reason":"speaker_history_limit"]}
         let candidateRange=overlappingRunRange(start:lo,end:hi).range
         var cursor=lo;var voicedSeconds=0.0

@@ -106,7 +106,7 @@ func voiceprintAutomaticFrozenFeatureReplay(archiveURL:URL,featureDirectory:URL,
     let decodedArchive=try JSONDecoder().decode(VoiceprintArchive.self,from:Data(contentsOf:archiveURL))
     let archive=try decodedArchive.validated(domain:decodedArchive.inputKind)
     let decisions=try JSONDecoder().decode(FrozenAutomaticCandidateFile.self,from:Data(contentsOf:candidateResultsURL))
-    let selected=decisions.candidate_results.filter{$0.name=="顾问甲" || $0.new_wrong_rows>0}.prefix(3)
+    let selected=decisions.candidate_results.filter{$0.name=="张三" || $0.new_wrong_rows>0}.prefix(3)
     let files=try FileManager.default.contentsOfDirectory(at:featureDirectory,includingPropertiesForKeys:nil).filter{$0.lastPathComponent.hasSuffix("-features.json")}
     var evidence:[String:FrozenAutomaticFeatureFile.Evidence]=[:]
     for file in files {
@@ -125,7 +125,7 @@ func voiceprintAutomaticFrozenFeatureReplay(archiveURL:URL,featureDirectory:URL,
         let result=try proposeAutomaticVoiceprintContribution(archive,candidate:candidate,domain:archive.inputKind)
         let outcome=result.accepted ? "accepted" : "rejected_\(result.reason ?? "unknown")"
         let gate=result.after.correct>result.before.correct && result.after.wrong<=result.before.wrong && result.after.lostPreviouslyCorrect==0 && result.after.newlyWrong==0
-        if row.name=="顾问甲" {
+        if row.name=="张三" {
             guard result.accepted,result.after.correct-result.before.correct==3,gate else{throw Failure(code:"automatic_frozen_huang_positive_gate_mismatch")}
         }
         checks.append("native_frozen_\(row.name)_\(row.session)_\(outcome)_expected_pass_\(row.passes_strict_gate)_actual_pass_\(gate)_before_\(result.before.correct)-\(result.before.unknown)-\(result.before.wrong)_after_\(result.after.correct)-\(result.after.unknown)-\(result.after.wrong)_lost_\(result.after.lostPreviouslyCorrect)_newWrong_\(result.after.newlyWrong)")

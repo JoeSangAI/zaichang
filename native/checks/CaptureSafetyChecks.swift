@@ -148,6 +148,56 @@ func captureSafetyChecks(directory:URL) async throws->[String:Any] {
     interrupted=0;capturePaused=0;captureUploadPaused=0;captureHardwareReady=1;captureFinishing=0;captureTailDrainAllowed=0;capturePauseAcknowledgedRevision = -1;captureControlRevision=0
     try FileManager.default.createDirectory(at:directory,withIntermediateDirectories:true)
     var checks:[String]=[]
+    // Match the observed failure: the auxiliary raw track has a new chunk
+    // whose on-disk manifest still says zero bytes while PCM has been written.
+    do {
+        let cache=directory.appendingPathComponent(UUID().uuidString)
+        let raw=try RecordingJournal(directory:cache,track:"mic-raw",freeSpace:{1_000_000_000})
+        let expected=320_000+121_732
+        var offered=0
+        while offered<expected {
+            let count=min(3200,expected-offered)
+            try raw.enqueue(Data(repeating:0x24,count:count),at:100+Double(offered)/32000)
+            offered+=count
+        }
+        let until=ProcessInfo.processInfo.systemUptime+2
+        while (raw.metadata()["pending_writer_bytes"] as? Int ?? 0)>0 && ProcessInfo.processInfo.systemUptime<until {try await Task.sleep(nanoseconds:1_000_000)}
+        guard raw.bytes()==expected else{throw Failure(code:"pause_raw_fixture_write_timeout")}
+        let manifestFile=cache.appendingPathComponent("mic-raw-manifest.json")
+        let stale=try JSONSerialization.jsonObject(with:Data(contentsOf:manifestFile)) as! [String:Any]
+        guard (stale["chunks"] as? [[String:Any]])?.last?["bytes"] as? Int==0 else{throw Failure(code:"pause_raw_fixture_not_stale")}
+        let pcmFile=cache.appendingPathComponent("mic-raw-000001.pcm"),before=try Data(contentsOf:pcmFile)
+        do {
+            _=try SpeakerRefinementArtifact.snapshotSHA256(directory:cache,cacheID:cache.lastPathComponent,includeAuxiliaryAudio:true)
+            throw Failure(code:"pause_stale_snapshot_accepted")
+        } catch SpeakerRefinementArtifactError.invalidSnapshot { }
+        let transition=CapturePauseTransition()
+        finishCapturePauseWriter(raw,transition:transition,stop:{})
+        transition.finishHardwarePart(nil);transition.finishHardwarePart(nil);transition.finishUploadDrain()
+        let settled=try JSONSerialization.jsonObject(with:Data(contentsOf:manifestFile)) as! [String:Any]
+        let first=try SpeakerRefinementArtifact.snapshotSHA256(directory:cache,cacheID:cache.lastPathComponent,includeAuxiliaryAudio:true)
+        guard transition.snapshot().hardwareDone,transition.snapshot().failure==nil,
+              settled["ended"] as? Bool==false,settled["written_bytes"] as? Int==expected,
+              (settled["chunks"] as? [[String:Any]])?.last?["bytes"] as? Int==121732,
+              try Data(contentsOf:pcmFile)==before else{throw Failure(code:"pause_raw_checkpoint_failed")}
+        // A stable unsealed last chunk is allowed; corrupt lengths remain an
+        // error. Never repair a snapshot by editing the recording under it.
+        try (before+Data([0x24,0x24])).write(to:pcmFile)
+        do {
+            _=try SpeakerRefinementArtifact.snapshotSHA256(directory:cache,cacheID:cache.lastPathComponent,includeAuxiliaryAudio:true)
+            throw Failure(code:"pause_corrupt_snapshot_accepted")
+        } catch SpeakerRefinementArtifactError.invalidSnapshot { }
+        try before.write(to:pcmFile)
+        guard try SpeakerRefinementArtifact.snapshotSHA256(directory:cache,cacheID:cache.lastPathComponent,includeAuxiliaryAudio:true)==first else{throw Failure(code:"pause_snapshot_not_stable")}
+        try raw.enqueue(Data(repeating:0x25,count:3200),at:100+Double(expected)/32000)
+        raw.finish();raw.wait()
+        guard raw.bytes()==expected+3200,try Data(contentsOf:pcmFile).prefix(before.count)==before else{throw Failure(code:"pause_resume_overwrote_raw_audio")}
+        checks.append("pause_checkpoints_raw_tail_before_snapshot_preserves_pcm_and_resume_rejects_corruption")
+    }
+    _=try captureContinuityRegression(directory:directory)
+    checks.append("journal_detects_periodic_short_audio_deficits_preserves_prefix_and_accepts_valid_rates_and_source_absence")
+    _=try applicationTapFormatRegression()
+    checks.append("aggregate_input_rate_prevents_periodic_two_thirds_padding_and_clock_change_is_rejected")
     var unlimited=Config(session:"unlimited-fixture",bundle:"*microphone*",key:"synthetic",confirmed:true,maxSeconds:7200,model:"qwen-audio-3.0-asr-flash-streaming",silenceMS:1300,micEnabled:true,localSpeakerDirectory:nil,localEmbeddingModel:nil,userLaunchConfirmed:true)
     unlimited.cloudSessionConfirmed=true;unlimited.unlimitedSession=true
     try unlimited.validate()
@@ -973,6 +1023,7 @@ func captureSafetyChecks(directory:URL) async throws->[String:Any] {
     }
     checks.append("generated_hardware_buffers_clone_and_convert_without_losing_signal")
     let signalStore=try RecordingJournal(directory:directory.appendingPathComponent(UUID().uuidString),track:"mic-raw",freeSpace:{1_000_000_000})
+    signalStore.recordCaptureFormat(["tap_sample_rate":48000,"input_sample_rate":16000,"input_channels":2])
     let signalBox=Mailbox(journal:signalStore)
     signalBox.put(Data(repeating:0,count:3200),at:0)
     let silent=signalBox.signalMetrics(now:ProcessInfo.processInfo.systemUptime)
@@ -981,6 +1032,10 @@ func captureSafetyChecks(directory:URL) async throws->[String:Any] {
     let measured=signalBox.signalMetrics();signalBox.seal();signalStore.wait()
     precondition(measured["nonzero_samples"] as? Int==2 && measured["nonzero_frames"] as? Int==1 && measured["signal_peak"] as? Double==1)
     precondition(PCM16Energy(Data()).samples==0 && PCM16Energy(Data([0])).samples==0)
+    let signalManifest=try JSONSerialization.jsonObject(with:Data(contentsOf:signalStore.directory.appendingPathComponent("mic-raw-manifest.json"))) as! [String:Any]
+    let inputFormat=signalManifest["capture_input_format"] as! [String:Any]
+    precondition(inputFormat["tap_sample_rate"] as? Int==48000 && inputFormat["input_sample_rate"] as? Int==16000)
+    checks.append("actual_aggregate_format_persists_with_original_audio_manifest")
     checks.append("journal_signal_counters_measure_actual_pcm_not_timeline_padding")
 
     let padded=try RecordingJournal(directory:directory.appendingPathComponent(UUID().uuidString),track:"mic-raw",freeSpace:{1_000_000_000},alignCaptureTime:true)
@@ -1105,6 +1160,22 @@ func echoReliabilityChecks(directory:URL) async throws -> [String] {
         let next=await processor.process(microphone:first,at:10.2,reference:first,at:10.2)
         precondition(next.audio==first && next.captureTime==10.2)
     }
+    let diagnostics=EchoCaptureDiagnostics()
+    let unavailable=EchoPreprocessor(stream:nil,unavailableDetail:"model_file_missing")
+    diagnostics.setModel(await unavailable.diagnostics())
+    let bypass=EchoProcessResult(audio:first,captureTime:10,status:.modelUnavailable,detail:"model_file_missing")
+    diagnostics.recordFrame(microphone:first,reference:nil,result:bypass,referenceAligned:false,
+                            referenceFailure:"reference_missing_or_misaligned")
+    diagnostics.recordOutput(first)
+    let snapshot=diagnostics.snapshot(micTrack:"mic-g1",rawTrack:"mic-raw-g1",referenceTrack:"reference-g1")
+    let counts=snapshot["status_counts"] as? [String:Int] ?? [:]
+    let micEnergy=snapshot["microphone_input"] as? [String:Any] ?? [:]
+    let outputEnergy=snapshot["processed_output"] as? [String:Any] ?? [:]
+    precondition(snapshot["model_available"] as? Bool==false && snapshot["model_detail"] as? String=="model_file_missing")
+    precondition(snapshot["frames"] as? Int==1 && snapshot["bypass_frames"] as? Int==1 &&
+                 snapshot["reference_missing_frames"] as? Int==1 && counts[EchoPreprocessorStatus.modelUnavailable.rawValue]==1)
+    precondition(micEnergy["samples"] as? Int==1600 && (micEnergy["rms"] as? Double ?? 0)>0 &&
+                 outputEnergy["samples"] as? Int==1600)
     let folder=directory.appendingPathComponent("echo-unread-tail-"+UUID().uuidString)
     let raw=try RecordingJournal(directory:folder,track:"mic-raw",freeSpace:{1_000_000_000})
     let clean=try RecordingJournal(directory:folder,track:"mic",freeSpace:{1_000_000_000})
@@ -1129,6 +1200,109 @@ func echoReliabilityChecks(directory:URL) async throws -> [String] {
     limitedOutput.seal();limited.wait()
     precondition(limited.bytes()==1600 && limited.processingFault()=="echo_tail_write_incomplete" && !limited.transcriptionIsComplete())
     return ["echo_model_failure_preserves_buffered_and_current_pcm_exactly_once",
+            "echo_diagnostics_snapshot_is_bounded_and_explains_model_bypass_and_energy",
             "cancelled_echo_consumer_preserves_eight_second_unread_raw_tail",
             "partially_admitted_echo_tail_is_persistently_incomplete"]
+}
+
+
+// Replays the reported 1:2 audio/padding failure with generated PCM and the real
+// platform converter. Does not create an audio device, capture, or call ASR.
+// Device-free production journal/converter check. No CoreAudio device or network.
+func captureContinuityRegression(directory:URL)throws->[String:Any] {
+    var healthy=CaptureContinuityCheck(),gapped=CaptureContinuityCheck(),broken=CaptureContinuityCheck()
+    var rejectedAt:Int?
+    for k in 0..<200 {
+        precondition(healthy.accepts(bytes:640,at:100+Double(k)*0.02))
+        precondition(gapped.accepts(bytes:640,at:100+Double(k)*0.02+(k>=50 ? 2:0)))
+        if rejectedAt==nil && !broken.accepts(bytes:212,at:100+Double(k)*0.02) {rejectedAt=k}
+    }
+    precondition(rejectedAt != nil && rejectedAt!<50)
+    var largerPackets=CaptureContinuityCheck(),largerRejected=false
+    for k in 0..<20 {
+        if !largerPackets.accepts(bytes:1066,at:100+Double(k)*0.1) {largerRejected=true;break}
+    }
+    precondition(largerRejected)
+    var reverse=CaptureContinuityCheck()
+    precondition(reverse.accepts(bytes:640,at:100) && !reverse.accepts(bytes:640,at:99))
+    func replay(rate:Double,frames:Int,name:String)throws->[String:Any] {
+        let format=AVAudioFormat(commonFormat:.pcmFormatFloat32,sampleRate:rate,channels:2,interleaved:false)!
+        let converter=try PCMConverter(format)
+        let folder=directory.appendingPathComponent(name+"-"+UUID().uuidString)
+        let journal=try RecordingJournal(directory:folder,track:"remote",freeSpace:{1_000_000_000},alignCaptureTime:true)
+        journal.recordCaptureFormat(["input_sample_rate":rate,"input_channels":2])
+        var failure:String?
+        for k in 0..<500 {
+            let buffer=AVAudioPCMBuffer(pcmFormat:format,frameCapacity:AVAudioFrameCount(frames))!
+            buffer.frameLength=AVAudioFrameCount(frames)
+            for c in 0..<2 {for i in 0..<frames {buffer.floatChannelData![c][i]=Float(sin(Double(k*frames+i)*2*Double.pi*440/16000)*0.2)}}
+            let pcm=try converter.convert(buffer)
+            if !pcm.isEmpty {
+                do {try journal.enqueue(pcm,at:100+Double(k)*0.02)}
+                catch let error as Failure {failure=error.code;break}
+            }
+        }
+        journal.finish();journal.wait()
+        let file=folder.appendingPathComponent("remote-manifest.json")
+        let manifest=try JSONSerialization.jsonObject(with:Data(contentsOf:file)) as! [String:Any]
+        if failure != nil {precondition(((manifest["capture_timing_failure"] as? [String:Any])?["gap_fraction"] as? Double ?? 0) > 0.20)}
+        let reopened=try RecordingJournal(directory:folder,track:"remote",freeSpace:{1_000_000_000},alignCaptureTime:true)
+        precondition(reopened.bytes()==journal.bytes() && reopened.fault()==journal.fault())
+        if failure != nil {
+            reopened.wait()
+            let persisted=try JSONSerialization.jsonObject(with:Data(contentsOf:file)) as! [String:Any]
+            precondition(persisted["capture_timing_failure"] as? [String:Double]==manifest["capture_timing_failure"] as? [String:Double])
+        }
+        return ["error":failure as Any? ?? NSNull(),"written":journal.bytes(),"padding":manifest["alignment_padding_bytes"]!,
+                "incomplete":journal.metadata()["incomplete"]!,"failure_persisted":failure==manifest["error"] as? String]
+    }
+    let wrong=try replay(rate:48000,frames:320,name:"wrong")
+    precondition(wrong["error"] as? String=="cache_audio_timing_mismatch" && wrong["failure_persisted"] as? Bool==true)
+    precondition((wrong["written"] as! Int)<32000)
+    var rates:[[String:Any]]=[]
+    for (rate,frames) in [(8000.0,160),(16000.0,320),(44100.0,882),(48000.0,960)] {
+        let result=try replay(rate:rate,frames:frames,name:"valid")
+        precondition(result["error"] is NSNull && result["padding"] as? Int==0 && abs((result["written"] as! Int)-320000)<2000)
+        rates.append(["rate":rate,"result":result])
+    }
+    return ["wrong_format":wrong,"valid_rates":rates,"detected_packet":rejectedAt!,"long_source_gap_allowed":true,"capture":false,"cloud":false]
+}
+
+func applicationTapFormatRegression()throws->[String:Any] {
+    func replay(declaredRate:Double)throws->(pcm:Int,padding:Int) {
+        let format=AVAudioFormat(commonFormat:.pcmFormatFloat32,sampleRate:declaredRate,channels:2,interleaved:false)!
+        let converter=try PCMConverter(format)
+        var offered=0,padding=0,pcm=0
+        for packet in 0..<500 {
+            let input=AVAudioPCMBuffer(pcmFormat:format,frameCapacity:320)!;input.frameLength=320
+            for channel in 0..<2 {for frame in 0..<320 {input.floatChannelData![channel][frame]=Float(sin(Double(packet*320+frame)*2*Double.pi*440/16000)*0.2)}}
+            let data=try converter.convert(input)
+            // Same time-alignment contract as RecordingJournal.enqueue: each
+            // hardware packet is 20 ms at the actual aggregate rate of 16 kHz.
+            let expectedSamples=Int((Double(packet)*0.02*16000).rounded())
+            let gap=max(0,expectedSamples-offered/2),gapBytes=gap>160 ? gap*2:0
+            offered+=data.count+gapBytes;padding+=gapBytes;pcm+=data.count
+        }
+        return(pcm,padding)
+    }
+    let wrong=try replay(declaredRate:48000),correct=try replay(declaredRate:16000)
+    let fraction=Double(wrong.padding)/Double(wrong.pcm+wrong.padding)
+    precondition(abs(fraction-2.0/3.0)<0.002)
+    precondition(correct.pcm==320000 && correct.padding==0)
+    var matching=ApplicationTapClockCheck(),mismatching=ApplicationTapClockCheck(),rejected=false
+    for packet in 0..<20 {
+        var timestamp=AudioTimeStamp();timestamp.mFlags=[.hostTimeValid,.sampleTimeValid]
+        timestamp.mHostTime=AVAudioTime.hostTime(forSeconds:100+Double(packet)*0.02)
+        timestamp.mSampleTime=Double(packet*320)
+        precondition(matching.accepts(timestamp,sampleRate:16000))
+        if !mismatching.accepts(timestamp,sampleRate:48000) {rejected=true}
+    }
+    precondition(rejected)
+    var invalid=ApplicationTapClockCheck(),reverse=AudioTimeStamp();reverse.mFlags=[.hostTimeValid,.sampleTimeValid]
+    reverse.mHostTime=AVAudioTime.hostTime(forSeconds:100);reverse.mSampleTime=320
+    precondition(invalid.accepts(reverse,sampleRate:16000))
+    reverse.mHostTime=AVAudioTime.hostTime(forSeconds:100.02);reverse.mSampleTime=0
+    precondition(!invalid.accepts(reverse,sampleRate:16000))
+    return ["old_padding_fraction":fraction,"correct_pcm_bytes":correct.pcm,"correct_padding_bytes":correct.padding,
+            "same_device_rate_change_rejected":rejected,"synthetic_pcm":true,"capture":false,"network":false]
 }

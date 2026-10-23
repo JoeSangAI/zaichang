@@ -2,6 +2,7 @@ import Foundation
 import AppKit
 
 @MainActor func meetingArchiveUIChecks() throws -> [String] {
+    guard Credential.offline,RuntimeConfiguration.dataRoot().path.contains("/.runtime/") else{throw Failure(code:"archive_checks_require_isolated_data")}
     var checks:[String]=[]
     func check(_ condition:@autoclosure()->Bool,_ name:String)throws {
         guard condition() else{throw Failure(code:"meeting_archive_check_"+name)}
@@ -50,7 +51,7 @@ import AppKit
     archiveOwner.savedCoarseJobs["archive-running-cache"]=SpeakerRefinementJob()
     try check(!archiveReader.meetingArchiveEligible,"history_archive_is_blocked_while_its_saved_coarse_job_runs")
     archiveOwner.savedCoarseJobs.removeValue(forKey:"archive-running-cache")
-    try check(archiveReader.meetingArchiveEligible,"history_archive_unlocks_after_saved_coarse_job_finishes")
+    try check(archiveReader.meetingArchiveEligible == RuntimeConfiguration.archiveEnabled,"history_archive_unlocks_after_saved_coarse_job_finishes")
     archiveReader.window.orderOut(nil);archiveOwner.window.orderOut(nil)
     try check(MeetingArchiveEligibility.coarseSettled(hasArtifact:false,errorCode:"coarse_audio_missing") && !MeetingArchiveEligibility.coarseSettled(hasArtifact:false,errorCode:"provider_http_500"),"only_explicit_no_coarse_cases_bypass_result")
     let currentToken=MeetingArchiveEligibility.coarseTokenMatches(cacheID:"cache",session:"session",generation:3,revision:2,sourceSHA256:"source",snapshotSHA256:"snapshot",currentCacheID:"cache",currentSession:"session",currentGeneration:3,currentRevision:2,artifactExists:true)
@@ -83,10 +84,11 @@ import AppKit
     rootDelegate.updateWorkspacePresentation()
     reader.updateWorkspacePresentation()
     try check(reader.currentCacheID==cacheID && reader.activeSession==session && reader.cachedTranscriptionComplete && reader.phase.phase == .stopped,"history_cache_recovery_restores_archived_meeting_identity_and_completion")
-    try check(historyButton.isEnabled,"history_cache_recovery_enables_workspace_archive_button")
-    try check(historyButton.isEnabled,"history_archive_button_stays_enabled_after_normal_workspace_repaints")
+    try check(historyButton.isEnabled == RuntimeConfiguration.archiveEnabled,"history_cache_recovery_enables_workspace_archive_button")
+    try check(historyButton.isEnabled == RuntimeConfiguration.archiveEnabled,"history_archive_button_stays_enabled_after_normal_workspace_repaints")
     try check(!MeetingArchiveEligibility.allows(phase:reader.phase.phase,transcriptionComplete:true,localOnly:false,historyReader:true,automatic:true,refinementBusy:false,projectionPending:false,coarseSettled:true,qaOrMock:false,resumePending:false),"history_cache_recovery_never_auto_prepares")
     reader.window=rootDelegate.window
+    if RuntimeConfiguration.archiveEnabled {
     reader.presentMeetingArchiveSheetForChecks()
     guard let closeButton=reader.meetingArchiveSheetCloseButtonForChecks,let buttonSheet=rootDelegate.window.attachedSheet else{throw Failure(code:"meeting_archive_close_button_sheet_missing")}
     try check(closeButton.title=="关闭" && closeButton.isEnabled,"archive_sheet_has_visible_close_action")
@@ -96,23 +98,30 @@ import AppKit
     guard let escapeSheet=rootDelegate.window.attachedSheet else{throw Failure(code:"meeting_archive_escape_sheet_missing")}
     reader.sendMeetingArchiveEscapeForChecks()
     try check(escapeSheet.sheetParent==nil && rootDelegate.window.attachedSheet==nil,"archive_escape_ends_attached_sheet")
+    } else {
+        reader.presentMeetingArchiveSheetForChecks()
+        try check(historyButton.isHidden && rootDelegate.window.attachedSheet==nil,"standalone_archive_hidden_without_sheet")
+    }
     reader.window.orderOut(nil);rootDelegate.window.orderOut(nil)
 
-    let archiveEnvironment=["ZAICHANG_ARCHIVE_ORIGIN":"https://archive.example.test"]
-    try check(MeetingArchiveRequest.bootstrapURL(environment:[:])==nil,"remote_archive_is_disabled_without_user_configuration")
-    let page=try MeetingArchiveRequest.pageURL(session:"meeting / 1",environment:archiveEnvironment)
+    let configURL=RuntimeConfiguration.dataRoot().appendingPathComponent("connectors.json")
+    let oldConfig=try? Data(contentsOf:configURL)
+    try FileManager.default.createDirectory(at:configURL.deletingLastPathComponent(),withIntermediateDirectories:true)
+    try Data(#"{"schema":1,"archive":{"url":"http://127.0.0.1:18766","app_id":"example-archive"}}"#.utf8).write(to:configURL)
+    defer {if let oldConfig {try? oldConfig.write(to:configURL)} else {try? FileManager.default.removeItem(at:configURL)}}
+    let page=try MeetingArchiveRequest.pageURL(session:"meeting / 1")
     let pageParts=URLComponents(url:page,resolvingAgainstBaseURL:false)
-    try check(page.host=="archive.example.test" && pageParts?.queryItems?.first(where:{$0.name=="page"})?.value=="archive" && pageParts?.queryItems?.first(where:{$0.name=="session"})?.value=="meeting / 1","archive_page_keeps_session_as_query_data")
-    let request=try MeetingArchiveRequest.prepareRequest(session:"meeting-1",csrfToken:"synthetic-csrf",environment:archiveEnvironment)
-    try check(request.httpMethod=="POST" && request.url?.path=="/api/meeting-archives/meeting-1/prepare" && request.value(forHTTPHeaderField:"X-CSRF-Token")=="synthetic-csrf" && request.value(forHTTPHeaderField:"Origin")==archiveEnvironment["ZAICHANG_ARCHIVE_ORIGIN"] && request.httpBody==Data("{}".utf8),"prepare_request_uses_origin_csrf_and_shared_route")
+    try check(page.host=="127.0.0.1" && page.port==18766 && pageParts?.queryItems?.first(where:{$0.name=="page"})?.value=="archive" && pageParts?.queryItems?.first(where:{$0.name=="session"})?.value=="meeting / 1","archive_page_keeps_session_as_query_data")
+    let request=try MeetingArchiveRequest.prepareRequest(session:"meeting-1",csrfToken:"synthetic-csrf")
+    try check(request.httpMethod=="POST" && request.url?.path=="/api/meeting-archives/meeting-1/prepare" && request.value(forHTTPHeaderField:"X-CSRF-Token")=="synthetic-csrf" && request.value(forHTTPHeaderField:"Origin")==MeetingArchiveRequest.origin && request.httpBody==Data("{}".utf8),"prepare_request_uses_origin_csrf_and_shared_route")
     try check(MeetingArchiveRequest.acceptedMessage.contains("已发起") && !MeetingArchiveRequest.acceptedMessage.contains("已准备好"),"accepted_prepare_is_not_reported_as_ready")
     try check(MeetingArchiveRequest.requestTimeout<=10 && MeetingArchiveRequest.resourceTimeout<=20,"archive_requests_have_bounded_timeouts")
-    let bootstrapData=Data("{\"app_id\":\"zaichang-workbench\",\"csrf_token\":\"synthetic-csrf\"}".utf8)
-    let bootstrapURL=MeetingArchiveRequest.bootstrapURL(environment:archiveEnvironment)!
+    let bootstrapData=Data("{\"app_id\":\"example-archive\",\"csrf_token\":\"synthetic-csrf\"}".utf8)
+    let bootstrapURL=MeetingArchiveRequest.bootstrapURL()!
     try check(bootstrapURL.path=="/api/meeting-archives-bootstrap","archive_uses_lightweight_bootstrap_route")
     let bootstrapResponse=HTTPURLResponse(url:bootstrapURL,statusCode:200,httpVersion:nil,headerFields:nil)
     let token=try MeetingArchiveRequest.validatedCSRFToken(data:bootstrapData,response:bootstrapResponse,error:nil)
-    try check(token=="synthetic-csrf","bootstrap_requires_zaichang_workbench_identity")
+    try check(token=="synthetic-csrf","bootstrap_requires_workbench_identity")
     do {
         let wrongApp=Data("{\"app_id\":\"other-service\",\"csrf_token\":\"synthetic-csrf\"}".utf8)
         _=try MeetingArchiveRequest.validatedCSRFToken(data:wrongApp,response:bootstrapResponse,error:nil)

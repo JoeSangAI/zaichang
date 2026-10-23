@@ -94,7 +94,7 @@ func audioObjects(for pids:[pid_t])->[AudioObjectID] {
         return status==noErr && object != kAudioObjectUnknown ? object : nil
     }.sorted()
 }
-func selfAudioPIDs()->[pid_t] {[getpid()]+processes(bundle:"com.zaichang.app")+processes(bundle:"com.zaichang.app.validation")+processes(bundle:"com.zaichang.app.next")+processes(bundle:"com.zaichang.app.offlineqa")+processes(bundle:"com.zaichang.app.desktop")+processes(bundle:"com.zaichang.app.development-qa")}
+func selfAudioPIDs()->[pid_t] {[getpid()]+processes(bundle:"com.joesang.meeting-assistant")+processes(bundle:"com.joesang.meeting-assistant.validation")+processes(bundle:"com.joesang.meeting-assistant.next")+processes(bundle:"com.joesang.meeting-assistant.offlineqa")+processes(bundle:"com.joesang.meeting-assistant.desktop")+processes(bundle:"com.joesang.meeting-assistant.development-qa")}
 func scopeDescription(global:Bool,ids:[AudioObjectID])->CATapDescription {
     let description=global ? CATapDescription(monoGlobalTapButExcludeProcesses:ids) : CATapDescription(monoMixdownOfProcesses:ids)
     description.isPrivate=true;description.muteBehavior = .unmuted
@@ -112,8 +112,6 @@ struct Config: Decodable {
     let localSpeakerDirectory: String?
     let localEmbeddingModel: String?
     let userLaunchConfirmed: Bool?
-    var asrVocabulary:[String:Int]? = nil
-    var asrVocabularyConfirmed:Bool? = nil
     var echoModelDirectory:String? = nil
     var cloudSessionConfirmed:Bool? = nil
     var unlimitedSession:Bool? = nil
@@ -127,10 +125,8 @@ struct Config: Decodable {
     var controlAckFD:Int32? = nil
     var useMic: Bool {micEnabled ?? true}
     func validate() throws {
-        let words=try ASRTermVocabulary.validated(asrVocabulary ?? [:])
         guard unlimitedSession != true || userLaunchConfirmed==true && (cloudSessionConfirmed==true || isLocalOnly && localRecordingConfirmed==true) else{throw Failure(code:"invalid_unlimited_scope")}
-        guard words.isEmpty || (!isLocalOnly && asrVocabularyConfirmed==true) else{throw Failure(code:"asr_terms_not_confirmed")}
-        guard confirmed, !session.isEmpty, !bundle.isEmpty, !bundle.hasPrefix("com.zaichang."),
+        guard confirmed, !session.isEmpty, !bundle.isEmpty, !bundle.hasPrefix("com.joesang."),
               appendCaptureCacheID.map({UUID(uuidString:$0) != nil}) ?? true,
               !(resumeCacheID != nil && appendCaptureCacheID != nil),
               (isLocalOnly ? (localRecordingConfirmed == true && key.isEmpty && resumeCacheID == nil):!key.isEmpty),
@@ -604,6 +600,43 @@ func clone(_ input: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {
     return copy
 }
 
+// A process tap describes its mix format; the IOProc receives the aggregate
+// input stream's virtual format. Bluetooth call routes can make these differ.
+func applicationTapInputFormat(device:AudioObjectID)throws->AVAudioFormat {
+    var property=AudioObjectPropertyAddress(mSelector:kAudioDevicePropertyStreams,mScope:kAudioObjectPropertyScopeInput,mElement:kAudioObjectPropertyElementMain)
+    var size:UInt32=0
+    try check(AudioObjectGetPropertyDataSize(device,&property,0,nil,&size),"tap_input_streams_size")
+    guard size==UInt32(MemoryLayout<AudioObjectID>.size) else{throw Failure(code:"tap_input_stream_layout")}
+    var stream:AudioObjectID=0
+    try check(AudioObjectGetPropertyData(device,&property,0,nil,&size,&stream),"tap_input_stream")
+    property=address(kAudioStreamPropertyVirtualFormat)
+    var asbd=AudioStreamBasicDescription();size=UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
+    try check(AudioObjectGetPropertyData(stream,&property,0,nil,&size,&asbd),"tap_input_virtual_format")
+    guard asbd.mFormatID==kAudioFormatLinearPCM,asbd.mSampleRate.isFinite,
+          (8000...384000).contains(asbd.mSampleRate),asbd.mChannelsPerFrame>0,
+          asbd.mBytesPerFrame>0,let format=AVAudioFormat(streamDescription:&asbd) else{
+        throw Failure(code:"tap_input_format_unsupported")
+    }
+    return format
+}
+
+// Device-free clock check shared by both tap paths. A route can change its
+// sample rate without changing its device ID; stop using that format promptly.
+struct ApplicationTapClockCheck {
+    private var anchor:(sample:Double,host:Double)?
+    mutating func accepts(_ time:AudioTimeStamp,sampleRate:Double)->Bool {
+        guard time.mFlags.contains(.sampleTimeValid),time.mFlags.contains(.hostTimeValid) else{return true}
+        let host=AVAudioTime.seconds(forHostTime:time.mHostTime),sample=time.mSampleTime
+        guard host.isFinite,sample.isFinite else{return false}
+        guard let old=anchor else{anchor=(sample,host);return true}
+        let elapsed=host-old.host
+        guard elapsed>=0,sample>=old.sample else{return false}
+        guard elapsed>=0.1 else{return true}
+        anchor=(sample,host)
+        return abs((sample-old.sample)/elapsed/sampleRate-1)<=0.05
+    }
+}
+
 @available(macOS 14.2, *)
 final class ApplicationTap {
     var tap: AudioObjectID = 0
@@ -613,6 +646,12 @@ final class ApplicationTap {
     let queue = DispatchQueue(label: "meeting.app.tap",qos:.userInitiated)
     var outputClock: AudioObjectID = 0
     var excludedAudioObjects:[AudioObjectID]=[]
+    var capturedInputFormat:AVAudioFormat?
+    func inputFormatChanged()->Bool {
+        guard device != 0,let capturedInputFormat else{return false}
+        guard let current=try? applicationTapInputFormat(device:device) else{return true}
+        return !current.isEqual(capturedInputFormat)
+    }
     func start(bundle: String, micEnabled:Bool, box: Mailbox,announce:Bool=true) throws {
         // Retry teardown of anything a failed earlier stop left behind.
         if device != 0 || tap != 0 {try? stopChecked()}
@@ -642,8 +681,7 @@ final class ApplicationTap {
         var property = address(kAudioTapPropertyFormat)
         var size = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
         try check(AudioObjectGetPropertyData(tap, &property, 0, nil, &size, &asbd), "tap_format")
-        guard let format = AVAudioFormat(streamDescription: &asbd) else { throw Failure(code: "tap_format_unsupported") }
-        let converter = try PCMConverter(format)
+        let declaredTapSampleRate=asbd.mSampleRate
         // Include the output device as the aggregate clock, matching the CoreAudio sample setup.
         var systemProperty = address(kAudioHardwarePropertyDefaultOutputDevice)
         var outputDevice: AudioObjectID = 0
@@ -668,8 +706,18 @@ final class ApplicationTap {
                                              kAudioSubTapDriftCompensationKey: true]]
         ]
         try check(AudioHardwareCreateAggregateDevice(aggregate as CFDictionary, &device), "create_private_aggregate")
+        let format=try applicationTapInputFormat(device:device)
+        asbd=format.streamDescription.pointee;capturedInputFormat=format
+        let converter=try PCMConverter(format)
+        var formatClock=ApplicationTapClockCheck()
+        let formatInfo:[String:Any]=["type":"capture_format","source_id":global ? "reference":"remote",
+              "tap_sample_rate":declaredTapSampleRate,"input_sample_rate":format.sampleRate,
+              "input_channels":format.channelCount,"input_bytes_per_frame":asbd.mBytesPerFrame]
+        box.journal?.recordCaptureFormat(formatInfo)
+        emit(formatInfo)
         try check(AudioDeviceCreateIOProcIDWithBlock(&io, device, queue) { _, input, inputTime, _, _ in
             guard captureAdmissionOpen() else { return }
+            guard formatClock.accepts(inputTime.pointee,sampleRate:format.sampleRate) else{box.fail("tap_input_clock_changed");return}
             let list = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: input))
             guard let first = list.first, asbd.mBytesPerFrame > 0 else { box.fail("tap_empty_format"); return }
             let frames = AVAudioFrameCount(first.mDataByteSize / asbd.mBytesPerFrame)
@@ -745,7 +793,6 @@ actor Lane {
     private var inFlightAudioSends = 0
     var finished = false
     var ready = false
-    var asrTermsRejected=false
     var attemptedBytes = 0
     var inFlightBytes = 0
     var sendCalls = 0
@@ -788,7 +835,7 @@ actor Lane {
     }
     func command(_ action: String) throws -> String {
         let payload: [String: Any] = action == "run-task" ? ["task_group": "audio", "task": "asr", "function": "recognition",
-                 "model": config.model, "parameters": try ASRTermVocabulary.parameters(silenceMS:config.silenceMS,words:asrTermsRejected ? [:]:(config.asrVocabulary ?? [:])), "input": [String: Any]()] : ["input": [String: Any]()]
+                 "model": config.model, "parameters": ["format":"pcm","sample_rate":16000,"max_sentence_silence":config.silenceMS], "input": [String: Any]()] : ["input": [String: Any]()]
         let output: [String: Any] = ["header": ["action": action, "task_id": task, "streaming": "duplex"], "payload": payload]
         return String(data: try JSONSerialization.data(withJSONObject: output), encoding: .utf8)!
     }
@@ -799,7 +846,8 @@ actor Lane {
         ws.cancel(with:.goingAway,reason:nil)
         if let pipeline=speakerPipeline {await pipeline.discard(partialIDs)}
         publish(["type":"asr_replay","track":track,"discard_segment_ids":Array(partialIDs),"resume_sample":cursor/2])
-        partialIDs=[];taskAttemptedBytes=0;task=UUID().uuidString;replayBase=cursor;origin=nil;closing=false;finished=false;ready=false;transportFailed=false;transportError=nil;retryCount+=1;providerCounter=0
+        partialIDs=[];taskAttemptedBytes=0;task=UUID().uuidString;replayBase=cursor;origin=nil;closing=false;finished=false;ready=false;transportFailed=false;transportError=nil;providerCounter=0
+        retryCount+=1
         var request=URLRequest(url:URL(string:"wss://dashscope.aliyuncs.com/api-ws/v1/inference/")!)
         request.setValue("Bearer "+config.key,forHTTPHeaderField:"Authorization");ws=socketFactory()
     }
@@ -821,11 +869,6 @@ actor Lane {
             guard !stopped,interrupted<2 else{throw Failure(code:"capture_interrupted")}
             guard let h=object["header"] as? [String:Any],h["task_id"] as? String==task else{throw Failure(code:"asr_not_started:"+track)}
             if h["event"] as? String=="task-failed" {
-                if !asrTermsRejected,!(config.asrVocabulary ?? [:]).isEmpty,taskAttemptedBytes==0,ASRTermVocabulary.explicitVocabularyRejection(h) {
-                    asrTermsRejected=true
-                    publish(["type":"asr_terms","state":"rejected","session":config.session,"track":track,"ordinary_asr_retry":true,"audio_retained":true])
-                    await reconnect(at:replayBase);continue
-                }
                 throw Failure(code:asrProviderFailure(h,track:track))
             }
             guard h["event"] as? String=="task-started" else{throw Failure(code:"asr_not_started:"+track)}
@@ -967,7 +1010,13 @@ func runJournalASRLoop(lane:Lane,box:Mailbox,store:RecordingJournal,track:String
         }
         if let code=store.processingFault() { throw Failure(code:code) }
         if let code=await lane.transportFailureCode(){throw Failure(code:code)}
-        if await lane.didFinish() {try box.checkpoint("asr")}
+        if await lane.didFinish() {
+            try box.checkpoint("asr")
+            // commit("asr") queues its durable checkpoint behind transcript
+            // writes. A pause receipt must observe that checkpoint, otherwise
+            // it can report pending once and then sleep until resume forever.
+            await waitForSourceJournal(store)
+        }
         if let code=store.processingFault() { throw Failure(code:code) }
     }
     func closeSocket(_ receiver:Task<Void,Never>?) async {
@@ -1029,7 +1078,7 @@ func runJournalASRLoop(lane:Lane,box:Mailbox,store:RecordingJournal,track:String
                     emit(["type":"recording_pause_tail","session":lane.config.session,"track":track,"pause_revision":pauseRevision,"state":complete ? "complete":"pending"])
                     reportedPauseRevision=pauseRevision
                 }
-                while capturePaused != 0 && interrupted==0 && !Task.isCancelled {try? await Task.sleep(nanoseconds:10_000_000)}
+                while capturePaused != 0 && captureControlRevision==pauseRevision && interrupted==0 && !Task.isCancelled {try? await Task.sleep(nanoseconds:10_000_000)}
                 guard interrupted<2,captureUploadPaused==0,!Task.isCancelled else{return}
                 let cursor=min(store.committed("asr"),store.bytes())
                 do {try box.rewind(cursor)}catch{onCacheFailure("cache_cursor_invalid");return}
@@ -1119,7 +1168,7 @@ func runJournalASRLoop(lane:Lane,box:Mailbox,store:RecordingJournal,track:String
                     emit(["type":"recording_pause_tail","session":lane.config.session,"track":track,"pause_revision":pauseRevision,"state":complete ? "complete":"pending"])
                     reportedPauseRevision=pauseRevision
                 }
-                while capturePaused != 0 && interrupted==0 && !Task.isCancelled {try? await Task.sleep(nanoseconds:10_000_000)}
+                while capturePaused != 0 && captureControlRevision==pauseRevision && interrupted==0 && !Task.isCancelled {try? await Task.sleep(nanoseconds:10_000_000)}
                 guard interrupted<2,captureUploadPaused==0,!Task.isCancelled else{return}
                 let cursor=min(store.committed("asr"),store.bytes())
                 do {try box.rewind(cursor)}catch{onCacheFailure("cache_cursor_invalid");return}
@@ -1145,7 +1194,7 @@ func runJournalASRLoop(lane:Lane,box:Mailbox,store:RecordingJournal,track:String
                         emit(["type":"recording_pause_tail","session":lane.config.session,"track":track,"pause_revision":pauseRevision,"state":"pending"])
                         reportedPauseRevision=pauseRevision
                     }
-                    while capturePaused != 0 && interrupted==0 && !Task.isCancelled {try? await Task.sleep(nanoseconds:10_000_000)}
+                    while capturePaused != 0 && captureControlRevision==pauseRevision && interrupted==0 && !Task.isCancelled {try? await Task.sleep(nanoseconds:10_000_000)}
                     guard interrupted<2,captureUploadPaused==0,!Task.isCancelled else{return}
                     let cursor=min(await lane.confirmedCursor(),store.bytes())
                     do {try box.rewind(cursor)}catch{onCacheFailure("cache_cursor_invalid");return}
@@ -1234,7 +1283,6 @@ func resumeCachedMeeting(config:Config,id:String,base:URL=meetingCacheRoot(),fac
         guard config.resumeUploadConfirmed==true else{throw Failure(code:"local_audio_upload_not_confirmed")}
         approved["upload_authorized"]=true;approved["asr_destination"]="dashscope.aliyuncs.com";approved["upload_confirmed_at"]=Date().timeIntervalSince1970;if config.cloudSessionConfirmed==true {approved["cloud_session_authorized"]=true;approved["unlimited_session"]=config.unlimitedSession==true;if config.unlimitedSession != true {approved["cloud_audio_ceiling_seconds"]=14400;approved["cloud_budget_yuan"]=5}};metadataChanged=true
     }
-    if config.asrVocabularyConfirmed==true,let words=config.asrVocabulary {approved["asr_vocabulary"]=words;approved["asr_vocabulary_confirmed"]=true;metadataChanged=true}
     if metadataChanged {try JSONSerialization.data(withJSONObject:approved,options:[.sortedKeys]).write(to:meeting.directory.appendingPathComponent("meeting.json"),options:.atomic)}
     var stores:[String:RecordingJournal]=[:];var lanes:[String:Lane]=[:];var jobs:[()->Task<Void,Never>]=[]
     for track in meeting.tracks {stores[track]=try RecordingJournal(directory:meeting.directory,track:track)}
@@ -1287,6 +1335,9 @@ func recordingPauseHandler(_ value:Int32) {
     // observed. Terminal controls own the gates; do not resurrect a pause
     // revision whose capture loop and ACK worker are shutting down.
     guard captureFinishing==0 && interrupted==0 else{return}
+    // A device-change pause and the user's SIGUSR1 can name the same closed
+    // boundary. Do not orphan its teardown/echo/ASR barriers with a new revision.
+    if value==SIGUSR1 && capturePaused != 0 {captureHardwareReady=0;return}
     capturePaused = value==SIGUSR1 ? 1:0
     if value==SIGUSR1 { captureHardwareReady=0 }
     captureControlRevision &+= 1
@@ -1321,6 +1372,11 @@ struct CaptureControlAcknowledgement {
     static func main() async {
         do {
             let args = CommandLine.arguments
+            if args.count==2,args[1]=="--runtime-configuration-self-test",Bundle.main.object(forInfoDictionaryKey:"OfflineOnly") as? Bool==true {
+                let checks=try runtimeConfigurationChecks()
+                print(String(data:try JSONSerialization.data(withJSONObject:["type":"runtime_helper","checks":checks,"passed":checks.count,"edition":RuntimeConfiguration.edition(),"data_root":RuntimeConfiguration.dataRoot().path,"capture":false,"cloud":false,"keychain":false],options:.sortedKeys),encoding:.utf8)!)
+                return
+            }
             if args.count==3,args[1]=="--recover-session-cache" {
                 guard UUID(uuidString:args[2]) != nil,
                       Bundle.main.object(forInfoDictionaryKey:"OfflineOnly") as? Bool != true,
@@ -1354,15 +1410,21 @@ struct CaptureControlAcknowledgement {
                 let result=try historicalVoiceSamples(request:request,model:URL(fileURLWithPath:args[2]))
                 print(String(data:try JSONEncoder().encode(result),encoding:.utf8)!);return
             }
+            if args.count==3,args[1]=="--automatic-acoustic-refinement" {
+                let input=FileHandle.standardInput.readData(ofLength:65537)
+                guard !input.isEmpty,input.count<=65536 else{throw Failure(code:"acoustic_request_too_large")}
+                let request=try JSONDecoder().decode(SpeakerRefinementRequest.self,from:input)
+                do {
+                    let result=try MeetingAcousticRefinement.run(request:request,modelURL:URL(fileURLWithPath:args[2]))
+                    print(String(data:try JSONSerialization.data(withJSONObject:result,options:[.sortedKeys]),encoding:.utf8)!);return
+                } catch let error as SpeakerRefinementArtifactError {throw Failure(code:"acoustic_"+String(describing:error).lowercased())}
+            }
             if args.count==3,args[1]=="--saved-voice-recognition" {
                 let input=FileHandle.standardInput.readData(ofLength:65537)
                 guard !input.isEmpty,input.count<=65536 else{throw Failure(code:"saved_voice_request_too_large")}
                 let request=try JSONDecoder().decode(SavedVoiceRecognitionRequest.self,from:input)
                 let result=try SavedVoiceRecognition.run(request,model:URL(fileURLWithPath:args[2]))
                 print(String(data:try JSONEncoder().encode(result),encoding:.utf8)!);return
-            }
-            if args.count==2,args[1]=="--asr-terms-self-test" {
-                let result=try await asrTermProtocolChecks();print(String(data:try JSONSerialization.data(withJSONObject:result,options:.sortedKeys),encoding:.utf8)!);return
             }
             var prepared: [String: SpeakerPipeline] = [:]
             var preparedEpochs: [String: String] = [:]
@@ -1383,6 +1445,10 @@ struct CaptureControlAcknowledgement {
                 let config=Config(session:metadata["session"] as! String,bundle:"*microphone*",key:"",confirmed:true,maxSeconds:args[3]=="limited" ? 1:10,model:"qwen-audio-3.0-asr-flash-streaming",silenceMS:1300,micEnabled:true,localSpeakerDirectory:nil,localEmbeddingModel:nil,userLaunchConfirmed:nil)
                 var sockets=0;let factory:()->ASRSocket={let first=sockets==0;sockets+=1;return FixtureSocket(fail:args[3]=="disconnect" && first,offline:args[3]=="offline",delay:args[3]=="slow" ? 50_000_000:1_000_000)}
                 try await resumeCachedMeeting(config:config,id:args[2],base:base,factory:factory,retryLimit:2,retryDelay:0.01);return
+            }
+            if args.count==2,args[1]=="--public-cloud-probe" {
+                guard Bundle.main.object(forInfoDictionaryKey:"PublicAudioASRTestAllowed") as? Bool==true,let root=Bundle.main.object(forInfoDictionaryKey:"AdapterRoot") as? String,let line=readLine() else{throw Failure(code:"public_trial_not_authorized")}
+                let config=try JSONDecoder().decode(Config.self,from:Data(line.utf8));emit(try await publicAudioTrial(config:config,root:URL(fileURLWithPath:root)));return
             }
             if args.count==3,args[1]=="--network-recovery-self-test" {
                 guard Bundle.main.object(forInfoDictionaryKey:"OfflineOnly") as? Bool==true else{throw Failure(code:"offline_fixture_scope_invalid")}
@@ -1505,8 +1571,8 @@ struct CaptureControlAcknowledgement {
             let launcherPID = getppid()
             let active=activeCaptureTracks(bundle:config.bundle,useMic:config.useMic)
             let cacheID=config.appendCaptureCacheID ?? UUID().uuidString
-            let cacheDirectory=meetingCacheRoot().appendingPathComponent(cacheID)
-            if config.appendCaptureCacheID==nil { _ = try prepareMeetingCacheRoot();try FileManager.default.createDirectory(at:cacheDirectory,withIntermediateDirectories:false,attributes:[.posixPermissions:0o700]) }
+            let cacheDirectory=RuntimeConfiguration.dataRoot().appendingPathComponent("SessionCache").appendingPathComponent(cacheID)
+            if config.appendCaptureCacheID==nil {try FileManager.default.createDirectory(at:cacheDirectory,withIntermediateDirectories:false,attributes:[.posixPermissions:0o700])}
             let writerLease=try SessionCacheWriterLease.acquire(directory:cacheDirectory)
             defer {writerLease.release()}
             let oldInfo:[String:Any]
@@ -1541,7 +1607,6 @@ struct CaptureControlAcknowledgement {
                 meetingInfo["archive_only_before_append"]=true
             }
             if config.cloudSessionConfirmed==true {meetingInfo["cloud_session_authorized"]=true;meetingInfo["unlimited_session"]=config.unlimitedSession==true;if config.unlimitedSession != true {meetingInfo["cloud_audio_ceiling_seconds"]=14400;meetingInfo["cloud_budget_yuan"]=5}}
-            if let words=config.asrVocabulary,!words.isEmpty {meetingInfo["asr_vocabulary"]=words;meetingInfo["asr_vocabulary_confirmed"]=config.asrVocabularyConfirmed==true}
             let meetingFile=cacheDirectory.appendingPathComponent("meeting.json");try JSONSerialization.data(withJSONObject:meetingInfo,options:[.sortedKeys]).write(to:meetingFile,options:.atomic);try FileManager.default.setAttributes([.posixPermissions:0o600],ofItemAtPath:meetingFile.path)
             func persistClock()throws {meetingInfo["absolute_clock"]=captureClock.absoluteClock();try JSONSerialization.data(withJSONObject:meetingInfo,options:[.sortedKeys]).write(to:meetingFile,options:.atomic)}
             let modelBoxes=["mic":Mailbox(journal:journals["mic"],producer:false),"remote":Mailbox(journal:journals["remote"],producer:false)]
@@ -1614,7 +1679,7 @@ struct CaptureControlAcknowledgement {
                     if config.bundle=="*system*",audioObjects(for:selfAudioPIDs()) != tap.excludedAudioObjects {return "self_audio_process_changed"}
                     var property=address(kAudioHardwarePropertyDefaultOutputDevice);var clock:AudioObjectID=0;var size=UInt32(MemoryLayout<AudioObjectID>.size)
                     try check(AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject),&property,0,nil,&size,&clock),"output_clock_check")
-                    return clock==tap.outputClock ? nil:"output_device_changed"
+                    return clock != tap.outputClock ? "output_device_changed" : (tap.inputFormatChanged() ? "output_format_changed":nil)
                 }
                 func rebuildApplicationTap(reason:String) throws {
                     // The budget clock keeps running: the control loop treats a paused

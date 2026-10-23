@@ -15,8 +15,8 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-WORK = ROOT / ".runtime/build"
-QA_APP = WORK / "会议助理开发QA.app"
+WORK = ROOT / ".runtime/build/standalone"
+QA_APP = WORK / "在场独立版QA.app"
 STAGE = WORK / ".在场.app.installing"
 APP = WORK / "在场.app"
 HELPER_SOURCE = QA_APP / "Contents/Helpers/会议采集离线QA.app"
@@ -25,11 +25,11 @@ PYTHON_MODULES = (
     "adapter.py", "assistant_runtime.py", "codex_runtime.py", "audio_sources.py",
     "capture_supervisor.py", "coarse_audio.py", "dual_track.py", "fee_meter.py",
     "gui_worker.py", "identity_bridge.py", "identity_control.py", "identity_session.py",
-    "live_trial.py", "meeting_context.py", "model_standby.py",
-    "runtime_config.py", "shared_terms.py", "speaker_identity.py", "term_table.py",
+    "live_trial.py", "meeting_context.py", "model_standby.py", "public_audio_trial.py",
+    "runtime_config.py", "shared_terms.py", "shared_people.py", "speaker_identity.py",
 )
-VERSION = "0.2.0"
-BUILD = "20261021.1"
+VERSION = "0.3.0"
+BUILD = "20261023.1"
 
 
 def run(*args: str, capture_output: bool = False) -> subprocess.CompletedProcess:
@@ -56,7 +56,7 @@ def app_is_running() -> bool:
 
 
 def copy_runtime(runtime: Path) -> dict[str, str]:
-    runtime.mkdir(parents=True)
+    runtime.mkdir(parents=True, exist_ok=True)
     result = {}
     for name in PYTHON_MODULES:
         source = ROOT / name
@@ -69,7 +69,10 @@ def copy_runtime(runtime: Path) -> dict[str, str]:
         source = ROOT / name
         if source.is_dir():
             shutil.copytree(source, runtime / name, ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".DS_Store"))
-    shutil.copytree(ROOT / "native/assets", runtime / "native/assets")
+    assets = runtime / "native/assets"
+    assets.mkdir(parents=True, exist_ok=True)
+    for name in ("MeetingAssistantIcon.icns", "MeetingAssistant.icns"):
+        shutil.copy2(ROOT / "native/assets" / name, assets / name)
 
     # Only portable runtime resources are copied. Build logs, caches, SDK source,
     # local profiles, and meeting data stay outside the app bundle.
@@ -212,8 +215,8 @@ def build_stage() -> dict:
                                  ROOT / "native/local-embedding-install/c-api.h"] if not path.exists()]
     if missing:
         raise SystemExit("依赖未准备完成，请先运行 python3 scripts/bootstrap_dependencies.py")
-    subprocess.run([sys.executable, str(ROOT / "scripts/build_offline.py")], cwd=ROOT, check=True)
-    subprocess.run([sys.executable, str(ROOT / "scripts/offline_check.py")], cwd=ROOT, check=True)
+    subprocess.run([sys.executable, str(ROOT / "scripts/build_offline.py"), "--edition", "standalone"], cwd=ROOT, check=True)
+    subprocess.run([sys.executable, str(ROOT / "scripts/offline_check.py"), "--edition", "standalone"], cwd=ROOT, check=True)
     if STAGE.exists():
         raise SystemExit(f"发现未完成的暂存安装：{STAGE}。请检查后再重试。")
     if not QA_APP.is_dir():

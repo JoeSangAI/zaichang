@@ -7,26 +7,24 @@ import gui_worker
 import live_trial
 
 class GUIContract(unittest.TestCase):
-    def test_append_capture_reuses_session_and_confirmed_terms(self):
+    def test_append_capture_reuses_session_but_ignores_old_terms(self):
         import uuid
         with tempfile.TemporaryDirectory() as folder,patch.object(Path,'home',return_value=Path(folder)):
             cache_id=str(uuid.uuid4())
-            cache=Path(folder)/'Library/Application Support/ZaichangStandalone/SessionCache'/cache_id
+            cache=Path(folder)/'Library/Application Support/MeetingAssistant/SessionCache'/cache_id
             cache.mkdir(parents=True)
             cache.joinpath('meeting.json').write_text(json.dumps(dict(session='same-session',bundle='*system*',
                 asr_model='qwen-audio-3.0-asr-flash-streaming',capture_mode='cloud',
-                asr_vocabulary_confirmed=True,asr_vocabulary={'虚构姓名甲':5})))
+                asr_vocabulary_confirmed=True,asr_vocabulary={'张三':5})))
             request=dict(bundle='*system*',key='synthetic-test',cloud_session_confirmed=True,
                          user_launch_confirmed=True,source_scope_confirmed=True,mic_enabled=True,
                          append_capture_cache_id=cache_id)
-            with patch('shared_terms.auto_vocabulary',return_value={'项目词':4}) as automatic:
-                config=gui_worker.cloud_session_config(request)
+            before=cache.joinpath('meeting.json').read_bytes()
+            config=gui_worker.cloud_session_config(request)
             self.assertEqual(config['session'],'same-session')
             self.assertEqual(config['appendCaptureCacheID'],cache_id)
-            # Standing project words come first; the earlier part's saved words are kept.
-            self.assertEqual(config['asrVocabulary'],{'项目词':4,'虚构姓名甲':5})
-            self.assertEqual(automatic.call_args.args,(None,))
-            self.assertTrue(config['asrVocabularyConfirmed'])
+            self.assertFalse(any('Vocabulary' in k for k in config))
+            self.assertEqual(before,cache.joinpath('meeting.json').read_bytes())
             self.assertTrue(gui_worker.is_transcript_track('mic-g1'))
             request['resume_cache_id']=cache_id
             with self.assertRaises(ValueError):
@@ -37,6 +35,25 @@ class GUIContract(unittest.TestCase):
                        user_launch_confirmed=True,source_scope_confirmed=True,mic_enabled=True,
                        append_capture_cache_id=cache_id)
             self.assertEqual(gui_worker.local_recording_config(local)['session'],'same-session')
+    def test_cloud_ignores_old_manual_terms_for_new_and_resumed_meetings(self):
+        import uuid
+        with tempfile.TemporaryDirectory() as folder,patch.object(Path,'home',return_value=Path(folder)):
+            request=dict(bundle='*system*',key='synthetic-test',cloud_session_confirmed=True,
+                         user_launch_confirmed=True,source_scope_confirmed=True,mic_enabled=True,
+                         asr_vocabulary={'晶视':5},asr_terms_confirmed=True)
+            self.assertFalse(any('Vocabulary' in k for k in gui_worker.cloud_session_config(request)))
+            cid=str(uuid.uuid4());cache=Path(folder)/'Library/Application Support/MeetingAssistant/SessionCache'/cid
+            cache.mkdir(parents=True)
+            meta=dict(session='resume-session',bundle='*system*',asr_model='qwen-audio-3.0-asr-flash-streaming',
+                      cloud_session_authorized=True,asr_destination='dashscope.aliyuncs.com',
+                      asr_vocabulary={'晶视':5},asr_vocabulary_confirmed=True)
+            path=cache/'meeting.json';path.write_text(json.dumps(meta));before=path.read_bytes()
+            request['resume_cache_id']=cid
+            with patch('gui_worker.transcript_tracks',return_value=['mic']):config=gui_worker.cloud_session_config(request)
+            self.assertEqual(config['session'],'resume-session')
+            self.assertFalse(any('Vocabulary' in k for k in config))
+            self.assertEqual(path.read_bytes(),before)
+
     def test_capture_status_exposes_only_valid_per_track_counters(self):
         health={'type':'health','session':'s','mic':{'pcm_bytes':32000,'internal':'hidden'},'remote':{'pcm_bytes':0},'secret':'not-forwarded'}
         self.assertEqual(gui_worker.capture_status_event(health),{'type':'capture_status','session':'s','tracks':{'mic':32000,'remote':0}})
@@ -189,7 +206,7 @@ class RecoveryRequest(unittest.TestCase):
     def test_existing_scope_resumes_without_running_meeting_app(self):
         import uuid
         with tempfile.TemporaryDirectory() as folder:
-            cache_id=str(uuid.uuid4());root=Path(folder);directory=root/'Library/Application Support/ZaichangStandalone/SessionCache'/cache_id;directory.mkdir(parents=True)
+            cache_id=str(uuid.uuid4());root=Path(folder);directory=root/'Library/Application Support/MeetingAssistant/SessionCache'/cache_id;directory.mkdir(parents=True)
             (directory/'meeting.json').write_text(json.dumps({'session':'previous-session','bundle':'*microphone*','asr_destination':'dashscope.aliyuncs.com','asr_model':'qwen-audio-3.0-asr-flash-streaming'}))
             with patch.object(Path,'home',return_value=root):
                 config=gui_worker.validate_request(self.request(cache_id),0,0)
@@ -200,7 +217,7 @@ class RecoveryRequest(unittest.TestCase):
         with self.assertRaises(ValueError):gui_worker.validate_request(self.request('../other'),0,0)
         import uuid
         with tempfile.TemporaryDirectory() as folder:
-            root=Path(folder);cache_id=str(uuid.uuid4());base=root/'Library/Application Support/ZaichangStandalone/SessionCache';base.mkdir(parents=True);(base/cache_id).symlink_to(root,target_is_directory=True)
+            root=Path(folder);cache_id=str(uuid.uuid4());base=root/'Library/Application Support/MeetingAssistant/SessionCache';base.mkdir(parents=True);(base/cache_id).symlink_to(root,target_is_directory=True)
             with patch.object(Path,'home',return_value=root):
                 with self.assertRaises(ValueError):gui_worker.validate_request(self.request(cache_id),0,0)
 
@@ -239,7 +256,7 @@ class IndependentCloudSessionContract(unittest.TestCase):
     def test_resume_ignores_cumulative_amount_and_duration_gates(self):
         import uuid
         with tempfile.TemporaryDirectory() as folder:
-            root=Path(folder);cid=str(uuid.uuid4());directory=root/'Library/Application Support/ZaichangStandalone/SessionCache'/cid;directory.mkdir(parents=True)
+            root=Path(folder);cid=str(uuid.uuid4());directory=root/'Library/Application Support/MeetingAssistant/SessionCache'/cid;directory.mkdir(parents=True)
             metadata=dict(session='same-session',bundle='*microphone*',asr_model='qwen-audio-3.0-asr-flash-streaming',asr_destination='dashscope.aliyuncs.com',cloud_session_authorized=True,cloud_audio_ceiling_seconds=14400)
             (directory/'meeting.json').write_text(json.dumps(metadata));(directory/'mic-manifest.json').write_text('{}');(directory/'remote-manifest.json').write_text('{}')
             req=self.request();req['resume_cache_id']=cid
@@ -251,7 +268,7 @@ class IndependentCloudSessionContract(unittest.TestCase):
     def test_resume_cost_ledgers_never_gate_and_corruption_is_unknown_to_stats(self):
         import uuid
         with tempfile.TemporaryDirectory() as folder:
-            root=Path(folder);cid=str(uuid.uuid4());directory=root/'Library/Application Support/ZaichangStandalone/SessionCache'/cid;directory.mkdir(parents=True)
+            root=Path(folder);cid=str(uuid.uuid4());directory=root/'Library/Application Support/MeetingAssistant/SessionCache'/cid;directory.mkdir(parents=True)
             metadata=dict(session='same-session',bundle='*microphone*',asr_model='qwen-audio-3.0-asr-flash-streaming',asr_destination='dashscope.aliyuncs.com',cloud_session_authorized=True,cloud_audio_ceiling_seconds=14400)
             (directory/'meeting.json').write_text(json.dumps(metadata));(directory/'mic-manifest.json').write_text('{}')
             (directory/'session-usage.json').write_text(json.dumps({'cumulative_input_audio_seconds':13000,'cumulative_estimated_yuan':'4.29'}))
@@ -268,7 +285,7 @@ class IndependentCloudSessionContract(unittest.TestCase):
     def test_many_source_generations_do_not_divide_remaining_budget(self):
         import uuid
         with tempfile.TemporaryDirectory() as folder:
-            root=Path(folder);cid=str(uuid.uuid4());directory=root/'Library/Application Support/ZaichangStandalone/SessionCache'/cid;directory.mkdir(parents=True)
+            root=Path(folder);cid=str(uuid.uuid4());directory=root/'Library/Application Support/MeetingAssistant/SessionCache'/cid;directory.mkdir(parents=True)
             (directory/'meeting.json').write_text(json.dumps(dict(session='same-session',bundle='*microphone*',asr_model='qwen-audio-3.0-asr-flash-streaming',asr_destination='dashscope.aliyuncs.com',cloud_session_authorized=True,cloud_audio_ceiling_seconds=14400)))
             for i in range(1,81):(directory/f'remote-g{i}-manifest.json').write_text('{}')
             (directory/'session-usage.json').write_text(json.dumps({'cumulative_input_audio_seconds':14000}))
@@ -280,7 +297,7 @@ class IndependentCloudSessionContract(unittest.TestCase):
     def test_local_pending_resume_requires_upload_confirmation(self):
         import uuid
         with tempfile.TemporaryDirectory() as folder:
-            root=Path(folder);cid=str(uuid.uuid4());directory=root/'Library/Application Support/ZaichangStandalone/SessionCache'/cid;directory.mkdir(parents=True)
+            root=Path(folder);cid=str(uuid.uuid4());directory=root/'Library/Application Support/MeetingAssistant/SessionCache'/cid;directory.mkdir(parents=True)
             (directory/'meeting.json').write_text(json.dumps(dict(session='local-session',bundle='*microphone*',asr_model='qwen-audio-3.0-asr-flash-streaming',capture_mode='local_only',upload_authorized=False)))
             (directory/'mic-manifest.json').write_text('{}');req=self.request();req['resume_cache_id']=cid
             with patch.object(Path,'home',return_value=root):
@@ -294,7 +311,7 @@ class PackagedWorkerLock(unittest.TestCase):
             root=Path(folder);bundle=root/'ReadonlyBundle';bundle.mkdir();bundle.chmod(0o500)
             with patch.object(gui_worker.tempfile,'gettempdir',return_value=str(root)),patch.object(gui_worker.sys,'argv',['gui_worker.py']),patch.object(gui_worker.sys,'stdin',io.StringIO('{}\n')),patch.object(gui_worker,'execute') as execute:
                 gui_worker.main();execute.assert_called_once_with({})
-            self.assertTrue((root/('zaichang-meeting-worker-'+str(gui_worker.os.getuid())+'.lock')).is_file());self.assertEqual(list(bundle.iterdir()),[])
+            self.assertTrue((root/('joesang-meeting-worker-'+str(gui_worker.os.getuid())+'.lock')).is_file());self.assertEqual(list(bundle.iterdir()),[])
     def test_lock_rejects_symlink_and_preserves_target(self):
         import live_trial
         with tempfile.TemporaryDirectory() as folder:
@@ -417,6 +434,17 @@ class RecordingControlReceipt(unittest.TestCase):
         self.assertEqual(failed['reason'], 'capture_control_timeout_pause_drain')
         self.assertEqual(failed['pause_tracks'], snapshot['pause_tracks'])
 
+    def test_pause_reason_does_not_leak_from_a_previous_device_change(self):
+        receipt = gui_worker.recording_control_snapshot(dict(type='recording_paused',
+            session='s', control_revision=1, reason='input_device_changed'), None, 's')
+        self.assertEqual(receipt['reason'], 'input_device_changed')
+        receipt = gui_worker.recording_control_snapshot(dict(type='recording_resumed',
+            session='s', control_revision=2), receipt, 's')
+        self.assertNotIn('reason', receipt)
+        receipt = gui_worker.recording_control_snapshot(dict(type='recording_paused',
+            session='s', control_revision=3), receipt, 's')
+        self.assertNotIn('reason', receipt)
+
     def test_first_capture_failure_survives_later_successful_recovery_stop(self):
         failed = gui_worker.recording_control_snapshot(dict(type='recording_control_failed',
             session='s', action='pause', reason='capture_pause_teardown_timeout'), None, 's')
@@ -520,7 +548,7 @@ class RecordingControlReceipt(unittest.TestCase):
         import uuid
         with tempfile.TemporaryDirectory() as temp:
             root=Path(temp);cache_id=str(uuid.uuid4());session='local-only-session'
-            cache=root/'Library/Application Support/ZaichangStandalone/SessionCache'/cache_id
+            cache=root/'Library/Application Support/MeetingAssistant/SessionCache'/cache_id
             cache.mkdir(parents=True)
             binary=root/'fixture-helper.py'
             binary.write_text('''#!/usr/bin/env python3
@@ -552,7 +580,7 @@ print(json.dumps(dict(type="stopped",session=config["session"],cache_id=config["
         import uuid
         with tempfile.TemporaryDirectory() as temp:
             root=Path(temp);cache_id=str(uuid.uuid4());session='unexpected-exit-session'
-            cache=root/'Library/Application Support/ZaichangStandalone/SessionCache'/cache_id
+            cache=root/'Library/Application Support/MeetingAssistant/SessionCache'/cache_id
             cache.mkdir(parents=True)
             (cache/'meeting-lifecycle.json').write_text(json.dumps(
                 {'schema':1,'lifecycle':'ended','session':session}))
@@ -593,7 +621,7 @@ print(json.dumps(dict(type="capture_stopped",session=config["session"],
         import uuid
         with tempfile.TemporaryDirectory() as temp:
             root=Path(temp);cache_id=str(uuid.uuid4());session='unexpected-nonzero-exit-session'
-            cache=root/'Library/Application Support/ZaichangStandalone/SessionCache'/cache_id
+            cache=root/'Library/Application Support/MeetingAssistant/SessionCache'/cache_id
             cache.mkdir(parents=True)
             binary=root/'lost-helper.py'
             binary.write_text('''#!/usr/bin/env python3
@@ -627,7 +655,7 @@ sys.exit(7)
         import uuid
         with tempfile.TemporaryDirectory() as temp:
             root=Path(temp);cache_id=str(uuid.uuid4());session='failed-recovery-session'
-            cache=root/'Library/Application Support/ZaichangStandalone/SessionCache'/cache_id
+            cache=root/'Library/Application Support/MeetingAssistant/SessionCache'/cache_id
             cache.mkdir(parents=True)
             binary=root/'error-helper.py'
             binary.write_text('''#!/usr/bin/env python3
@@ -661,7 +689,7 @@ sys.exit(1)
         import uuid
         with tempfile.TemporaryDirectory() as temp:
             root=Path(temp);cache_id=str(uuid.uuid4());session='signal-lock-session'
-            cache=root/'Library/Application Support/ZaichangStandalone/SessionCache'/cache_id
+            cache=root/'Library/Application Support/MeetingAssistant/SessionCache'/cache_id
             cache.mkdir(parents=True)
             marker=root/'child-received-stop'
             binary=root/'fixture-helper.py'

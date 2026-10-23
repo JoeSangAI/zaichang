@@ -19,3 +19,6 @@ native/ui-review/
 *.m4a
 *.onnx
 *.mlmodelc/
+
+# Optional user-owned integration settings
+connectors.json

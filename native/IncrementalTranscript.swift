@@ -136,13 +136,24 @@ struct TranscriptExportSnapshot {
                 rows.append("绝对时间：["+start+" – "+end+"]")
             }
             rows.append(item["text"] as? String ?? "")
-            if let translation=translations[turn.parent] {rows.append("中译："+translation)}
+            if let translation=translations[turn.id] {rows.append("中译："+translation)}
             if turn.uncertain {
                 let spans=turn.parts.filter{identity($0.0,$0.1)==nil}.map{TranscriptTimeline.timestamp($0.1["start"],precise:true)+"–"+TranscriptTimeline.timestamp($0.1["end"],precise:true)}
                 rows.append("句内待确认："+spans.joined(separator:"、"))
             }
             rows.append("")
         }
+        var seen=Set<String>(),changes:[String]=[]
+        for turn in turns {
+            for (_,part) in turn.parts {
+                for change in part["coarse_name_changes"] as? [[String:String]] ?? [] {
+                    guard let id=change["unit_id"],let old=change["old"],let new=change["new"] else{continue}
+                    let key=[id,old,new].joined(separator:"\u{001F}")
+                    if seen.insert(key).inserted {changes.append("· "+old+" → "+new)}
+                }
+            }
+        }
+        if !changes.isEmpty {rows += ["专名改动："]+changes+[""]}
         return "会议："+meetingTitle+"\n\n"+(incomplete ? "【转写未完成：以下为当前已有内容】\n\n":"")+rows.joined(separator:"\n")
     }
 }

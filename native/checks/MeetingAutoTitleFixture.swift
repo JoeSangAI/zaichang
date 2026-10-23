@@ -15,7 +15,7 @@ private struct FixtureTitleProvider: MeetingTitleProvider {
         self.titleText = titleText; self.delayNanoseconds = delayNanoseconds; self.counter = counter
     }
     func title(for transcript: String) async throws -> String {
-        precondition(transcript.contains("示例产品规划"))
+        precondition(transcript.contains("品牌营销"))
         await counter?.record()
         if delayNanoseconds > 0 { try await Task.sleep(nanoseconds: delayNanoseconds) }
         return titleText
@@ -50,7 +50,7 @@ private actor RotatingTitleProvider:MeetingTitleProvider {
 private struct GroundedTermTitleProvider:MeetingTitleProvider {
     let output:String
     func title(for transcript:String) async throws->String {
-        guard transcript.contains("原文中出现的识别词") && transcript.contains("示例平台") && transcript.contains("我最近在跑步") else {
+        guard !transcript.contains("原文中出现的识别词") && transcript.contains("简知") && transcript.contains("我最近在减脂") else {
             throw MeetingAutoTitleError.invalidResponse
         }
         return output
@@ -84,7 +84,7 @@ private struct GroundedTermTitleProvider:MeetingTitleProvider {
     }
     func bridgeTitle(_ session:String)throws->String? {
         view.contextPublisher?.flushForChecks()
-    let proc=Process(),pipe=Pipe();proc.executableURL=PythonRuntime.executable()!;proc.arguments=[view.root+"/meeting_context.py","--database",bridge.appendingPathComponent("context.sqlite").path,"read","--session",session];proc.standardOutput=pipe;proc.standardError=FileHandle.nullDevice
+        let proc=Process(),pipe=Pipe();proc.executableURL=URL(fileURLWithPath:"/usr/local/bin/python3");proc.arguments=[view.root+"/meeting_context.py","--database",bridge.appendingPathComponent("context.sqlite").path,"read","--session",session];proc.standardOutput=pipe;proc.standardError=FileHandle.nullDevice
         try proc.run();let data=pipe.fileHandleForReading.readDataToEndOfFile();proc.waitUntilExit();guard proc.terminationStatus==0 else{throw Failure(code:"title_bridge_read_failed")}
         let value=try JSONSerialization.jsonObject(with:data) as! [String:Any]
         return (value["meeting"] as? [String:Any])?["title"] as? String
@@ -114,7 +114,7 @@ private struct GroundedTermTitleProvider:MeetingTitleProvider {
     try check(view.meetingTitle=="独立会议｜验收计划" && (try MeetingLibraryInfo.loadTitle(in:second))==view.meetingTitle,"late_first_title_never_changes_second_meeting")
     try check(try bridgeTitle("title-first")=="产品标注｜验收计划" && bridgeTitle("title-second")==view.meetingTitle,"saved_and_current_bridge_titles_match_sidecars")
     view.newMeeting()
-    let liveProvider=RotatingTitleProvider(["实时转写｜讨论方案","示例产品｜定位与验收安排"],delay:100_000_000)
+    let liveProvider=RotatingTitleProvider(["实时转写｜讨论方案","示例项目推进｜产品命名与用户调研"],delay:100_000_000)
     let live=try prepare("title-live",provider:liveProvider);view.phase.phase = .recording
     view.scheduleAutoTitle();view.scheduleAutoTitle();view.scheduleAutoTitle()
     try await wait({view.meetingTitle=="实时转写｜讨论方案" && view.titleTask==nil})
@@ -126,14 +126,12 @@ private struct GroundedTermTitleProvider:MeetingTitleProvider {
     try ageTitle(live)
     view.scheduleAutoTitle();try await Task.sleep(nanoseconds:30_000_000)
     try check(await liveProvider.calls==1,"elapsed_time_without_new_text_does_not_refresh_title")
-    // Synthetic later passages prove that new topics are absorbed at pause,
-    // not during recording.
+    // Synthetic later topics are absorbed at pause, not during recording.
     let laterText="""
-    目前内部测试已经完成一半，今天又补了一轮样本。大家对新界面的名称还有不同意见，先把反馈归类。
-    新版还没有开始试用，因为团队正在收集测试结果。明天汇总完以后，再决定哪些流程进入下一轮验证。
-    我们要比较两种使用路径，确认新用户能否顺利完成第一次操作，并找出在哪一步容易停下来。
-    同时需要确认测试范围，核心功能保持一致，其他细节可以按不同人群分别观察。
-    这轮主要看实际完成率和用户反馈，不急着扩大范围。等数据完整后，再讨论后续安排。
+    示例项目接下来讨论用户调研。第一阶段的问卷收集完成了一半，团队正在检查提交格式是否一致。现阶段的数据不足以说明最终偏好，所以先记录发现的问题，不把初步意见当成最终结论。第二阶段需要确认参与范围和统计口径，并把待确认内容写到项目说明中。
+    新产品的命名方案也需要继续比较。每个候选名称都应当有明确来源，团队会检查是否容易理解、是否和其他产品混淆。没有确认的名称暂时只保留在正文中，不加入正式术语表。下次讨论时再根据书面材料决定采用哪个写法。
+    渠道分析将按同一时间范围汇总公开数据。不同平台的受众、展示方式和衡量指标可能存在差异，所以不能只比较单个数字。团队会先记录数据条件，再讨论哪些结果可以支持当前方案。涉及预算和时间安排的决定仍需负责人员确认。
+    最后还需要区分品牌传播和日常触达。两个方案分别描述目标、证据与验证方法，并在项目材料中保留修改依据。今天只明确下一轮需要补充哪些材料，不增加未经讨论的承诺。以上内容均为公开测试示例，不涉及真实客户或会议。
     """
     var progressEvent:[String:Any]=["type":"segment","session":"title-live","segment_id":"title-progress",
         "source_id":"mic","track":"mic","epoch":"title-sequence","revision":1,"start":609.0,"end":1641.0,
@@ -149,7 +147,7 @@ private struct GroundedTermTitleProvider:MeetingTitleProvider {
     view.receive(["type":"recording_paused","session":"title-live","control_revision":1,"draining_tracks":[]])
     try await wait({view.titleTask==nil})
     try check(await liveProvider.calls==2
-              && view.meetingTitle=="示例产品｜定位与验收安排",
+              && view.meetingTitle=="示例项目推进｜产品命名与用户调研",
               "pause_without_pending_tail_calibrates_title_once")
     try check(try bridgeTitle("title-live")==view.meetingTitle,"pause_refresh_publishes_saved_title")
     view.window.setContentSize(NSSize(width:1050,height:780));view.updateUI()
@@ -162,13 +160,13 @@ private struct GroundedTermTitleProvider:MeetingTitleProvider {
     try bitmap.representation(using:.png,properties:[:])!.write(to:directory.appendingPathComponent("title-progress.png"))
     view.receive(["type":"recording_resumed","session":"title-live","control_revision":2])
     progressEvent["segment_id"]="title-resumed";progressEvent["start"]=1674.75;progressEvent["end"]=1680.0
-    progressEvent["text"]="还有，哈哈，你你那个测试负责人计划怎么怎么，我们需要怎么推进吗？"
+    progressEvent["text"]="还有一个示例事项需要确认，请负责同事在下次讨论前补充公开材料。"
     try ageTitle(live);try append(progressEvent,to:live);try await Task.sleep(nanoseconds:30_000_000)
     try check(await liveProvider.calls==2,"resumed_recording_keeps_previous_title")
     view.receive(["type":"recording_paused","session":"title-live","control_revision":3,"draining_tracks":[]])
     try await wait({view.titleTask==nil})
     let resumedInputs=await liveProvider.transcripts
-    try check(resumedInputs.count==3 && resumedInputs[2].contains("测试负责人计划"),"next_pause_includes_resumed_content")
+    try check(resumedInputs.count==3 && resumedInputs[2].contains("示例事项需要确认"),"next_pause_includes_resumed_content")
     view.renameMeeting("本人确认的会议范围");view.cacheWriteQueue.sync{};try ageTitle(live)
     view.scheduleAutoTitle();try await Task.sleep(nanoseconds:30_000_000)
     try check(await liveProvider.calls==3 && view.meetingTitle=="本人确认的会议范围","pause_refresh_respects_manual_title")
@@ -222,8 +220,8 @@ func meetingAutoTitleFixture() async throws {
     try JSONSerialization.data(withJSONObject: ["session": session, "cache_id": id])
         .write(to: folder.appendingPathComponent("meeting.json"))
     let events: [[String: Any]] = [
-        ["segment_id": "a", "start": 0.0, "final": true, "text": "示例产品规划小组讨论了新功能需求和上线节奏，先整理试用反馈。"],
-        ["segment_id": "b", "start": 5.0, "final": true, "text": "团队决定下周检查验收范围，优先级和分工仍待确认。"]
+        ["segment_id": "a", "start": 0.0, "final": true, "text": "品牌营销超能体讨论了客户需求与课程方向，先整理学员访谈。"],
+        ["segment_id": "b", "start": 5.0, "final": true, "text": "团队决定下周核对服务交付范围，报价和分工仍待确认。"]
     ]
     let liveEvents=events+[["segment_id":"partial","start":8.0,"final":false,
                             "text":"这段尚未完成的实时转写不能进入录音中标题。"]]
@@ -234,10 +232,10 @@ func meetingAutoTitleFixture() async throws {
     }
     let service = MeetingAutoTitle()
     let counter = FixtureTitleCallCounter()
-    let mock = FixtureTitleProvider(titleText: "会议标题：**示例产品规划｜服务方向讨论。**", delayNanoseconds: 0, counter: counter)
+    let mock = FixtureTitleProvider(titleText: "会议标题：**品牌营销｜服务方向讨论。**", delayNanoseconds: 0, counter: counter)
     let first = await service.generate(cacheID: id, session: session, directory: folder,
                                        events: events, provider: mock, cloudTextAllowed: true)
-    guard case .saved("示例产品规划｜服务方向讨论") = first else { throw MeetingAutoTitleError.invalidResponse }
+    guard case .saved("品牌营销｜服务方向讨论") = first else { throw MeetingAutoTitleError.invalidResponse }
     guard let saved = try MeetingDisplayInfoStore.load(in: folder), saved.provenance == .automatic,
           saved.state == .ready, saved.session == session, saved.cacheID == id,
           saved.sourceDigest == MeetingTitleInput(events: events)?.digest else { throw MeetingAutoTitleError.invalidSidecar }
@@ -245,11 +243,11 @@ func meetingAutoTitleFixture() async throws {
                                            events: events, provider: mock, cloudTextAllowed: true, finalized: true)
     guard case .unchanged = duplicate, await counter.count() == 1 else { throw MeetingAutoTitleError.invalidResponse }
 
-    // Verify compact title formatting, ASCII separator normalization, and
-    // rejection of provider output that is a sentence or list.
+    // The requested examples define the compact title shape. Normalize an
+    // ASCII separator, and reject provider output that is a sentence or list.
     let formatEvents: [[String: Any]] = [
         ["segment_id": "format", "start": 0.0,
-         "text": "示例产品规划团队讨论两种流程对比，确认试用边界和四周验证安排。"]
+         "text": "品牌营销团队讨论客户投放，比较青浦奥莱选点与广佛效果验证，并确认采购边界和四周试投安排。"]
     ]
     func makeFormatFolder() throws -> URL {
         let formatID = UUID().uuidString, formatFolder = root.appendingPathComponent(formatID)
@@ -260,46 +258,30 @@ func meetingAutoTitleFixture() async throws {
     }
     let formatFolder = try makeFormatFolder()
     let formatID = formatFolder.lastPathComponent
-    let asciiProvider = FixtureTitleProvider(titleText: "试用方案 | 两种流程对比与四周验证", delayNanoseconds: 0)
+    let asciiProvider = FixtureTitleProvider(titleText: "客户投放 | 青浦奥莱选点与广佛效果验证", delayNanoseconds: 0)
     let formatted = await service.generate(cacheID: formatID, session: session, directory: formatFolder,
                                             events: formatEvents, provider: asciiProvider, cloudTextAllowed: true)
-    guard case .saved("试用方案｜两种流程对比与四周验证") = formatted else {
+    guard case .saved("客户投放｜青浦奥莱选点与广佛效果验证") = formatted else {
         throw MeetingAutoTitleError.invalidResponse
     }
     let groundedFolder=try makeFormatFolder(),groundedID=groundedFolder.lastPathComponent
     try JSONSerialization.data(withJSONObject:["session":session,"cache_id":groundedID,
-        "asr_vocabulary_confirmed":true,"asr_vocabulary":["示例平台":2]],options:[.sortedKeys])
+        "asr_vocabulary_confirmed":true,"asr_vocabulary":["简知":2]],options:[.sortedKeys])
         .write(to:groundedFolder.appendingPathComponent("meeting.json"),options:.atomic)
     let groundedEvents:[[String:Any]]=[["segment_id":"grounded","start":0.0,
-        "text":"这次会议聊到示例平台的功能，也有人说我最近在跑步，随后还会比较不同流程的使用体验。"]]
-    guard try ASRTermVocabulary.confirmedVocabulary(in:groundedFolder,session:session)==["示例平台"] else {
-        throw Failure(code:"title_grounded_term_fixture")
-    }
-    guard let groundedInput=MeetingTitleInput(events:groundedEvents,termHints:["示例平台"]),
-          groundedInput.transcript.contains("原文中出现的识别词") else {
-        throw Failure(code:"title_grounded_input_fixture")
-    }
+        "text":"这次会议聊到简知这个中老年教育平台的课程，也有人说我最近在减脂。"]]
     let grounded=await service.generate(cacheID:groundedID,session:session,directory:groundedFolder,
-        events:groundedEvents,provider:GroundedTermTitleProvider(output:"示例平台｜平台试投"),cloudTextAllowed:true)
-    guard case .saved("示例平台｜平台试投")=grounded,
-          MeetingTitleInput(events:groundedEvents,termHints:["示例平台"])?.digest != MeetingTitleInput(events:groundedEvents)?.digest else {
+        events:groundedEvents,provider:GroundedTermTitleProvider(output:"简知｜平台试投"),cloudTextAllowed:true)
+    guard case .saved("简知｜平台试投")=grounded else {
         throw MeetingAutoTitleError.invalidResponse
     }
-    // Unrelated saved ASR terms must not enter the title prompt or its digest.
-    let syntheticEvents:[[String:Any]]=[["segment_id":"synthetic-call","start":28.0,"final":true,
-        "text":"我们准备比较两个示例产品的使用体验，再听取一线同事的反馈。"]]
-    let relevantHints=["示例产品甲","示例产品乙"]
-    let pollutedHints=relevantHints+["示例设备","虚构品牌","示例测试"]
-    guard let actual=MeetingTitleInput(events:syntheticEvents,termHints:pollutedHints),
-          actual.digest==MeetingTitleInput(events:syntheticEvents,termHints:relevantHints)?.digest,
-          !actual.transcript.contains("虚构品牌"),!actual.transcript.contains("示例测试"),
-          actual.transcript.contains("示例产品"),
-          MeetingTitleInput(events:syntheticEvents,termHints:["示例设备"])?.digest==MeetingTitleInput(events:syntheticEvents)?.digest else {
-        throw Failure(code:"title_shared_vocabulary_must_not_invent_meeting_topics")
-    }
+    // Regression from the 2026-10-20 call: unrelated global ASR terms must
+    // neither enter the title prompt nor change its digest.
+    let reportedEvents:[[String:Any]]=[["segment_id":"reported-call","start":28.0,"final":true,
+        "text":"我们还是想找到，比方说千问办公和codex这些产品的差异化。所以我就想听一听你在一线的感受是怎么样子。"]]
     let invalidFolder = try makeFormatFolder()
     let invalidID = invalidFolder.lastPathComponent
-    let invalidProvider = FixtureTitleProvider(titleText: "试用方案讨论两种流程对比与四周验证。", delayNanoseconds: 0)
+    let invalidProvider = FixtureTitleProvider(titleText: "客户投放讨论青浦奥莱选点与广佛效果验证。", delayNanoseconds: 0)
     let invalid = await service.generate(cacheID: invalidID, session: session, directory: invalidFolder,
                                          events: formatEvents, provider: invalidProvider, cloudTextAllowed: true)
     guard case .failed = invalid,
@@ -311,7 +293,7 @@ func meetingAutoTitleFixture() async throws {
     // Stopped transcription can add a final sentence immediately after the pause.
     // It gets one updated title despite the ordinary 60-second pause cooldown.
     let finalEvents = events + [["segment_id": "c", "start": 10.0,
-                                 "text": "示例产品规划最终确定先做可用性测试，再核对验收范围和安排。"]]
+                                 "text": "品牌营销最终确定先做客户访谈，再核对服务范围和报价。"]]
     let refreshed = await service.generate(cacheID: id, session: session, directory: folder,
                                            events: finalEvents, provider: mock, cloudTextAllowed: true, refresh:true)
     guard case .saved = refreshed,
@@ -321,11 +303,11 @@ func meetingAutoTitleFixture() async throws {
                                                events: finalEvents, provider: mock, cloudTextAllowed: true, finalized: true)
     guard case .unchanged = repeatedFinal, await counter.count() == 2 else { throw MeetingAutoTitleError.invalidResponse }
 
-    try MeetingDisplayInfoStore.saveManual("人工确认：产品试用范围", in: folder)
+    try MeetingDisplayInfoStore.saveManual("人工确认：客户需求与课程", in: folder)
     let manual = await service.generate(cacheID: id, session: session, directory: folder,
                                         events: finalEvents, provider: mock, cloudTextAllowed: true, finalized: true)
     guard case .manual = manual,
-          try MeetingDisplayInfoStore.load(in: folder)?.title == "人工确认：产品试用范围",
+          try MeetingDisplayInfoStore.load(in: folder)?.title == "人工确认：客户需求与课程",
           await counter.count() == 2 else {
         throw MeetingAutoTitleError.invalidResponse
     }
@@ -337,7 +319,7 @@ func meetingAutoTitleFixture() async throws {
     try JSONSerialization.data(withJSONObject: ["session": session, "cache_id": nextID])
         .write(to: nextFolder.appendingPathComponent("meeting.json"))
     let pendingCounter = FixtureTitleCallCounter()
-    let delayed = FixtureTitleProvider(titleText: "示例产品规划｜迟到标题不应写入", delayNanoseconds: 200_000_000, counter: pendingCounter)
+    let delayed = FixtureTitleProvider(titleText: "品牌营销｜迟到标题不应写入", delayNanoseconds: 200_000_000, counter: pendingCounter)
     let pending = Task { await service.generate(cacheID: nextID, session: session, directory: nextFolder,
                                                 events: events, provider: delayed, cloudTextAllowed: true) }
     try await Task.sleep(nanoseconds: 50_000_000)
@@ -374,12 +356,12 @@ func meetingAutoTitleFixture() async throws {
     }
     let longEvents: [[String: Any]] = [
         ["segment_id": "long", "start": 0.0,
-         "text": "开始讨论示例产品规划。" + String(repeating: "中段分析操作体验和试用反馈。", count: 5000) + "末尾决定复核验收安排。"]
+         "text": "开始讨论品牌营销。" + String(repeating: "中段分析客户与课程。", count: 5000) + "末尾决定复核报价。"]
     ]
     guard let sampled = MeetingTitleInput(events: longEvents),
           sampled.transcript.count <= 30_000,
-          sampled.transcript.contains("开始讨论示例产品规划"),
-          sampled.transcript.contains("末尾决定复核验收安排") else {
+          sampled.transcript.contains("开始讨论品牌营销"),
+          sampled.transcript.contains("末尾决定复核报价") else {
         throw MeetingAutoTitleError.invalidResponse
     }
 
@@ -391,7 +373,7 @@ func meetingAutoTitleFixture() async throws {
     try JSONSerialization.data(withJSONObject: ["session": session, "cache_id": abandonedID])
         .write(to: abandonedFolder.appendingPathComponent("meeting.json"))
     let abandonedCounter = FixtureTitleCallCounter()
-    let slow = FixtureTitleProvider(titleText: "示例产品规划｜恢复后最终标题", delayNanoseconds: 200_000_000,
+    let slow = FixtureTitleProvider(titleText: "品牌营销｜恢复后最终标题", delayNanoseconds: 200_000_000,
                                     counter: abandonedCounter)
     let abandoned = Task { await service.generate(cacheID: abandonedID, session: session,
                                                   directory: abandonedFolder, events: events,
@@ -403,7 +385,7 @@ func meetingAutoTitleFixture() async throws {
                                            directory: abandonedFolder, events: events,
                                            provider: slow, cloudTextAllowed: true, finalized: true,
                                            requestRevision: 2)
-    guard case .saved("示例产品规划｜恢复后最终标题") = recovered,
+    guard case .saved("品牌营销｜恢复后最终标题") = recovered,
           case .stale = await abandoned.value,
           await abandonedCounter.count() == 2,
           try MeetingDisplayInfoStore.load(in: abandonedFolder)?.state == .ready else {
@@ -425,20 +407,19 @@ func meetingAutoTitleFixture() async throws {
         throw MeetingAutoTitleError.invalidResponse
     }
 
-    // Synthetic successive topics prove changed transcripts remain eligible
-    // after the former lifetime seven-call ceiling.
+    // Synthetic successive topics preserve the nine-update regression boundary.
     let progressFolder=try makeFormatFolder(),progressID=progressFolder.lastPathComponent
-    let progressProvider=SequenceTitleProvider("示例产品｜定位与验收安排")
+    let progressProvider=SequenceTitleProvider("示例项目推进｜产品命名与用户调研")
     let passages=[
-        "大家先过一下这几个测试项，当前的样例项目进展到哪里了？",
-        "这轮先选一个小范围进行试用，再与另一个相近场景做比较。",
-        "目标是先验证关键流程，不要把试用范围扩得太大。",
-        "目前核心页面已经完成，接下来要检查首次使用路径是否清楚。",
-        "已有一部分反馈，今天补充了新样本，后续统一整理问题。",
-        "产品名称先按当前版本记录，避免测试资料里出现不同写法。",
-        "需要了解新用户和熟悉用户在操作上的主要差异。",
-        "下一轮比较两种引导方式，并记录每一步的完成情况。",
-        "范围确认后再决定是否扩大测试，先把主要问题解决。"
+        "我们先讨论示例项目的安排。请大家核对本周目标，列出还需要确认的材料，今天先把讨论范围说明清楚。",
+        "试点范围暂定为一个示例区域。我们会比较两组匿名数据，记录条件差异，再判断是否需要扩大范围。",
+        "预算需要单独确认。先把可选方案和所需资源列出来，今天不承诺具体金额，等负责人核对后再讨论。",
+        "接下来讨论用户调研。问卷初稿已经形成，但样本覆盖还不够，团队需要确认哪些问题可以继续简化。",
+        "调研进度目前完成一半。下一轮先检查重复提交和缺失字段，确保数据可靠，再汇总不同意见。",
+        "产品命名还没有定稿。大家提供了几种写法，需要对照正式材料核验，确认前统一使用示例产品这个名称。",
+        "买方和卖方可能关注不同的问题。我们计划分别整理需求，不把两类反馈混在一起得出总体结论。",
+        "渠道比较先使用公开数据。对每个渠道记录相同的指标和时间范围，避免用不同口径比较结果。",
+        "最后讨论品牌呈现与日常触达。两者的目标和受众不同，后续方案应分别说明依据，并保留检验方法。"
     ]
     var progress:[[String:Any]]=[]
     for (index,text) in passages.enumerated() {
@@ -457,14 +438,14 @@ func meetingAutoTitleFixture() async throws {
     var capped=try JSONSerialization.jsonObject(with:Data(contentsOf:progressFile)) as! [String:Any]
     capped["attempts"]=7
     try JSONSerialization.data(withJSONObject:capped).write(to:progressFile,options:.atomic)
-    progress.append(["segment_id":"closing","start":1674.75,"text":"还有，哈哈，你你那个测试负责人计划怎么怎么，我们需要怎么推进吗？","final":true])
+    progress.append(["segment_id":"closing","start":1674.75,"text":"还有一个示例事项需要确认，请负责同事在下次讨论前补充公开材料。","final":true])
     let uncapped=await service.generate(cacheID:progressID,session:session,directory:progressFolder,
         events:progress,provider:progressProvider,cloudTextAllowed:true,refresh:true)
     guard case .saved=uncapped,try MeetingDisplayInfoStore.load(in:progressFolder)?.attempts==1 else{
         throw Failure(code:"title_legacy_lifetime_cap_recovers_on_new_text")
     }
     let failureFolder=try makeFormatFolder(),failureID=failureFolder.lastPathComponent
-    let failingProvider=SequenceTitleProvider("示例产品｜定位与验收安排",failures:10)
+    let failingProvider=SequenceTitleProvider("示例项目推进｜产品命名与用户调研",failures:10)
     for _ in 0..<5 {
         _=await service.generate(cacheID:failureID,session:session,directory:failureFolder,
             events:progress,provider:failingProvider,cloudTextAllowed:true,finalized:true)

@@ -148,7 +148,7 @@ class ScopeRequestTests(unittest.TestCase):
         from gui_worker import validate_request
         r={'bundle':'fake.browser','key':'fake','user_launch_confirmed':True,'source_scope_confirmed':True}
         with self.assertRaises(ValueError):validate_request(r,0,480)
-        r['bundle']='com.zaichang.app'
+        r['bundle']='com.joesang.meeting-assistant'
         with self.assertRaises(ValueError):validate_request(r,0,0)
         r['bundle']='fake.browser';r['mic_enabled']='false'
         with self.assertRaises(ValueError):validate_request(r,0,0)

@@ -125,6 +125,23 @@ class CoarseAudioTests(unittest.TestCase):
         self.assertEqual(body["model"], coarse.MODEL)
         self.assertEqual(body["messages"][1]["content"], [{"type": "text", "text": "text-only prompt"}])
 
+    def test_transport_errors_preserve_safe_failure_category(self):
+        import socket
+        import ssl
+        import urllib.error
+        errors = [(TimeoutError("private details"), "provider_timeout"),
+                  (socket.gaierror(-2, "private hostname"), "provider_dns_unavailable"),
+                  (ssl.SSLError("private certificate"), "provider_tls_unavailable"),
+                  (ConnectionResetError("private endpoint"), "provider_connection_unavailable")]
+        for reason, expected in errors:
+            opener = Mock()
+            opener.open.side_effect = urllib.error.URLError(reason)
+            with self.assertRaises(coarse.CoarseAudioError) as caught:
+                coarse._http_call("synthetic-key", b"wave", "prompt", 8192, opener=opener)
+            self.assertEqual(caught.exception.code, expected)
+            self.assertNotIn("private", str(caught.exception))
+            self.assertIsNone(caught.exception.diagnostic)
+
     def test_default_http_opener_retains_hostname_and_certificate_validation(self):
         payload = json.dumps({"choices": [{"message": {"content": json.dumps(self.result()[0])}}]}).encode()
         with patch.object(coarse.urllib.request, "build_opener", return_value=FakeOpener(payload)) as factory:
@@ -235,6 +252,62 @@ class CoarseAudioTests(unittest.TestCase):
         ledger_after = json.loads((self.cache / coarse.PROGRESS_NAME).read_text())
         self.assertEqual(ledger_after["reserved_yuan"], reserved_before)
 
+
+    def test_restart_retries_only_unknown_window_and_preserves_22_completed(self):
+        # Match the reported durable state: 22 complete + 1 uncertain request.
+        # Small independent tracks exercise the production window/ledger path.
+        units = [{"id": f"u{i}", "source_id": f"app-{i:016x}-g1",
+                  "text": "明天再确认。", "start": 0.0, "end": 1.0,
+                  "speaker_key": "p1", "speaker_locked": True} for i in range(23)]
+        request = self.request(units=units)
+        request["request"]["audio_tracks"] = [
+            {"source_id": u["source_id"], "origin_seconds": 0,
+             "chunks": [str(self.pcm)], "written_bytes": self.pcm.stat().st_size}
+            for u in units]
+        calls = []
+
+        def interrupted(_key, _audio, prompt, _max_tokens, **_kwargs):
+            ids = json.loads(prompt.split("target_ids=", 1)[1].split("\n", 1)[0])
+            calls.append(ids)
+            if ids == ["u22"]:
+                raise coarse.CoarseAudioError("provider_connection_unavailable")
+            return {"units": [{"unit_id": uid, "text": "明天再确认。"} for uid in ids]}, {}
+
+        with self.assertRaisesRegex(coarse.CoarseAudioError, "provider_connection_unavailable"):
+            coarse._process(request, call=interrupted)
+        path = self.cache / coarse.PROGRESS_NAME
+        failed = json.loads(path.read_text())
+        complete = {key: value for key, value in failed["segments"].items()
+                    if value["status"] == "complete"}
+        self.assertEqual(len(complete), 22)
+        self.assertEqual(sum(s["status"] == "reserved_unknown" for s in failed["segments"].values()), 1)
+        self.assertEqual(failed["status"]["stage"], "failed")
+        self.assertEqual(failed["status"]["failed_stage"], "audio")
+        initial_calls = len(calls)
+        with self.assertRaisesRegex(coarse.CoarseAudioError, "previous_attempt_unknown"):
+            coarse._process(request, call=interrupted)
+        self.assertEqual(len(calls), initial_calls)
+        reserved_before = json.loads(path.read_text())["reserved_yuan"]
+        request["request"]["trigger"] = "manual_retry"
+
+        def recovered(_key, _audio, prompt, _max_tokens, **_kwargs):
+            ids = json.loads(prompt.split("target_ids=", 1)[1].split("\n", 1)[0])
+            self.assertEqual(ids, ["u22"])
+            calls.append(ids)
+            return {"units": [{"unit_id": "u22", "text": "明天再确认。"}]}, {}
+
+        result = coarse._process(request, call=recovered)
+        saved = json.loads(path.read_text())
+        self.assertEqual(result["attempted_calls"], 1)
+        self.assertEqual(len(calls), initial_calls + 1)
+        self.assertEqual(len(result["records"]), 23)
+        self.assertEqual(saved["status"]["stage"], "complete")
+        self.assertGreater(saved["reserved_yuan"], reserved_before)
+        for key, value in complete.items():
+            self.assertEqual(saved["segments"][key], value)
+        self.assertEqual(coarse._process(request, call=recovered)["attempted_calls"], 0)
+        self.assertEqual(len(calls), initial_calls + 1)
+
     def test_invalid_model_coverage_or_new_person_key_is_rejected(self):
         for model_result in [
             {"units": []},
@@ -267,7 +340,7 @@ class CoarseAudioTests(unittest.TestCase):
         context_units = parsed["units"]
         audio = coarse._read_pcm(track.chunks, 0, track.total_bytes)
         audio_hash, input_hash = coarse._segment_identity(
-            track, audio, context_units, parsed["roster"], parsed["term_hints"], window_start, window_end)
+            track, audio, context_units, parsed["roster"], window_start, window_end)
         segment_key = f"{track.source_id}:0:{audio_hash[:16]}"
         ledger = coarse._load_ledger(self.cache / coarse.PROGRESS_NAME,
                                      parsed["session"], parsed["cache_id"])
@@ -620,31 +693,57 @@ class CoarseAudioTests(unittest.TestCase):
         self.assertEqual([row["unit_id"] for row in second["records"]], ["u1", "u2"])
         self.assertEqual(call.call_count, 1)
 
-    def test_confirmed_term_hints_ground_proper_nouns_without_replacing_ordinary_homophones(self):
-        request = self.request(units=[{"unit_id": "u1", "source_id": "mic", "text": "我最近在减脂。",
-                                       "start": 0, "end": 1, "manual": False}])
-        request["request"]["term_hints"] = ["简知"]
-        prompts = []
 
-        def preserve_original(_key, _audio, prompt, _tokens, **_kwargs):
-            prompts.append(prompt)
-            return {"units": [{"unit_id": "u1", "text": "我最近在减脂。"}]}, {}
 
-        result = coarse._process(request, call=preserve_original)
-        self.assertIn('term_hints=["简知"]', prompts[0])
-        self.assertIn("不能机械替换", prompts[0])
-        self.assertEqual(result["records"][0]["text"], "我最近在减脂。")
+    def test_exact_mapping_prompt_and_name_change_audit(self):
+        rows=[dict(term='惊石',aliases=[],misheard=['金石'])]
+        old=[dict(id='name',text='金石说嗯嗯先这样。'),dict(id='filler',text='嗯嗯先这样。')]
+        new=[dict(unit_id='name',text='惊石说先这样。'),dict(unit_id='filler',text='先这样。')]
+        self.assertEqual(coarse.name_changes(old,new,rows),[dict(unit_id='name',old='金石',new='惊石')])
+        self.assertEqual(coarse.name_changes(old,old,rows),[])
+        prompt=coarse._prompt('mic',[],[],[],0, ['惊石；常被误识为金石'])
+        self.assertIn('精确出现',prompt)
+        self.assertIn('即使读音相近也保留原文',prompt)
+        self.assertNotIn('term_hints=',prompt)
 
-    def test_changed_confirmed_term_hints_invalidate_segment_cache(self):
-        request = self.request()
-        request["request"]["term_hints"] = ["简知"]
-        call = Mock(return_value=self.result())
-        coarse._process(request, call=call)
-        changed = self.request()
-        changed["request"]["term_hints"] = ["减脂"]
-        result = coarse._process(changed, call=call)
-        self.assertEqual(call.call_count, 2)
-        self.assertEqual(result["reused_segments"], 0)
+    def test_receipt_audits_registered_names_and_rejects_unregistered_name_swap(self):
+        rows=[dict(term='惊石',aliases=[],misheard=['金石'],layer='project'),
+              dict(term='晶视',aliases=[],misheard=[],layer='people')]
+        request=self.request(units=[dict(id='name',source_id='mic',text='金石说写到PPT里面。',start=0,end=1,speaker_locked=True)])
+        call=Mock(return_value=({'units':[dict(unit_id='name',text='惊石说写到PPT里面。')]},{}))
+        with patch.object(coarse,'_cleanup_terms',return_value=rows),patch.object(coarse,'_name_rows',return_value=rows):
+            result=coarse._process(request,call=call)
+            reused=coarse._process(request,call=call)
+        self.assertEqual(result['name_changes'],[dict(unit_id='name',old='金石',new='惊石')])
+        self.assertEqual(reused['name_changes'],result['name_changes'])
+        self.assertEqual(call.call_count,1)
+        unit=dict(text='写到PPT里面给惊石啊，水水啊，他们都在场。',manual=False,approximate_window=False)
+        self.assertEqual(coarse._safe_text(unit,unit['text'].replace('惊石','晶视'),rows),unit['text'])
+        alias=[dict(term='张三',aliases=['小张'],misheard=[])]
+        unit['text']='小张说写到PPT里面。'
+        self.assertEqual(coarse._safe_text(unit,unit['text'].replace('小张','张三'),alias),unit['text'])
+
+    def test_previous_prompt_with_nonempty_old_hints_never_calls_model(self):
+        request=self.request(units=[dict(id='name',source_id='mic',text='写到PPT里面给晶视啊，水水啊，他们都在场。',start=0,end=1,speaker_locked=True)])
+        parsed=coarse._parse_request(request)
+        unit=parsed['units'][0]
+        # Real previous hash shape, including the now-removed per-meeting hints.
+        for revision in ['term-guide-5','clear-transcript-1']:
+            state=dict(unit_id=unit['id'],source_id=unit['source_id'],text_sha256=unit['original_text_sha256'],
+                       start=round(unit['start'],3),end=round(unit['end'],3),approximate_window=unit['approximate_window'],
+                       model=coarse.MODEL,prompt_revision=revision,term_hints=['晶视'])
+            if revision=='clear-transcript-1':state['matched_terms']=[]
+            old_hash=coarse.hashlib.sha256(json.dumps(state,ensure_ascii=False,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+            ledger=coarse._load_ledger(self.cache/coarse.PROGRESS_NAME,parsed['session'],parsed['cache_id'])
+            ledger['unit_results']={unit['id']:dict(input_hash=old_hash,clean_policy=revision,
+                result=dict(unit_id=unit['id'],original_text_sha256=unit['original_text_sha256'],text=unit['text']))}
+            coarse._save_ledger(self.cache/coarse.PROGRESS_NAME,ledger)
+            call=Mock(side_effect=AssertionError('must reuse old cleanup'))
+            with patch.object(coarse,'_cleanup_terms',return_value=[]):
+                first=coarse._process(request,call=call);second=coarse._process(request,call=call)
+            call.assert_not_called()
+            self.assertEqual(first['records'],second['records'])
+            self.assertEqual(first['attempted_calls'],0)
 
     def test_semantic_stage_assigns_missing_speaker_without_changing_text(self):
         request = self.request(units=[
@@ -846,34 +945,32 @@ class CoarseAudioTests(unittest.TestCase):
         self.assertEqual(second["reused_segments"], 1)
 
     def test_clear_text_names_stutters_and_fact_boundaries(self):
-        terms = [{"term": "合成姓名甲", "aliases": [], "misheard": ["合成姓名甲甲"]}]
+        terms = [{"term": "小张", "aliases": [], "misheard": ["小小章"]}]
         cases = [
-            ("合成姓名甲甲", "合成姓名甲", "合成姓名甲"),
-            ("合成姓名甲甲", "合成姓名乙", "合成姓名甲甲"),
+            ("小小章", "小张", "小张"),
+            ("小小章", "小李", "小小章"),
             ("我我觉得", "我觉得", "我觉得"),
             ("嗯，我觉得", "我觉得", "我觉得"),
             ("不不可以", "不可以", "不不可以"),
             ("不是不是", "不是", "不是不是"),
             ("不是不可以", "可以", "不是不可以"),
-            ("这次可能需要合成姓名甲来确认一下。", "这次需要合成姓名甲来确认一下。", "这次可能需要合成姓名甲来确认一下。"),
+            ("这次可能需要小张来确认一下。", "这次需要小张来确认一下。", "这次可能需要小张来确认一下。"),
             ("如果明天确认我们就开始。", "明天确认我们就开始。", "如果明天确认我们就开始。"),
-            ("这次需要合成姓名甲甲来确认一下。", "这次需要合成姓名甲来确认一下。", "这次需要合成姓名甲来确认一下。"),
-            ("这次需要合成姓名甲来确认一下。", "这次需要合成姓名乙来确认一下。", "这次需要合成姓名甲来确认一下。"),
+            ("这次需要小小章来确认一下。", "这次需要小张来确认一下。", "这次需要小张来确认一下。"),
+            ("这次需要小张来确认一下。", "这次需要小李来确认一下。", "这次需要小张来确认一下。"),
         ]
         for original, proposed, expected in cases:
             with self.subTest(original=original):
                 unit = {"text": original, "manual": False, "approximate_window": False}
                 self.assertEqual(coarse._safe_text(unit, proposed, terms), expected)
         unit = {"text": "CODER", "manual": False, "approximate_window": False}
-        self.assertEqual(coarse._safe_text(unit, "Example Product", [{"term": "Example Product", "misheard": ["coder"]}]), "Example Product")
-        # A confirmed spoken alias can resolve to its canonical name, while a
-        # different unverified name remains unchanged.
-        unit["text"] = "甲同鞋"
-        person_terms = [{"term": "合成姓名甲", "aliases": ["甲同学"], "misheard": ["甲同鞋"]}]
-        self.assertEqual(coarse._safe_text(unit, "合成姓名甲", person_terms), "合成姓名甲")
-        self.assertEqual(coarse._safe_text(unit, "合成姓名乙", person_terms), "甲同鞋")
-        unit["text"] = "甲同学"
-        self.assertEqual(coarse._safe_text(unit, "合成姓名甲", person_terms), "合成姓名甲")
+        self.assertEqual(coarse._safe_text(unit, "Qoder", [{"term": "Qoder", "misheard": ["coder"]}]), "CODER")
+        # Synthetic shared person table uses 张三 as the canonical name and
+        # 小张 as a confirmed spoken alias; preserve the confirmed-alias versus mishearing distinction.
+        unit["text"] = "小小章"
+        person_terms = [{"term": "张三", "aliases": ["小张", "张总"], "misheard": ["小章", "肖章"]}]
+        self.assertEqual(coarse._safe_text(unit, "小张", person_terms), "小小章")
+        self.assertEqual(coarse._safe_text(unit, "小李", person_terms), "小小章")
 
     def test_cleanup_rejects_neighbouring_turn_expansion_and_unrelated_replacement(self):
         original = "我们先确认方案再讨论时间。"
@@ -885,31 +982,31 @@ class CoarseAudioTests(unittest.TestCase):
                          "我们先确认方案，然后再讨论时间。")
 
     def test_legacy_cleanup_reuses_history_and_only_revisits_known_wrong_name(self):
-        terms = [{"term": "顾问甲", "aliases": [], "misheard": ["顾问甲甲"]}]
-        units = [{"id": "name", "source_id": "mic", "text": "顾问甲甲", "start": 0, "end": .5, "speaker_locked": True},
+        terms = [{"term": "小张", "aliases": [], "misheard": ["小小章"]}]
+        units = [{"id": "name", "source_id": "mic", "text": "小小章", "start": 0, "end": .5, "speaker_locked": True},
                  {"id": "other", "source_id": "mic", "text": "北京学校基本上都在海淀。", "start": .5, "end": 1, "speaker_locked": True}]
         request = self.request(units=units)
         with patch.object(coarse, "_cleanup_terms", return_value=terms):
             parsed = coarse._parse_request(request)
             ledger = coarse._load_ledger(self.cache / coarse.PROGRESS_NAME, parsed["session"], parsed["cache_id"])
             ledger["unit_results"] = {u["id"]: {
-                "input_hash": coarse._unit_cache_identity(u, parsed["term_hints"], legacy=True),
+                "input_hash": coarse._unit_cache_identity(u, legacy=True),
                 "result": {"unit_id": u["id"], "text": u["text"]}} for u in parsed["units"]}
             coarse._save_ledger(self.cache / coarse.PROGRESS_NAME, ledger)
             def answer(_key, _audio, prompt, _tokens, **_kwargs):
                 self.assertEqual(json.loads(prompt.split("target_ids=", 1)[1].split("\n", 1)[0]), ["name"])
-                return {"units": [{"unit_id": "name", "text": "顾问甲"}]}, {}
+                return {"units": [{"unit_id": "name", "text": "小张"}]}, {}
             call = Mock(side_effect=answer)
             first = coarse._process(request, call=call)
             second = coarse._process(request, call=call)
-            self.assertEqual([r["text"] for r in first["records"]], ["顾问甲", units[1]["text"]])
+            self.assertEqual([r["text"] for r in first["records"]], ["小张", units[1]["text"]])
             self.assertEqual(first["records"], second["records"])
             self.assertEqual(call.call_count, 1)
 
     def test_new_unrelated_term_does_not_invalidate_cleaned_units(self):
-        request = self.request(units=[{"id": "name", "source_id": "mic", "text": "顾问甲甲", "start": 0, "end": 1, "speaker_locked": True}])
-        call = Mock(return_value=({"units": [{"unit_id": "name", "text": "顾问甲"}]}, {}))
-        terms = [{"term": "顾问甲", "aliases": [], "misheard": ["顾问甲甲"]}]
+        request = self.request(units=[{"id": "name", "source_id": "mic", "text": "小小章", "start": 0, "end": 1, "speaker_locked": True}])
+        call = Mock(return_value=({"units": [{"unit_id": "name", "text": "小张"}]}, {}))
+        terms = [{"term": "小张", "aliases": [], "misheard": ["小小章"]}]
         with patch.object(coarse, "_cleanup_terms", return_value=terms):
             coarse._process(request, call=call)
         with patch.object(coarse, "_cleanup_terms", return_value=terms + [{"term": "在场", "misheard": ["再场"]}]):
