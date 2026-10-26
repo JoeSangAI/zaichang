@@ -1,6 +1,9 @@
 import Foundation
 
 func sourcePipelineFixture(directory:URL) async throws->[String:Any] {
+    // Keep this run independent of historical synthetic sessions, while the
+    // command entry point continues to enforce its fixed offline-only root.
+    let directory=directory.appendingPathComponent(UUID().uuidString)
     try FileManager.default.createDirectory(at:directory,withIntermediateDirectories:true)
     var checks=processAudioSourceSyntheticChecks()+sourceCaptureSessionSyntheticChecks()
     guard checks.isEmpty else {throw Failure(code:checks.joined(separator:","))}

@@ -44,6 +44,10 @@ import AppKit
     let events=try meeting.events();let metadata=try meeting.metadata()
     guard let session=metadata["session"] as? String else{throw Failure(code:"saved_review_session")}
     try FileManager.default.createDirectory(at:directory,withIntermediateDirectories:true,attributes:[.posixPermissions:0o700])
+    if let input=MeetingTitleInput(events:events) {
+        try input.transcript.write(to:directory.appendingPathComponent("title-input.txt"),atomically:true,encoding:.utf8)
+        try JSONSerialization.data(withJSONObject:DashScopeMeetingTitleProvider.requestBody(transcript:input.transcript),options:[.sortedKeys]).write(to:directory.appendingPathComponent("title-request.json"),options:.atomic)
+    }
     _ = NSApplication.shared;NSApp.setActivationPolicy(.prohibited)
     let view=Delegate();view.previewRenderOnly=true;view.applicationDidFinishLaunching(Notification(name:NSApplication.didFinishLaunchingNotification))
     view.deferPresentation=true;view.activeSession=session;view.phase.phase = .stopped;view.absoluteTime=MeetingAbsoluteTime(metadata["absolute_clock"])
@@ -80,5 +84,6 @@ import AppKit
     }
     let review=SpeakerReviewIndex.build(session:session,turns:view.readingTurns(),names:view.naming)
     let people=review.people.map{["name":$0.title,"turns":$0.entries.count] as [String:Any]}
-    return ["people":people,"unassigned_review_turns":review.unassigned.count,"speaker_reconciliation_applied":events.filter{$0["speaker_reconciliation_applied"] as? Bool==true}.count,"type":"saved_speaker_review","cache_id":cacheID,"original_sentences":events.count,"evidence_runs":rowCount,"visible_turns":view.readingTurns().count,"known_turns":known,"overlap_turns":overlap,"speaker_change_turns":changes,"unknown_turns":unknown,"all_text_preserved":lossless,"export":output.path,"image":screenshot.path,"capture":false,"cloud":false,"keychain":false,"original_files_modified":false,"offscreen":true]
+    let context=try renderSavedUnassignedReview(owner:view,directory:directory)
+    return ["unassigned_context":context,"people":people,"unassigned_review_turns":review.unassigned.count,"simultaneous_review_turns":review.simultaneous.count,"speaker_reconciliation_applied":events.filter{$0["speaker_reconciliation_applied"] as? Bool==true}.count,"type":"saved_speaker_review","cache_id":cacheID,"original_sentences":events.count,"evidence_runs":rowCount,"visible_turns":view.readingTurns().count,"known_turns":known,"overlap_turns":overlap,"speaker_change_turns":changes,"unknown_turns":unknown,"all_text_preserved":lossless,"export":output.path,"image":screenshot.path,"capture":false,"cloud":false,"keychain":false,"original_files_modified":false,"offscreen":true]
 }

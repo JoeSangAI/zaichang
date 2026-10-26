@@ -521,10 +521,22 @@ final class MeetingNotesController: NSObject, NSTextViewDelegate {
         owner?.window.contentView?.layoutSubtreeIfNeeded(); owner?.resizeTranscript(); editor.fitAttachments()
     }
     func refreshTooltips() {
-        guard let storage = editor.textStorage else { return }
+        // Capture-status refreshes must not edit the notebook on every tick:
+        // even identical attribute writes invalidate text layout and the caret.
+        // Leave IME composition untouched; the next refresh can update its tip.
+        guard !editor.hasMarkedText(), let storage = editor.textStorage else { return }
+        var changes: [(NSRange, String)] = []
         storage.enumerateAttribute(.meetingNoteIdentity, in: NSRange(location: 0, length: storage.length)) { value, range, _ in
-            if let identity = value as? MeetingNoteIdentity { storage.addAttribute(.toolTip, value: tooltip(identity), range: range) }
+            guard let identity = value as? MeetingNoteIdentity else { return }
+            let expected = tooltip(identity)
+            storage.enumerateAttribute(.toolTip, in: range) { current, subrange, _ in
+                if current as? String != expected { changes.append((subrange, expected)) }
+            }
         }
+        guard !changes.isEmpty else { return }
+        storage.beginEditing()
+        for (range, tip) in changes { storage.addAttribute(.toolTip, value: tip, range: range) }
+        storage.endEditing()
     }
 }
 

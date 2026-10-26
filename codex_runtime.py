@@ -105,11 +105,11 @@ class CodexRuntime:
             await self._send({"id": message["id"], "result": result})
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception as exc:
             # Never silently grant permissions when no approval UI is attached.
             with contextlib.suppress(Exception):
                 await self._send({"id": message["id"], "error": {
-                    "code": -32000, "message": "approval_ui_unavailable"}})
+                    "code": -32000, "message": exc.code if isinstance(exc, RuntimeErrorCode) else "approval_ui_unavailable"}})
 
     async def _read(self):
         try:
@@ -197,11 +197,17 @@ class CodexRuntime:
         result = await self.request("thread/start", params)
         return result
 
-    async def start_turn(self, thread_id: str, text: str, *, output_schema: dict | None = None):
+    async def start_turn(self, thread_id: str, text: str, *, output_schema: dict | None = None,
+                         execution_directory: str | None = None):
         if thread_id in self.uncertain_starts:
             raise RuntimeErrorCode("turn_start_requires_reconciliation")
         params = {"threadId": thread_id, "input": [{"type": "text", "text": text}],
-                  "sandboxPolicy": {"type": "readOnly", "networkAccess": output_schema is None}}
+                  "approvalPolicy": "never", "sandboxPolicy": {"type": "readOnly", "networkAccess": output_schema is None}}
+        if execution_directory and output_schema is None:
+            params.update(cwd=execution_directory, approvalPolicy="on-request",
+                          approvalsReviewer="user",
+                          sandboxPolicy={"type": "workspaceWrite", "writableRoots": [execution_directory],
+                                         "networkAccess": True})
         if output_schema:
             params["outputSchema"] = output_schema
         return await self.request("turn/start", params)

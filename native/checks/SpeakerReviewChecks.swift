@@ -151,9 +151,9 @@ func speakerReviewChecks()->Int {
     var voiceOverlap=overlapItem;voiceOverlap["segment_id"]="voice-overlap-turn"
     voiceOverlapNames.register(segment:"voice-overlap-turn",item:voiceOverlap)
     check(voiceOverlapNames.displayName(speaker:voiceKey)?.origin == .voiceprint &&
-          SpeakerReviewIndex.build(session:"review-session",turns:[turn("voice-overlap-turn",[("voice-overlap-turn",voiceOverlap)])],names:voiceOverlapNames).unassigned.map(\.id)==["voice-overlap-turn"] &&
-          SpeakerReviewIndex.simultaneousTitle(item:voiceOverlap,session:"review-session",names:voiceOverlapNames)==nil,
-          "voiceprint candidates do not resolve overlap participants as confirmed people")
+          SpeakerReviewIndex.build(session:"review-session",turns:[turn("voice-overlap-turn",[("voice-overlap-turn",voiceOverlap)])],names:voiceOverlapNames).simultaneous.map(\.id)==["voice-overlap-turn"] &&
+          SpeakerReviewIndex.simultaneousTitle(item:voiceOverlap,session:"review-session",names:voiceOverlapNames)=="声音候选、乙 · 同时发言",
+          "whole-group voiceprint identity labels simultaneous participants without exclusive attribution")
     _=overlapKey0;_=overlapKey1
     checks+=10
 

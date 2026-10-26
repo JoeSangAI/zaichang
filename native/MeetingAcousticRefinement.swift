@@ -106,6 +106,10 @@ enum MeetingAcousticRefinement {
         let hashes=try meeting.transcriptHashes(),events=try meeting.events(includeAutomaticRefinement:false)
         guard events.count<=15000 else{throw Failure(code:"acoustic_capacity")}
         let protected=try SpeakerRefinementArtifact.protectedIDs(directory:directory,session:request.session,events:events)
+        // Human corrections are immutable output AND valid reference evidence.
+        // Reuse the shared alignment contract so a corrected slot replaces its
+        // old label as an anchor; a name without a resolvable slot is excluded.
+        let referenceEvents=try SpeakerRefinementArtifact.alignmentEvents(directory:directory,session:request.session,events:events)
         let nameFile=directory.appendingPathComponent("session-names.json")
         let nameSnapshot=(try? SpeakerRefinement.object(nameFile)) ?? [:]
         var confirmedNames:[SessionSpeakerKey:String]=[:]
@@ -122,7 +126,7 @@ enum MeetingAcousticRefinement {
             guard raised.reduce(0.0,{$0+Double($1)*Double($1)})/Double(raised.count)>=1e-6 else{return nil}
             return try? backend.extract(raised,qualityOK:true,overlap:false,inputKind:"consented_live_audio",allowShortWindow:true).values.map(Double.init)
         }
-        var units:[Unit]=[],anchorCandidates:[SessionSpeakerKey:[Anchor]]=[:],singleUtteranceCandidates:[SessionSpeakerKey:[Anchor]]=[:]
+        var units:[Unit]=[],referenceUnits:[Unit]=[],anchorCandidates:[SessionSpeakerKey:[Anchor]]=[:],singleUtteranceCandidates:[SessionSpeakerKey:[Anchor]]=[:]
         for (index,event) in events.enumerated() {
             guard let id=event["segment_id"] as? String,let source=event["source_id"] as? String else{continue}
             let raw=event["speaker_runs"] as? [[String:Any]] ?? [],rows=raw.isEmpty ? [event]:raw
@@ -132,10 +136,16 @@ enum MeetingAcousticRefinement {
                 let speaker=row["speaker"] as? [String:Any] ?? [:]
                 let rid=raw.isEmpty ? id:TranscriptTimeline.runID(parent:id,run:row)
                 units.append(Unit(parent:index,run:raw.isEmpty ? nil:run,id:rid,source:source,start:lo,end:hi,key:SessionSpeakerKey.from(scoped),text:row["text"] as? String ?? "",usable:usableVoice(event) && !protected.contains(id) && !protected.contains(rid),overlap:speaker["basis"] as? String=="multiple" || speaker["reason"] as? String=="overlap"))
+                let reference=referenceEvents[index],refRows=reference["speaker_runs"] as? [[String:Any]] ?? []
+                var ref=refRows.isEmpty ? reference:refRows[run]
+                for field in ["session","source_id","epoch"] {ref[field]=reference[field]}
+                let refSpeaker=ref["speaker"] as? [String:Any] ?? [:]
+                referenceUnits.append(Unit(parent:index,run:raw.isEmpty ? nil:run,id:rid,source:source,start:lo,end:hi,key:SessionSpeakerKey.from(ref),text:row["text"] as? String ?? "",usable:usableVoice(reference) && refSpeaker["contextual_fill"] as? Bool != true,overlap:refSpeaker["basis"] as? String=="multiple"))
             }
-            guard event["final"] as? Bool==true,event["end_time_known"] as? Bool==true,(event["quality_flags"] as? [String] ?? []).isEmpty else{continue}
-            let joined=TranscriptTimeline.speakerRuns(event)
-            for row in joined.isEmpty ? [event]:joined {
+            let reference=referenceEvents[index]
+            guard usableVoice(reference) else{continue}
+            let joined=TranscriptTimeline.speakerRuns(reference)
+            for row in joined.isEmpty ? [reference]:joined {
                 guard let key=SessionSpeakerKey.from(row),let lo=row["start"] as? Double,let hi=row["end"] as? Double,hi-lo>=1.5 else{continue}
                 let length=min(3,hi-lo),count=min(3,max(1,Int((hi-lo)/3)))
                 let middle=(lo+hi)/2,a=middle-length/2,b=middle+length/2
@@ -165,7 +175,11 @@ enum MeetingAcousticRefinement {
             }
             guard anchors.count>=2 else{continue}
             let medoid=anchors.max {a,b in anchors.filter{dot(a.vector,$0.vector)>=0.65}.count<anchors.filter{dot(b.vector,$0.vector)>=0.65}.count}!
-            let stable=anchors.filter{dot(medoid.vector,$0.vector)>=0.65}
+            // A human-labelled class may contain different phonemes, distance
+            // and room conditions. Do not re-cluster it as an unknown voice and
+            // discard the labelled examples outside its largest mode. Per-span
+            // matching still needs independent samples and the same margin.
+            let stable=confirmedNames[key] != nil ? anchors:anchors.filter{dot(medoid.vector,$0.vector)>=0.65}
             guard stable.count>=2,Double(stable.count)/Double(anchors.count)>=0.6 else{continue}
             profiles.append(Profile(key:key,anchors:stable,center:center(stable.map(\.vector))))
         }
@@ -178,7 +192,7 @@ enum MeetingAcousticRefinement {
             var proven:[Anchor]=[]
             for anchor in mic.anchors {
                 guard !proven.contains(where:{$0.start<anchor.end && $0.end>anchor.start}),dot(anchor.vector,remote.center)>=0.65 else{continue}
-                let rows=units.filter{$0.source==remote.key.source && $0.key==remote.key && $0.start<anchor.end && $0.end>anchor.start}.sorted{$0.start<$1.start}
+                let rows=referenceUnits.filter{$0.source==remote.key.source && $0.key==remote.key && $0.start<anchor.end && $0.end>anchor.start}.sorted{$0.start<$1.start}
                 let covered=rows.reduce(0.0){$0+max(0,min(anchor.end,$1.end)-max(anchor.start,$1.start))}
                 guard covered/(anchor.end-anchor.start)>=0.85 else{continue}
                 let a=Array(normalized(anchor.text)),b=normalized(rows.map(\.text).joined())
@@ -234,7 +248,7 @@ enum MeetingAcousticRefinement {
         }
         for i in groups.indices {
             let keys=Set(groups[i].map(\.key))
-            let candidates=units.filter{$0.usable && !$0.overlap && $0.key.map{keys.contains($0)}==true && $0.end-$0.start>=0.4 && $0.end-$0.start<1.5}
+            let candidates=referenceUnits.filter{$0.usable && !$0.overlap && $0.key.map{keys.contains($0)}==true && $0.end-$0.start>=0.4 && $0.end-$0.start<1.5}
             var additions:[Anchor]=[]
             for u in candidates.prefix(48) {
                 guard let v=vector(u.source,u.start,u.end) else{continue}
@@ -254,9 +268,9 @@ enum MeetingAcousticRefinement {
         // evidence and a clear competing-voice margin are both required.
         var shortProfiles:[Profile]=[]
         let profiled=Set(profiles.map(\.key))
-        let shortKeys=Set(units.compactMap{$0.usable && !$0.overlap && $0.end-$0.start>=0.4 && $0.end-$0.start<1.5 ? $0.key:nil})
+        let shortKeys=Set(referenceUnits.compactMap{$0.usable && !$0.overlap && $0.end-$0.start>=0.4 && $0.end-$0.start<1.5 ? $0.key:nil})
         for key in shortKeys.sorted(by:{($0.source+$0.epoch+$0.identity)<($1.source+$1.epoch+$1.identity)}) where !profiled.contains(key) && audioSourceCoreID(key.source) != "mic" {
-            let rows=units.filter{$0.usable && !$0.overlap && $0.key==key && $0.end-$0.start>=0.4 && $0.end-$0.start<1.5}
+            let rows=referenceUnits.filter{$0.usable && !$0.overlap && $0.key==key && $0.end-$0.start>=0.4 && $0.end-$0.start<1.5}
             var anchors:[Anchor]=[]
             for u in rows.prefix(24) {
                 if let v=vector(u.source,u.start,u.end) {anchors.append(Anchor(key:key,source:u.source,start:u.start,end:u.end,text:u.text,vector:v))}
@@ -363,14 +377,49 @@ enum MeetingAcousticRefinement {
                 return matches[j]!.key==m.key && overlap/(u.end-u.start)>=0.85 && sameWords(a,normalized(r.text))
             }) {echoes[i]=units[j].id}
         }
-        var projected=events,changed=Set<Int>(),resolved=0
+        // Recover word fragments from local speaker activity, including voices
+        // whose meeting-wide embedding profile could not be built. Only raw
+        // non-overlapping identities (including manual corrections) are anchors.
+        // Positive acoustic contradictions remain excluded. No propagation from
+        // another recovered fragment, no text-based guesses or channel naming.
+        func rawSpeaker(_ unit:Unit)->[String:Any] {
+            let row=unit.run.map{(events[unit.parent]["speaker_runs"] as! [[String:Any]])[$0]} ?? events[unit.parent]
+            return row["speaker"] as? [String:Any] ?? [:]
+        }
+        let continuityReferences=referenceUnits.enumerated().compactMap { i,u -> Unit? in
+            guard u.usable,!u.overlap,let key=u.key,u.end-u.start>=0.4,
+                  !(matches[i].map { match in
+                      !groups.contains(where:{$0[0].key==match.key && $0.contains(where:{$0.key==key})}) && match.key != key
+                  } ?? false) else{return nil}
+            return u
+        }
+        var localContinuity=Set<Int>()
+        for (i,u) in units.enumerated() where u.usable && u.key==nil && matches[i]==nil && u.end-u.start<=4 {
+            guard ["unknown","multiple"].contains(rawSpeaker(u)["basis"] as? String ?? "") else{continue}
+            let epoch=events[u.parent]["epoch"] as? String
+            let references=continuityReferences.filter{$0.key?.epoch==epoch && $0.source==u.source}
+            guard let key=try segmentation.continuation(source:u.source,start:u.start,end:u.end,references:references,audio:audio),
+                  !(direct[i].map{$0.key != key && $0.score>=0.62 && $0.margin>=0.18} ?? false) else{continue}
+            matches[i]=Match(key:key,score:0,margin:0);localContinuity.insert(i)
+            if u.overlap {soloVerified.insert(i)}
+        }
+        var projected=events,changed=Set<Int>(),resolved=0,unverifiedOriginalRetained=0
         for (i,u) in units.enumerated() where u.usable && (!u.overlap || soloVerified.contains(i)) {
             var speaker:[String:Any]
             if let m=matches[i] {
                 speaker=["basis":"meeting_reconciliation","source_id":u.source,"epoch":events[u.parent]["epoch"] ?? NSNull(),"identity_key":try JSONSerialization.jsonObject(with:JSONEncoder().encode(m.key)),"acoustic_verified":true]
                 if soloVerified.contains(i) {speaker["solo_verified"]=true}
                 if retainedSlots.contains(i) {speaker["slot_continuity"]=true}
+                if localContinuity.contains(i) {speaker["local_continuity"]=true}
                 if let echo=echoes[i] {speaker["echo_of"]=echo};resolved+=1
+            } else if u.key != nil {
+                // Missing a whole-meeting profile OR a short-window match is
+                // not evidence against the online diarizer. Keep its original
+                // anonymous identity, without claiming acoustic verification
+                // or borrowing another person's name. A positive independent
+                // match above can still correct it; overlap stays untouched.
+                unverifiedOriginalRetained+=1
+                continue
             } else {speaker=["basis":"unknown","reason":"acoustic_unresolved"]}
             if let run=u.run {var rows=projected[u.parent]["speaker_runs"] as! [[String:Any]];rows[run]["speaker"]=speaker;projected[u.parent]["speaker_runs"]=rows}
             else {projected[u.parent]["speaker"]=speaker}
@@ -380,7 +429,7 @@ enum MeetingAcousticRefinement {
             ["segment_id":events[index]["segment_id"]!,"original_sha256":try SpeakerRefinementArtifact.originalEventSHA256(events[index]),"speaker":projected[index]["speaker"] ?? events[index]["speaker"] ?? [:],"speaker_runs":projected[index]["speaker_runs"] ?? []]
         }
         guard try meeting.transcriptHashes()==hashes,try SpeakerRefinementArtifact.snapshotSHA256(directory:directory,cacheID:cacheID,includeAuxiliaryAudio:true)==snapshot else{throw Failure(code:"acoustic_source_changed")}
-        let result:[String:Any] = ["schema":1,"method":method,"model":model,"cache_id":cacheID,"session":request.session,"source_sha256":hashes,"snapshot_sha256":snapshot,"records":records,"summary":["units":units.count,"resolved":resolved,"echoes":echoes.count,"original_profiles":profiles.count,"short_profiles":shortProfiles.count,"voices":groups.count,"solo_recovered":soloVerified.count,"slot_retained":retainedSlots.count,"segmentation_windows":segmentation.predictions],"capture":false,"cloud":false]
+        let result:[String:Any] = ["schema":1,"method":method,"model":model,"cache_id":cacheID,"session":request.session,"source_sha256":hashes,"snapshot_sha256":snapshot,"records":records,"summary":["units":units.count,"resolved":resolved,"echoes":echoes.count,"original_profiles":profiles.count,"short_profiles":shortProfiles.count,"voices":groups.count,"solo_recovered":soloVerified.count,"slot_retained":retainedSlots.count,"local_continuity":localContinuity.count,"unverified_original_retained":unverifiedOriginalRetained,"segmentation_windows":segmentation.predictions],"capture":false,"cloud":false]
         _=try SpeakerRefinementArtifact.validateApply(object:result,events:events,sourceHashes:hashes,directory:directory,cacheID:cacheID)
         return result
     }

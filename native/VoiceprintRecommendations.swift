@@ -41,16 +41,29 @@ struct VoiceprintArchive:Codable {
     func humanOnlyScores(_ vector:[Double],excludingSession:String?=nil)->[(String,Double)] {
         scores(vector,excludingSession:excludingSession,includingAutomatic:false)
     }
+    private func matchingHumanSamples(_ person:VoiceprintPerson,excludingSession:String?)->[VoiceprintSample] {
+        guard let ledger=learning else{return person.samples.filter{$0.session != excludingSession}}
+        let original=(ledger.baseline.first{$0.id==person.id}?.samples ?? []).filter{$0.session != excludingSession}
+        let manual=ledger.contributions.filter {
+            $0.personID==person.id && $0.automatic==nil &&
+            !ledger.revokedConfirmationIDs.contains($0.confirmationID)
+        }.flatMap(\.samples).filter{$0.session != excludingSession}
+        // The twelve-sample display/storage projection can evict an older
+        // recording condition. Match against the ledger's eligible human
+        // evidence instead. Exclude this meeting before eligibility checks,
+        // so a newly confirmed voice cannot help recognize itself.
+        return original+uniqueVoiceSamples(learnedVoiceSamples(manual)).filter {sample in
+            !original.contains(where:{voiceSampleOverlap($0,sample)})
+        }
+    }
     func scores(_ vector:[Double],excludingSession:String?,includingAutomatic:Bool)->[(String,Double)] {
         // Disabled voices remain negative comparisons, so opting one out
         // cannot make a similar enabled person win by default.
         people.compactMap {p in
-            // Keep the same bounded reference view used after commit. New
-            // automatic evidence supplements the existing bounded layer; it
-            // cannot evict human references or push older automatic samples
-            // beyond the per-person cap in a hypothetical replay.
+            // The validated ledger bounds human evidence. Automatic evidence
+            // retains its separate cap and can never evict human references.
             let automatic=includingAutomatic ? Array(activeAutomaticVoiceSamples(archive:self,personID:p.id).prefix(voiceprintMaximumAutomaticSamplesPerPerson)) : []
-            let references=uniqueVoiceSamples(p.samples + automatic)
+            let references=uniqueVoiceSamples(matchingHumanSamples(p,excludingSession:excludingSession) + automatic)
             let scores=references.filter{$0.session != excludingSession}.map{s in zip(vector,s.vector).reduce(0){$0+$1.0*$1.1}}.sorted(by:>)
             guard scores.count>=3 else{return nil}
             // Two examples must agree; one exceptionally similar sample cannot win alone.

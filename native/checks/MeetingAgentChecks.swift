@@ -212,7 +212,8 @@ import SQLite3
     defer { window.orderOut(nil) }
     let panel = MeetingAgentPanel(), host = window.contentView!
     host.addSubview(panel)
-    NSLayoutConstraint.activate([panel.leadingAnchor.constraint(equalTo: host.leadingAnchor), panel.trailingAnchor.constraint(equalTo: host.trailingAnchor), panel.topAnchor.constraint(equalTo: host.topAnchor), panel.bottomAnchor.constraint(equalTo: host.bottomAnchor)])
+    let viewportWidth = panel.widthAnchor.constraint(equalToConstant: 370)
+    NSLayoutConstraint.activate([viewportWidth, panel.leadingAnchor.constraint(equalTo: host.leadingAnchor), panel.trailingAnchor.constraint(equalTo: host.trailingAnchor), panel.topAnchor.constraint(equalTo: host.topAnchor), panel.bottomAnchor.constraint(equalTo: host.bottomAnchor)])
     host.layoutSubtreeIfNeeded()
     panel.apply(["workspace_id": "listener", "runtime_status": "ready", "proactive": true, "listening": true,
                  "messages": [["id": "u", "role": "user", "text": "请看项目背景", "status": "completed"],
@@ -228,11 +229,109 @@ import SQLite3
     guard let reminder = descendants(panel).compactMap({ $0 as? MeetingMarkdownTextView }).first(where: { $0.string.trimmingCharacters(in: .whitespacesAndNewlines) == "这项前提需要核实" }),
           reminder.bounds.height > 0, !reminder.isHiddenOrHasHiddenAncestor,
           reminder.convert(reminder.bounds, to: panel).maxY <= panel.bounds.maxY else { throw Failure(code: "say_visible_in_panel") }
+    let root = Bundle.main.object(forInfoDictionaryKey: "AdapterRoot") as! String
+    let imagePath = ProcessInfo.processInfo.environment["ZAICHANG_ASSISTANT_IMAGE_FIXTURE"] ?? root + "/native/assets/MeetingAssistantIcon-source.png"
+    var previewState: [String: Any] = ["runtime_status": "ready", "conversation_status": "running",
+        "awaiting_response": true, "activity": "正在查资料…", "messages": [
+            ["id": "poster-question", "role": "user", "text": "我们之前投放的素材有吗", "status": "completed"],
+            ["id": "poster", "role": "assistant", "text": "[打开原图](<\(imagePath)>)", "status": "completed"]]]
+    panel.apply(previewState)
+    let deadline = Date().addingTimeInterval(5)
+    while !descendants(panel).compactMap({ $0 as? NSImageView }).contains(where: { $0.image != nil }) && Date() < deadline {
+        _ = RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.02))
+    }
+    host.layoutSubtreeIfNeeded()
+    guard let preview = descendants(panel).compactMap({ $0 as? NSImageView }).first(where: { $0.image != nil }),
+          preview.bounds.height > 0, preview.bounds.height <= 421, preview.bounds.width <= panel.bounds.width,
+          !preview.isHiddenOrHasHiddenAncestor else { throw Failure(code: "assistant_local_image_preview") }
+    guard descendants(panel).compactMap({ $0 as? NSTextField }).contains(where: { $0.stringValue == "正在查资料…" && !$0.isHiddenOrHasHiddenAncestor && $0.convert($0.bounds, to: panel).minY >= 0 && $0.convert($0.bounds, to: panel).maxY <= panel.bounds.maxY }),
+          descendants(panel).compactMap({ $0 as? NSProgressIndicator }).contains(where: { !$0.isHiddenOrHasHiddenAncestor }) else { throw Failure(code: "assistant_busy_visible") }
     if let bitmap = panel.bitmapImageRepForCachingDisplay(in: panel.bounds) {
         panel.cacheDisplay(in: panel.bounds, to: bitmap)
-        try bitmap.representation(using: .png, properties: [:])?.write(to: directory.appendingPathComponent("listener-panel.png"))
+        try bitmap.representation(using: .png, properties: [:])?.write(to: directory.appendingPathComponent("assistant-image-progress.png"))
     }
-    return ["listener_switch_label", "listening_hint", "single_conversation", "no_task_list", "overview_excludes_reminders", "say_visible_in_panel"]
+    previewState["awaiting_response"] = false; previewState["conversation_status"] = "completed"
+    panel.apply(previewState)
+    guard !descendants(panel).compactMap({ $0 as? NSProgressIndicator }).contains(where: { !$0.isHiddenOrHasHiddenAncestor }) else { throw Failure(code: "assistant_busy_cleared") }
+    let sourceImage = URL(fileURLWithPath: imagePath)
+    let imagePasteboard = NSPasteboard(name: .init("zaichang-image-check-" + UUID().uuidString))
+    defer { imagePasteboard.releaseGlobally() }
+    try MeetingAssistantLinks.copyImage(sourceImage, to: imagePasteboard)
+    guard let copiedData = imagePasteboard.data(forType: .tiff),
+          let copiedImage = NSBitmapImageRep(data: copiedData),
+          let originalImage = NSBitmapImageRep(data: try Data(contentsOf: sourceImage)),
+          copiedImage.pixelsWide == originalImage.pixelsWide, copiedImage.pixelsHigh == originalImage.pixelsHigh else { throw Failure(code: "assistant_copy_full_resolution") }
+    let savedImage = directory.appendingPathComponent("saved-original." + sourceImage.pathExtension)
+    try MeetingAssistantLinks.saveImage(sourceImage, to: savedImage)
+    guard try Data(contentsOf: sourceImage) == Data(contentsOf: savedImage) else { throw Failure(code: "assistant_save_original_bytes") }
+    let oldClipboard = imagePasteboard.data(forType: .tiff)
+    do { try MeetingAssistantLinks.copyImage(directory.appendingPathComponent("missing.png"), to: imagePasteboard); throw Failure(code: "assistant_copy_missing_must_fail") }
+    catch is Failure { throw Failure(code: "assistant_copy_missing_must_fail") }
+    catch { guard imagePasteboard.data(forType: .tiff) == oldClipboard else { throw Failure(code: "assistant_failed_copy_keeps_clipboard") } }
+    guard preview.menu?.items.contains(where: { $0.title == "复制图片" }) == true,
+          preview.menu?.items.contains(where: { $0.title == "另存为…" }) == true,
+          descendants(panel).compactMap({$0 as? NSButton}).contains(where: {$0.title == "复制图片"}) else { throw Failure(code: "assistant_image_actions_visible") }
+    var response: [String: Any]?
+    panel.onCommand = { method, params in if method == "respond" { response = params } }
+    previewState["requests"] = [["id": "image-question", "kind": "question", "title": "需要你补充", "questions": [
+        ["id": "image", "question": "已有海报和新生成图片是否都需要？", "options": [["label": "对，两种都要"]]],
+        ["id": "detail", "question": "补充说明", "required": false]]]]
+    panel.apply(previewState); host.layoutSubtreeIfNeeded()
+    descendants(panel).compactMap { $0 as? NSButton }.first { $0.title == "对，两种都要" }?.performClick(nil)
+    panel.apply(previewState) // Refresh while the user is composing an answer.
+    descendants(panel).compactMap { $0 as? NSButton }.first { $0.title == "提交" }?.performClick(nil)
+    guard response?["request_id"] as? String == "image-question", (response?["answers"] as? [String: String])?["image"] == "对，两种都要" else { throw Failure(code: "assistant_question_response_survives_refresh") }
+    previewState["requests"] = [["id": "save-approval", "kind": "approval", "title": "需要你确认", "detail": "保存用户要求的作品"]]
+    panel.apply(previewState); host.layoutSubtreeIfNeeded(); response = nil
+    descendants(panel).compactMap { $0 as? NSButton }.first { $0.title == "允许这次" }?.performClick(nil)
+    guard response?["request_id"] as? String == "save-approval", response?["accepted"] as? Bool == true else { throw Failure(code: "assistant_approval_response") }
+    descendants(panel).compactMap { $0 as? NSButton }.first { $0.title == "拒绝" }?.performClick(nil)
+    guard response?["accepted"] as? Bool == false else { throw Failure(code: "assistant_decline_response") }
+    previewState["requests"] = []; panel.apply(previewState)
+    guard !descendants(panel).compactMap({ $0 as? NSButton }).contains(where: { $0.title == "允许这次" }) else { throw Failure(code: "assistant_expired_request_removed") }
+    let secondPath = ProcessInfo.processInfo.environment["ZAICHANG_ASSISTANT_SECOND_IMAGE_FIXTURE"] ?? root + "/native/assets/meeting-assistant-app-icon-v2-microphone-1024.png"
+    let delivery = "两版已完成。\n\n[下载「春节家宴」](<\(imagePath)>)\n\n![春节家宴](<\(imagePath)>)\n\n全程使用原生生图。\n\n[下载「提油回家送爸妈」](<\(secondPath)>)\n\n![提油回家送爸妈](<\(secondPath)>)\n\n[最终提示词与原生链路记录](<\(root)/README.md>)"
+    let ordered = MeetingAssistantLinks.content(in: delivery, base: URL(fileURLWithPath: root)).map { part -> String in
+        switch part { case .text(let text): return text; case .file(let label, _): return label }
+    }
+    guard ordered == ["两版已完成。", "春节家宴", "全程使用原生生图。", "提油回家送爸妈", "最终提示词与原生链路记录"] else { throw Failure(code: "assistant_image_prose_order_and_dedup") }
+    previewState["messages"] = [["id": "final-posters", "role": "assistant", "text": delivery, "status": "completed"]]
+    panel.apply(previewState)
+    let imagesDeadline = Date().addingTimeInterval(5)
+    while descendants(panel).compactMap({ $0 as? NSImageView }).filter({ $0.image != nil }).count < 2 && Date() < imagesDeadline {
+        _ = RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.02))
+    }
+    for width in [370.0, 740.0] {
+        // A hidden, nonresizable test window otherwise returns to its fitting
+        // width; require the requested viewport rather than two identical shots.
+        window.contentMinSize = NSSize(width: width, height: 1500)
+        window.contentMaxSize = NSSize(width: width, height: 1500)
+        viewportWidth.constant = width
+        window.setContentSize(NSSize(width: width, height: 1500)); host.layoutSubtreeIfNeeded()
+        guard abs(panel.bounds.width - width) < 1 else { throw Failure(code: "assistant_image_viewport_width: \(panel.bounds.width) != \(width)") }
+        let rows = descendants(panel).compactMap { $0 as? MeetingAssistantFileRow }.filter { MeetingAssistantLinks.isBitmap($0.referenceURL) }
+        guard rows.count == 2 else { throw Failure(code: "assistant_final_image_count") }
+        for row in rows {
+            guard let image = descendants(row).compactMap({ $0 as? NSImageView }).first,
+                  let copy = descendants(row).compactMap({ $0 as? NSButton }).first(where: { $0.title == "复制图片" }) else { throw Failure(code: "assistant_image_card_controls") }
+            let imageRect = image.convert(image.bounds, to: row), titleRect = row.openButton.convert(row.openButton.bounds, to: row), copyRect = copy.convert(copy.bounds, to: row)
+            guard abs(imageRect.minX - titleRect.minX) < 2, abs(imageRect.minX - (copyRect.minX + copy.alignmentRectInsets.left)) < 2,
+                  imageRect.maxX <= row.bounds.width + 1, !imageRect.intersects(titleRect), !imageRect.intersects(copyRect),
+                  abs(image.bounds.width / image.bounds.height - image.image!.size.width / image.image!.size.height) < 0.01 else {
+                throw Failure(code: "assistant_image_card_alignment: image=\(imageRect), title=\(titleRect), copy=\(copyRect), insets=\(copy.alignmentRectInsets), row=\(row.bounds)")
+            }
+        }
+        guard let file = descendants(panel).compactMap({ $0 as? MeetingAssistantFileRow }).first(where: { !MeetingAssistantLinks.isBitmap($0.referenceURL) }), file.isHiddenOrHasHiddenAncestor,
+              let disclosure = descendants(panel).compactMap({ $0 as? NSButton }).first(where: { $0.title == "附件（1）" }) else { throw Failure(code: "assistant_supporting_files_collapsed") }
+        disclosure.performClick(nil); host.layoutSubtreeIfNeeded()
+        guard !file.isHiddenOrHasHiddenAncestor else { throw Failure(code: "assistant_supporting_files_expand") }
+        disclosure.performClick(nil); host.layoutSubtreeIfNeeded()
+        if let bitmap = panel.bitmapImageRepForCachingDisplay(in: panel.bounds) {
+            panel.cacheDisplay(in: panel.bounds, to: bitmap)
+            try bitmap.representation(using: .png, properties: [:])?.write(to: directory.appendingPathComponent("assistant-final-posters-\(Int(width)).png"))
+        }
+    }
+    return ["listener_switch_label", "listening_hint", "single_conversation", "no_task_list", "overview_excludes_reminders", "say_visible_in_panel", "assistant_local_image_preview", "assistant_busy_visible", "assistant_busy_cleared", "assistant_copy_full_resolution", "assistant_save_original_bytes", "assistant_failed_copy_keeps_clipboard", "assistant_image_actions_visible", "assistant_question_response_survives_refresh", "assistant_approval_response", "assistant_decline_response", "assistant_expired_request_removed", "assistant_image_prose_order_and_dedup", "assistant_image_card_alignment", "assistant_supporting_files_expand"]
 }
 
 func meetingAssistantReminderExportChecks(directory: URL) throws -> [String] {

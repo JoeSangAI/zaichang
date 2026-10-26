@@ -268,6 +268,19 @@ private final class NotesDragFixture: NSObject, NSDraggingInfo {
     try check(controller.snapshot.visible.first?.note_id == typedID && controller.snapshot.visible.first?.anchor?.relative == 15, "paragraph_500ms_debounce_creates_with_original_typing_time")
     try check(!fm.fileExists(atPath: uiStore.notes.appendingPathComponent("draft.json").path), "new_editor_does_not_write_draft_json")
     try check(controller.editor.textStorage?.attribute(.toolTip, at: 0, effectiveRange: nil) as? String == absolute.display(15), "paragraph_hover_tooltip_uses_clock_time")
+    let selectionBeforeRefresh = controller.editor.selectedRange()
+    let responderBeforeRefresh = view.window.firstResponder
+    var refreshEdits = 0
+    let refreshObserver = NotificationCenter.default.addObserver(forName: NSTextStorage.didProcessEditingNotification, object: controller.editor.textStorage, queue: nil) { _ in refreshEdits += 1 }
+    for _ in 0..<100 { view.refreshMeetingNotes() }
+    try check(refreshEdits == 0 && controller.editor.selectedRange() == selectionBeforeRefresh && view.window.firstResponder === responderBeforeRefresh, "recording_refresh_does_not_edit_notebook_or_move_caret")
+    // A clock-format change still updates the existing paragraph, once.
+    controller.editor.textStorage?.addAttribute(.toolTip, value: TranscriptTimeline.timestamp(15), range: NSRange(location: 0, length: 1))
+    refreshEdits = 0; controller.refreshTooltips()
+    try check(refreshEdits == 1 && controller.editor.textStorage?.attribute(.toolTip, at: 0, effectiveRange: nil) as? String == absolute.display(15), "changed_note_tooltip_updates_once")
+    refreshEdits = 0; controller.refreshTooltips()
+    try check(refreshEdits == 0, "updated_note_tooltip_is_stable")
+    NotificationCenter.default.removeObserver(refreshObserver)
     edit(controller, "20", range: (controller.editor.string as NSString).range(of: "15")); try flush(controller)
     try check(controller.snapshot.visible.first?.text == "预算 20 万" && controller.snapshot.visible.first?.anchor?.relative == 15 && controller.snapshot.visible.first?.note_id == typedID && controller.snapshot.visible.first?.op == "edit", "direct_edit_retains_paragraph_identity_and_anchor")
     edit(controller, "\n")
@@ -470,6 +483,14 @@ private final class NotesDragFixture: NSObject, NSDraggingInfo {
         let deadline = Date().addingTimeInterval(5)
         while management.busy && Date() < deadline { RunLoop.current.run(until:Date().addingTimeInterval(0.01)) }
         guard let opened else { throw Failure(code:"UI_meeting_files_export_failed: " + management.status.stringValue) }
+        // Successful export refreshes the menu's file capabilities asynchronously.
+        // Wait for the same enabled gate a user needs before the next action;
+        // otherwise that action can be ignored before it reaches the note saver.
+        let refreshDeadline = Date().addingTimeInterval(5)
+        while !management.enabled(.meetingFiles,for:target) && Date() < refreshDeadline {
+            RunLoop.current.run(until:Date().addingTimeInterval(0.01))
+        }
+        guard management.enabled(.meetingFiles,for:target) else { throw Failure(code:"notes_export_capabilities_not_refreshed") }
         let contents = try fm.contentsOfDirectory(atPath:opened.path)
         try check(contents.contains("会中笔记.md") == withNotes && contents.contains("会中笔记.assets") == withNotes && contents.contains(".meeting-notes-export.json") == withNotes, withNotes ? "UI_meeting_files_action_exports_notes_and_images" : "UI_meeting_files_action_without_notes_creates_no_note_files")
         if withNotes {

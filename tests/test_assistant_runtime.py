@@ -64,8 +64,10 @@ class FakeAppServer:
             return {"turn": {"id": turn_id}}
         return {}
 
-    async def start_turn(self, thread_id, text, *, output_schema=None):
+    async def start_turn(self, thread_id, text, *, output_schema=None, execution_directory=None):
         params = {"threadId": thread_id, "input": [{"type": "text", "text": text}]}
+        if execution_directory:
+            params["execution_directory"] = execution_directory
         if output_schema:
             params["outputSchema"] = output_schema
         return await self.request("turn/start", params)
@@ -124,7 +126,7 @@ class AssistantRuntimeTests(unittest.IsolatedAsyncioTestCase):
         async def emit(value):
             self.emitted.append(value)
 
-        self.service = AssistantRuntime(self.store, self.root, runtime_factory=lambda **kw: self.fake, emit=emit)
+        self.service = AssistantRuntime(self.store, self.root, output_root=self.root / "outputs", runtime_factory=lambda **kw: self.fake, emit=emit)
         result = await self.service.bind("workspace-proposed", {"session_id": "session-1", "cache_id": "cache-1", "title": "广告策略会"})
         self.workspace_id = result["workspace_id"]
 
@@ -170,7 +172,7 @@ class AssistantRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
         store = AssistantStore(self.root / "race-store")
         runtime = SlowStart()
-        service = AssistantRuntime(store, self.root, runtime_factory=lambda **kw: runtime)
+        service = AssistantRuntime(store, self.root, output_root=self.root / "outputs", runtime_factory=lambda **kw: runtime)
         first = asyncio.create_task(service.bind("race-workspace", {"cache_id": "race-cache", "session_id": "race-session"}))
         await entered.wait()
         second = asyncio.create_task(service.bind("ignored", {"cache_id": "race-cache", "session_id": "race-session"}))
@@ -377,7 +379,7 @@ class AssistantRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.store.close()
         reopened = AssistantStore(self.root / "store")
         recovered_runtime = FakeAppServer()
-        offline = AssistantRuntime(reopened, self.root, runtime_factory=lambda **kw: recovered_runtime)
+        offline = AssistantRuntime(reopened, self.root, output_root=self.root / "outputs", runtime_factory=lambda **kw: recovered_runtime)
         try:
             await offline.bind("ignored", {"session_id": "session-1"})
             task = reopened.task(task_id)
@@ -423,7 +425,7 @@ class AssistantRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
         reopened = AssistantStore(self.root / "store")
         recovered_runtime = FakeAppServer()
-        recovered = AssistantRuntime(reopened, self.root, runtime_factory=lambda **kw: recovered_runtime)
+        recovered = AssistantRuntime(reopened, self.root, output_root=self.root / "outputs", runtime_factory=lambda **kw: recovered_runtime)
         try:
             await recovered.bind("ignored", {"session_id": "session-1"})
             row = reopened.db.execute("SELECT status,source_hash FROM meeting_overview WHERE workspace_id=?",

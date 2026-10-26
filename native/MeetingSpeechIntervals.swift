@@ -21,7 +21,7 @@ final class MeetingSpeechIntervals {
         let config=MLModelConfiguration();config.computeUnits = .cpuAndNeuralEngine
         model=try MLModel(contentsOf:directory,configuration:config)
     }
-    func solo(source:String,start:Double,end:Double,audio:MeetingAcousticRefinement.Audio)throws->(Double,Double)? {
+    private func window(source:String,start:Double,end:Double,audio:MeetingAcousticRefinement.Audio)throws->Window? {
         guard end>start,end-start<=4,let bounds=audio.bounds(audio.voiceSource(source)) else{return nil}
         let center=(start+end)/2,offset=max(0,floor((center-bounds.0)/5)*5-2.5),lo=bounds.0+offset,hi=min(bounds.1,lo+10)
         guard lo<=start,hi>=end,hi>lo else{return nil}
@@ -31,7 +31,9 @@ final class MeetingSpeechIntervals {
             let array=try MLMultiArray(shape:[1,1,160000],dataType:.float32)
             let pointer=array.dataPointer.assumingMemoryBound(to:Float.self)
             pointer.update(repeating:0,count:160000)
-            pcm.withUnsafeBufferPointer{if let base=$0.baseAddress {pointer.update(from:base,count:pcm.count)}}
+            let peak=pcm.reduce(Float(0)){max($0,abs($1))}
+            let gain=min(Float(16),max(Float(1),0.8/max(peak,0.000001)))
+            for i in pcm.indices {pointer[i]=pcm[i]*gain}
             let input=try MLDictionaryFeatureProvider(dictionary:["audio":MLFeatureValue(multiArray:array)])
             let output=try model.prediction(from:input)
             guard let values=output.featureValue(for:"log_probs")?.multiArrayValue else{throw Failure(code:"acoustic_segmentation_output_invalid")}
@@ -48,6 +50,11 @@ final class MeetingSpeechIntervals {
             if order.count>=12 {cache.removeValue(forKey:order.removeFirst())}
             cache[key]=window;order.append(key)
         }
+        return window
+    }
+    func solo(source:String,start:Double,end:Double,audio:MeetingAcousticRefinement.Audio)throws->(Double,Double)? {
+        guard let window=try window(source:source,start:start,end:end,audio:audio),
+              let bounds=audio.bounds(audio.voiceSource(source)) else{return nil}
         let first=max(0,Int(floor((start-window.start)/window.step))),last=min(window.labels.count-1,Int(ceil((end-window.start)/window.step))-1)
         guard first<=last else{return nil}
         var solo:[Int:Double]=[:],overlap=0.0,uncertain=0.0
@@ -70,5 +77,39 @@ final class MeetingSpeechIntervals {
         let a=window.start+Double(left)*window.step,b=min(bounds.1,window.start+Double(right+1)*window.step)
         guard max(0,min(end,b)-max(start,a))/(end-start)>=0.7,b-a>=0.4 else{return nil}
         return (a,b)
+    }
+
+    /// Match a short fragment to independently labelled speech in the SAME
+    /// model window. Window slots never escape this window or cross sources.
+    /// Silence is allowed at word edges; a competing or overlapping voice is
+    /// not. Recovered fragments never become references for another recovery.
+    func continuation(source:String,start:Double,end:Double,references:[MeetingAcousticRefinement.Unit],audio:MeetingAcousticRefinement.Audio)throws->SessionSpeakerKey? {
+        guard end-start<=4,let window=try window(source:source,start:start,end:end,audio:audio) else{return nil}
+        func label(_ lo:Double,_ hi:Double)->(Int,Double)? {
+            guard lo>=window.start,hi<=window.start+Double(window.labels.count)*window.step,hi>lo else{return nil}
+            let first=max(0,Int(floor((lo-window.start)/window.step))),last=min(window.labels.count-1,Int(ceil((hi-window.start)/window.step))-1)
+            guard first<=last else{return nil}
+            var voices:[Int:Double]=[:],uncertain=0.0,overlap=0.0
+            for i in first...last {
+                let seconds=max(0,min(hi,window.start+Double(i+1)*window.step)-max(lo,window.start+Double(i)*window.step))
+                let value=window.labels[i]
+                if (1...3).contains(value) {voices[value,default:0]+=seconds}
+                else if value>=4 {overlap+=seconds}
+                else if value<0 {uncertain+=seconds}
+            }
+            guard overlap<=min(0.02,(hi-lo)*0.1),uncertain<=min(0.08,(hi-lo)*0.2),voices.count==1,
+                  let voice=voices.first,voice.value>=max(0.04,(hi-lo)*0.5) else{return nil}
+            return (voice.key,voice.value)
+        }
+        guard let target=label(start,end) else{return nil}
+        var support:[SessionSpeakerKey:Double]=[:]
+        for ref in references where ref.source==source && (ref.end<=start || ref.start>=end) {
+            guard let key=ref.key,max(start-ref.end,ref.start-end)<=3 else{continue}
+            let lo=max(ref.start,window.start),hi=min(ref.end,window.start+Double(window.labels.count)*window.step)
+            guard hi-lo>=0.4,let voice=label(lo,hi),voice.0==target.0 else{continue}
+            support[key,default:0]+=voice.1
+        }
+        guard support.count==1,let best=support.first,best.value>=0.6 else{return nil}
+        return best.key
     }
 }

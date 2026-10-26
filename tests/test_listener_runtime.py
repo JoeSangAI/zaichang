@@ -11,6 +11,14 @@ from codex_runtime import CodexRuntime, RuntimeErrorCode
 from tests.test_assistant_runtime import FakeAppServer
 
 
+def public_image(name):
+    root = Path(__file__).resolve().parents[1]
+    assets = root / "public/docs/assets"
+    if not assets.is_dir():
+        assets = root / "docs/assets"
+    return (assets / name).resolve()
+
+
 class ListenerTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -18,7 +26,7 @@ class ListenerTests(unittest.IsolatedAsyncioTestCase):
         self.fake = FakeAppServer(); self.fake.auto_complete = False
         self.fake.steer = AsyncMock(return_value={})
         self.fake.interrupt = AsyncMock(wraps=self.fake.interrupt)
-        self.service = AssistantRuntime(self.store, Path.cwd(), runtime_factory=lambda **kw: self.fake)
+        self.service = AssistantRuntime(self.store, Path.cwd(), output_root=Path(self.tmp.name) / "outputs", runtime_factory=lambda **kw: self.fake)
         self.service._schedule_overview = lambda *a, **kw: None
         self.service.wait_batch_seconds = .03
         await self.service.bind('w', {'cache_id': 'local-test'})
@@ -80,17 +88,92 @@ class ListenerTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse((await self.service.cmd_snapshot('w',{}))['listening'])
         self.assertEqual(len(self.fake.requests),1)
 
-    async def test_user_message_steers_same_turn_and_final_visible(self):
+    async def test_user_activity_visible_through_tools_and_cleared_on_completion(self):
+        await self.service.cmd_send('w', {'text': '我们之前投放的素材有吗'})
+        await self.wait(lambda: bool(self.row()['turn_id']))
+        state = await self.service.cmd_snapshot('w', {})
+        self.assertTrue(state['awaiting_response'])
+        self.assertFalse(state['listening'])
+        self.assertEqual(state['activity'], '正在思考…')
+        await self.event('item/started', {'id': 'search', 'type': 'webSearch'})
+        await self.wait(lambda: self.service.activities.get(self.row()['id']) == '正在查资料…')
+        await self.event('item/completed', {'id': 'search', 'type': 'webSearch'})
+        await self.wait(lambda: self.service.activities.get(self.row()['id']) == '正在思考…')
+        await self.event('item/completed', {'id': 'answer', 'type': 'agentMessage', 'phase': 'final_answer', 'text': self.speech})
+        await self.event('turn/completed')
+        await self.wait(lambda: not self.service.task_workers)
+        state = await self.service.cmd_snapshot('w', {})
+        self.assertFalse(state['awaiting_response'])
+        self.assertEqual(state['activity'], '')
+        self.assertEqual([m['text'] for m in state['messages'] if m['role'] == 'assistant'], [self.speech])
+
+    async def test_steered_question_shows_busy_instead_of_listening_and_cancel_clears(self):
+        await self.listen()
+        self.assertFalse((await self.service.cmd_snapshot('w', {}))['awaiting_response'])
+        await self.service.cmd_send('w', {'text': '我们之前投放的素材有吗'})
+        state = await self.service.cmd_snapshot('w', {})
+        self.assertTrue(state['awaiting_response'])
+        self.assertFalse(state['listening'])
+        await self.service.cmd_cancel('w', {})
+        await self.wait(lambda: self.service.turn_modes.get(self.row()['id']) == 'listen' and self.row()['status'] == 'running')
+        self.assertFalse((await self.service.cmd_snapshot('w', {}))['awaiting_response'])
+
+    async def test_image_generation_asset_survives_final_text_and_reopen(self):
+        image = public_image('app-icon.png')
+        self.assertTrue(image.is_file())
+        await self.service.cmd_send('w', {'text': '把图片显示出来'})
+        await self.wait(lambda: bool(self.row()['turn_id']))
+        await self.event('item/completed', {'id': 'image', 'type': 'imageGeneration', 'savedPath': str(image), 'status': 'completed'})
+        await self.event('item/completed', {'id': 'missing', 'type': 'imageGeneration', 'savedPath': str(image.parent / 'missing.png'), 'status': 'completed'})
+        await self.event('item/completed', {'id': 'answer', 'type': 'agentMessage', 'phase': 'final_answer', 'text': self.speech})
+        await self.event('turn/completed')
+        await self.wait(lambda: not self.service.task_workers)
+        messages = (await self.service.cmd_snapshot('w', {}))['messages']
+        self.assertEqual(len([m for m in messages if m['role'] == 'assistant']), 2)
+        saved = next((self.store.directory / 'artifacts').iterdir())
+        self.assertEqual(saved.read_bytes(), image.read_bytes())
+        self.assertEqual(messages[-2]['text'], f'[生成的图片]({saved.as_uri()})')
+        reopened = AssistantStore(self.tmp.name)
+        try:
+            self.assertEqual(reopened.messages('w')[-2]['text'], messages[-2]['text'])
+        finally:
+            reopened.close()
+
+    async def test_only_final_selected_images_visible_during_generation_and_after_reopen(self):
+        images = [public_image(name) for name in
+                  ('app-icon.png', 'meeting-assistant-v030.png')]
+        await self.service.cmd_send('w', {'text': '给用户更加简洁，只交付最终产出的图片'})
+        await self.wait(lambda: bool(self.row()['turn_id']))
+        for index, image in enumerate([*images, images[-1]]):
+            self.assertTrue(image.is_file())
+            await self.event('item/completed', {'id':str(index),'type':'imageGeneration','savedPath':str(image),'status':'completed'})
+        self.assertFalse([m for m in (await self.service.cmd_snapshot('w', {}))['messages'] if m['role']=='assistant'])
+        final = '\n'.join(f'[最终图片 {i+1}](<{p}>)' for i,p in enumerate(images))
+        await self.event('item/completed', {'id':'final','type':'agentMessage','phase':'final_answer','text':final})
+        await self.event('turn/completed')
+        await self.wait(lambda: not self.service.task_workers)
+        self.assertEqual([m['text'] for m in (await self.service.cmd_snapshot('w', {}))['messages'] if m['role']=='assistant'], [final])
+        reopened = AssistantStore(self.tmp.name)
+        try:
+            self.assertEqual(len([m for m in reopened.messages('w') if ':image:' in m['id']]), 3)
+            visible = self.service._delivery_messages(reopened.messages('w'))
+            self.assertEqual([m['text'] for m in visible if m['role']=='assistant'], [final])
+        finally:
+            reopened.close()
+
+    async def test_user_message_starts_execution_turn_in_same_thread_and_final_visible(self):
         row=await self.listen()
         result=await self.service.cmd_send('w', {'text': self.speech})
-        self.assertTrue(result['steered']); self.fake.steer.assert_awaited_once_with(row['thread_id'],row['turn_id'],self.speech)
+        self.assertFalse(result['steered']); self.fake.steer.assert_not_awaited()
+        await self.wait(lambda: self.row()['turn_id'] not in (None, row['turn_id']))
+        self.assertIn('execution_directory', self.fake.requests[-1][1])
         await self.context('paused')
         await self.event('item/completed', {'id':'answer','type':'agentMessage','phase':'final_answer','text':self.speech})
         await self.event('turn/completed'); await self.wait(lambda:not self.service.task_workers)
         self.assertEqual([r['text'] for r in self.store.messages('w') if r['role']=='assistant'],[self.speech])
         self.assertEqual(len(self.fake.threads),1)
 
-    async def test_failed_steer_interrupt_answer_and_continue(self):
+    async def test_execution_restores_read_only_listening_after_answer(self):
         row=await self.listen(); old_turn=row['turn_id']
         self.fake.steer.side_effect=RuntimeErrorCode('rpc_error_-32601')
         result=await self.service.cmd_send('w', {'text': self.speech})
@@ -101,6 +184,7 @@ class ListenerTests(unittest.IsolatedAsyncioTestCase):
         await self.event('turn/completed')
         await self.wait(lambda:self.row()['turn_id'] not in (None,user_turn))
         self.assertEqual(self.service.turn_modes[row['id']],'listen')
+        self.assertNotIn('execution_directory', self.fake.requests[-1][1])
         self.assertEqual(len(self.fake.threads),1); self.fake.interrupt.assert_awaited_once()
 
     async def test_say_only_and_no_intermediate_storage(self):
@@ -157,7 +241,7 @@ class ListenerTests(unittest.IsolatedAsyncioTestCase):
         await self.listen(); await self.tool('say',{'text':self.speech})
         await self.service.shutdown()
         replacement=FakeAppServer(); replacement.auto_complete=False
-        self.service=AssistantRuntime(self.store,Path.cwd(),runtime_factory=lambda **kw:replacement)
+        self.service=AssistantRuntime(self.store,Path.cwd(),output_root=Path(self.tmp.name) / "outputs", runtime_factory=lambda **kw:replacement)
         await self.service.bind('w',{})
         self.assertEqual(self.row()['status'],'interrupted')
         await self.service.cmd_send('w',{'text':'继续'})
@@ -168,6 +252,11 @@ class ListenerTests(unittest.IsolatedAsyncioTestCase):
         await self.listen()
         self.assertEqual(await self.service._on_server_request('item/commandExecution/requestApproval',{}),{'decision':'decline'})
         row=self.row()
+        live={'threadId':row['thread_id'],'turnId':row['turn_id']}
+        self.assertEqual(await self.service._on_server_request('item/commandExecution/requestApproval',live),{'decision':'decline'})
+        self.assertEqual(await self.service._on_server_request('item/permissions/requestApproval',live),{'permissions':{},'scope':'turn'})
+        self.assertEqual(await self.service._on_server_request('mcpServer/elicitation/request',live),{'action':'decline'})
+        self.assertFalse(self.service.pending_requests)
         result=await self.service._on_server_request('item/tool/call', {'threadId':row['thread_id'],'turnId':'old','tool':'say','arguments':{'text':'stale'}})
         self.assertFalse(result['success']); self.assertFalse(self.store.messages('w'))
 
@@ -193,17 +282,19 @@ class ListenerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(self.speech,self.fake.requests[-1][1]['input'][0]['text'])
         self.assertEqual(len(self.fake.threads),2)
 
-    async def test_final_waits_for_steer_ack_and_fallback_discards_old_final(self):
+    async def test_execution_waits_for_listener_interruption_and_discards_old_final(self):
         await self.listen(); gate=asyncio.Event(); entered=asyncio.Event()
-        async def steer(*args):
-            entered.set(); await gate.wait(); raise RuntimeErrorCode('unsupported')
-        self.fake.steer.side_effect=steer
+        async def interrupt(*args):
+            entered.set(); await gate.wait()
+        self.fake.interrupt.side_effect=interrupt
         sending=asyncio.create_task(self.service.cmd_send('w',{'text':self.speech}))
         await entered.wait()
         await self.event('item/completed',{'id':'old-final','type':'agentMessage','phase':'final_answer','text':'旧旁听结束语'})
-        await self.event('turn/completed'); await asyncio.sleep(.01)
+        await asyncio.sleep(.01)
+        self.assertEqual(len(self.fake.requests),1)
         self.assertFalse(any(m['role']=='assistant' for m in self.store.messages('w')))
         gate.set(); await sending
+        await self.event('turn/completed', status='interrupted')
         await self.wait(lambda:self.service.turn_modes.get(self.row()['id'])=='user')
         self.assertFalse(any(m['role']=='assistant' for m in self.store.messages('w')))
 
@@ -249,13 +340,71 @@ class ListenerTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual([r['text'] for r in reopened.messages('old')],[self.speech]*2)
             finally: reopened.close()
 
-    async def test_completed_user_answer_survives_late_listener_interrupt(self):
+    async def test_disabling_listener_does_not_cancel_user_execution(self):
         await self.listen()
         await self.service.cmd_send('w',{'text':self.speech})
-        async def already_completed(thread,turn):
-            await self.event('item/completed',{'id':'finished','type':'agentMessage','phase':'final_answer','text':self.speech})
-            await self.event('turn/completed',status='completed')
-        self.fake.interrupt.side_effect=already_completed
+        await self.wait(lambda:self.service.turn_modes.get(self.row()['id'])=='user' and bool(self.row()['turn_id']))
+        turn = self.row()['turn_id']
         await self.service.cmd_proactive('w',{'enabled':False})
+        self.assertEqual(self.row()['turn_id'],turn)
+        self.assertEqual(self.row()['status'],'running')
+        await self.event('item/completed',{'id':'finished','type':'agentMessage','phase':'final_answer','text':self.speech})
+        await self.event('turn/completed',status='completed')
         await self.wait(lambda:not self.service.task_workers)
         self.assertEqual([m['text'] for m in self.store.messages('w') if m['role']=='assistant'],[self.speech])
+
+    async def request_approval(self, method='item/commandExecution/requestApproval', **extra):
+        await self.service.cmd_send('w', {'text': '我主动交办时要能完整执行'})
+        await self.wait(lambda: bool(self.row()['turn_id']))
+        row=self.row()
+        request=asyncio.create_task(self.service._on_server_request(method, {
+            'threadId': row['thread_id'], 'turnId': row['turn_id'], 'itemId': 'approval',
+            'reason': '保存用户要求的作品', **extra}))
+        await self.wait(lambda: bool(self.service.pending_requests))
+        return request, next(iter(self.service.pending_requests))
+
+    async def test_approval_is_visible_scoped_and_granted_once(self):
+        request, request_id = await self.request_approval(command='保存用户要求的作品')
+        state=await self.service.cmd_snapshot('w',{})
+        self.assertEqual(state['requests'][0]['kind'],'approval')
+        self.assertFalse(request.done())
+        with self.assertRaisesRegex(ValueError,'approval_not_found'):
+            await self.service.cmd_respond('other',{'request_id':request_id,'accepted':True})
+        await self.service.cmd_respond('w',{'request_id':request_id,'accepted':True})
+        self.assertEqual(await request,{'decision':'accept'})
+        self.assertFalse((await self.service.cmd_snapshot('w',{}))['requests'])
+        with self.assertRaisesRegex(ValueError,'approval_not_found'):
+            await self.service.cmd_respond('w',{'request_id':request_id,'accepted':True})
+
+    async def test_cancel_dismisses_approval_without_granting(self):
+        request, _ = await self.request_approval()
+        await self.service.cmd_cancel('w',{})
+        self.assertEqual(await request,{'decision':'decline'})
+        await self.wait(lambda:not self.service.task_workers)
+        self.assertFalse(self.service.pending_requests)
+
+    async def test_user_question_answers_and_permission_grants_are_turn_scoped(self):
+        request, request_id = await self.request_approval('item/tool/requestUserInput',questions=[
+            {'id':'image','question':'已有海报和新生成图片是否都需要？','header':'图片'}])
+        await self.service.cmd_respond('w',{'request_id':request_id,'accepted':True,'answers':{'image':'对，两种都要'}})
+        self.assertEqual(await request,{'answers':{'image':{'answers':['对，两种都要']}}})
+        row=self.row()
+        permissions={'fileSystem':{'write':[str(self.service.output_root)]}}
+        request=asyncio.create_task(self.service._on_server_request('item/permissions/requestApproval',{
+            'threadId':row['thread_id'],'turnId':row['turn_id'],'permissions':permissions}))
+        await self.wait(lambda:bool(self.service.pending_requests))
+        await self.service.cmd_respond('w',{'request_id':next(iter(self.service.pending_requests)),'accepted':True})
+        self.assertEqual(await request,{'permissions':permissions,'scope':'turn'})
+
+    async def test_mcp_form_requires_explicit_response_and_validates_types(self):
+        request, request_id = await self.request_approval('mcpServer/elicitation/request', mode='form',
+            message='确认作品保存选项', requestedSchema={'type':'object','required':['save'],
+                'properties':{'save':{'type':'boolean','title':'保存图片'},'detail':{'type':'string','title':'补充说明'}}})
+        display = self.service.pending_requests[request_id]['display']
+        self.assertEqual([q['required'] for q in display['questions']], [True, False])
+        self.assertFalse(request.done())
+        with self.assertRaisesRegex(ValueError,'请检查表单'):
+            await self.service.cmd_respond('w',{'request_id':request_id,'accepted':True,'answers':{'save':'perhaps'}})
+        self.assertFalse(request.done())
+        await self.service.cmd_respond('w',{'request_id':request_id,'accepted':True,'answers':{'save':'true'}})
+        self.assertEqual(await request,{'action':'accept','content':{'save':True}})

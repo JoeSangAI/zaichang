@@ -24,6 +24,7 @@ final class MeetingAgentPanel: NSView {
     private var overviewRenderKey: Data?
     private weak var notesView: NSView?
     private var messageCells: [String: MessageCell] = [:]
+    private var requestViews: [String: MeetingAgentRequestView] = [:]
     private var draftWorkspace = ""
     private var drafts: [String: String] = [:]
     private var draftAliases: [String: String] = [:]
@@ -36,6 +37,11 @@ final class MeetingAgentPanel: NSView {
     private let statusLabel = NSTextField(labelWithString: "正在连接助理…")
     private let transcript = NSStackView()
     private let transcriptBottomSpacer = NSView()
+    private let activityRow = NSStackView()
+    private let activityContainer = NSView()
+    private var activityHeight: NSLayoutConstraint!
+    private let activitySpinner = NSProgressIndicator()
+    private let activityLabel = NSTextField(labelWithString: "正在思考…")
     private let transcriptScroll = NSScrollView()
     private let proactiveSwitch = MeetingTintedSwitch()
     private let proactiveLabel = NSTextField(labelWithString: "旁听")
@@ -190,6 +196,23 @@ final class MeetingAgentPanel: NSView {
         assistantPage.addSubview(proactiveLabel); assistantPage.addSubview(proactiveSwitch)
 
         transcript.orientation = .vertical; transcript.alignment = .leading
+        activitySpinner.style = .spinning; activitySpinner.controlSize = .small
+        activitySpinner.isIndeterminate = true
+        activitySpinner.widthAnchor.constraint(equalToConstant: 16).isActive = true
+        activitySpinner.heightAnchor.constraint(equalToConstant: 16).isActive = true
+        activityLabel.font = .systemFont(ofSize: 12); activityLabel.textColor = MeetingVisualStyle.muted
+        let stop = NSButton(title: "停止", target: self, action: #selector(cancelCurrentTask))
+        stop.isBordered = false; stop.font = .systemFont(ofSize: 12)
+        activityRow.orientation = .horizontal; activityRow.spacing = 8
+        [activitySpinner, activityLabel, stop].forEach { activityRow.addArrangedSubview($0) }
+        activityContainer.translatesAutoresizingMaskIntoConstraints = false
+        activityRow.translatesAutoresizingMaskIntoConstraints = false
+        assistantPage.addSubview(activityContainer); activityContainer.addSubview(activityRow)
+        activityHeight = activityContainer.heightAnchor.constraint(equalToConstant: 0)
+        NSLayoutConstraint.activate([activityHeight,
+            activityRow.leadingAnchor.constraint(equalTo: activityContainer.leadingAnchor),
+            activityRow.centerYAnchor.constraint(equalTo: activityContainer.centerYAnchor),
+            activityRow.trailingAnchor.constraint(lessThanOrEqualTo: activityContainer.trailingAnchor)])
         transcript.spacing = 18
         transcript.edgeInsets = NSEdgeInsets(top: 20, left: 22, bottom: 22, right: 22)
         transcript.translatesAutoresizingMaskIntoConstraints = false
@@ -255,7 +278,10 @@ final class MeetingAgentPanel: NSView {
             transcriptScroll.leadingAnchor.constraint(equalTo: assistantPage.leadingAnchor),
             transcriptScroll.trailingAnchor.constraint(equalTo: assistantPage.trailingAnchor),
             transcriptScroll.topAnchor.constraint(equalTo: proactiveSwitch.bottomAnchor),
-            transcriptScroll.bottomAnchor.constraint(equalTo: composerBox.topAnchor, constant: -14),
+            transcriptScroll.bottomAnchor.constraint(equalTo: activityContainer.topAnchor, constant: -8),
+            activityContainer.leadingAnchor.constraint(equalTo: assistantPage.leadingAnchor, constant: 22),
+            activityContainer.trailingAnchor.constraint(equalTo: assistantPage.trailingAnchor, constant: -22),
+            activityContainer.bottomAnchor.constraint(equalTo: composerBox.topAnchor, constant: -6),
             composerBox.leadingAnchor.constraint(equalTo: assistantPage.leadingAnchor, constant: 16),
             composerBox.trailingAnchor.constraint(equalTo: assistantPage.trailingAnchor, constant: -16),
             composerBox.bottomAnchor.constraint(equalTo: assistantPage.bottomAnchor, constant: -18),
@@ -451,6 +477,9 @@ final class MeetingAgentPanel: NSView {
         var params: [String: Any] = ["text": text]
         composer.string = ""
         composerPlaceholder.isHidden = false
+        // Cover connection/startup latency before the first service snapshot.
+        state["awaiting_response"] = true; state["activity"] = "正在发送…"
+        renderMessages(state["messages"] as? [[String: Any]] ?? [])
         onCommand?("send", params)
     }
 
@@ -463,7 +492,7 @@ final class MeetingAgentPanel: NSView {
         ]
         statusLabel.stringValue = message.isEmpty ? (fallback[status] ?? "助理状态未知") : message
         statusLabel.textColor = MeetingVisualStyle.muted
-        let interrupted = ["failed", "interrupted", "cancelling"].contains(snapshot["conversation_status"] as? String ?? "")
+        let interrupted = ["failed", "interrupted"].contains(snapshot["conversation_status"] as? String ?? "")
         if interrupted { statusLabel.stringValue = "助理已中断，发送消息或重新开启旁听可继续" }
         if snapshot["listening"] as? Bool == true { statusLabel.stringValue = "正在旁听" }
         let needsAttention = ["unavailable", "auth_required"].contains(status) || interrupted || snapshot["listening"] as? Bool == true
@@ -510,7 +539,8 @@ final class MeetingAgentPanel: NSView {
     }
 
     private func renderMessages(_ messages: [[String: Any]]) {
-        let shouldFollow = transcriptScroll.documentView.map { $0.bounds.height - transcriptScroll.contentView.bounds.maxY < 60 } ?? true
+        let newRequest = (state["requests"] as? [[String: Any]] ?? []).contains { requestViews[$0["id"] as? String ?? ""] == nil }
+        let shouldFollow = newRequest || (transcriptScroll.documentView.map { $0.bounds.height - transcriptScroll.contentView.bounds.maxY < 60 } ?? true)
         let live = Set(messages.compactMap { $0["id"] as? String })
         for id in messageCells.keys.filter({ !live.contains($0) }) {
             guard let cell = messageCells[id] else { continue }
@@ -528,6 +558,23 @@ final class MeetingAgentPanel: NSView {
             cell.apply(message)
             order.append(cell)
         }
+        let requests = state["requests"] as? [[String: Any]] ?? []
+        let requestIDs = Set(requests.compactMap { $0["id"] as? String })
+        for id in requestViews.keys.filter({ !requestIDs.contains($0) }) { requestViews.removeValue(forKey: id) }
+        for request in requests {
+            guard let id = request["id"] as? String else { continue }
+            let view = requestViews[id] ?? MeetingAgentRequestView(request: request)
+            requestViews[id] = view
+            view.onResponse = { [weak self] response in self?.onCommand?("respond", response) }
+            order.append(view)
+        }
+        let busy = state["awaiting_response"] as? Bool == true
+        activityContainer.isHidden = !busy; activityHeight.constant = busy ? 26 : 0
+        if busy {
+            activityLabel.stringValue = !requests.isEmpty ? "等待你确认" : state["conversation_status"] as? String == "cancelling" ? "正在停止…" : (state["activity"] as? String ?? "正在思考…")
+            activitySpinner.isHidden = !requests.isEmpty
+            if requests.isEmpty { activitySpinner.startAnimation(nil) } else { activitySpinner.stopAnimation(nil) }
+        } else { activitySpinner.stopAnimation(nil) }
         order.append(transcriptBottomSpacer)
         reconcileStack(transcript, order: order)
         if shouldFollow {
@@ -546,8 +593,74 @@ final class MeetingAgentPanel: NSView {
                 stack.insertArrangedSubview(view,at:index)
             }
             if stack === transcript, let cell = view as? MessageCell { cell.constrainWidth(to: transcript) }
+            if stack === transcript, let request = view as? MeetingAgentRequestView { request.constrainWidth(to: transcript) }
         }
     }
+}
+
+/// Pending interactions are ephemeral and tied to one live turn. Keep fields
+/// alive across progress snapshots so typing is never reset by a refresh.
+private final class MeetingAgentRequestView: NSStackView {
+    var onResponse: (([String: Any]) -> Void)?
+    private let requestID: String
+    private var fields: [String: NSTextField] = [:]
+    private var requiredFields = Set<String>()
+    private let errorLabel = NSTextField(wrappingLabelWithString: "")
+    private var widthConstraint: NSLayoutConstraint?
+    init(request: [String: Any]) {
+        requestID = request["id"] as? String ?? ""
+        super.init(frame: .zero)
+        orientation = .vertical; alignment = .leading; spacing = 8
+        let title = NSTextField(labelWithString: request["title"] as? String ?? "需要你确认")
+        title.font = .systemFont(ofSize: 13, weight: .semibold); addArrangedSubview(title)
+        if let detail = request["detail"] as? String, !detail.isEmpty {
+            let label = NSTextField(wrappingLabelWithString: detail)
+            label.font = .systemFont(ofSize: 12); label.isSelectable = true
+            addArrangedSubview(label); label.widthAnchor.constraint(equalTo: widthAnchor).isActive = true
+        }
+        for question in request["questions"] as? [[String: Any]] ?? [] {
+            guard let id = question["id"] as? String else { continue }
+            let required = question["required"] as? Bool ?? true
+            if required { requiredFields.insert(id) }
+            let label = NSTextField(wrappingLabelWithString: question["question"] as? String ?? "")
+            label.font = .systemFont(ofSize: 13)
+            addArrangedSubview(label); label.widthAnchor.constraint(equalTo: widthAnchor).isActive = true
+            let input: NSTextField = question["isSecret"] as? Bool == true ? NSSecureTextField() : NSTextField()
+            input.placeholderString = required ? "输入回答" : "选填"; fields[id] = input
+            for option in question["options"] as? [[String: Any]] ?? [] {
+                let button = MeetingAgentOptionButton(title: option["label"] as? String ?? "", target: nil, action: nil)
+                button.field = input; button.target = button; button.action = #selector(MeetingAgentOptionButton.choose)
+                button.bezelStyle = .inline; button.toolTip = option["description"] as? String
+                button.lineBreakMode = .byTruncatingTail
+                addArrangedSubview(button); button.widthAnchor.constraint(lessThanOrEqualTo: widthAnchor).isActive = true
+            }
+            addArrangedSubview(input); input.widthAnchor.constraint(equalTo: widthAnchor).isActive = true
+        }
+        let accept = NSButton(title: fields.isEmpty ? "允许这次" : "提交", target: self, action: #selector(acceptRequest))
+        let decline = NSButton(title: fields.isEmpty ? "拒绝" : "跳过", target: self, action: #selector(declineRequest))
+        let actions = NSStackView(views: [accept, decline]); actions.spacing = 8
+        addArrangedSubview(actions)
+        errorLabel.font = .systemFont(ofSize: 11); errorLabel.textColor = .secondaryLabelColor
+        addArrangedSubview(errorLabel); errorLabel.isHidden = true
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    func constrainWidth(to stack: NSStackView) {
+        if widthConstraint == nil { widthConstraint = widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -44) }
+        widthConstraint?.isActive = true
+    }
+    @objc private func acceptRequest() {
+        let answers = fields.mapValues { $0.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) }
+        guard !requiredFields.contains(where: { answers[$0, default: ""].isEmpty }) else {
+            errorLabel.stringValue = "请填写回答"; errorLabel.isHidden = false; return
+        }
+        onResponse?(["request_id": requestID, "accepted": true, "answers": answers])
+    }
+    @objc private func declineRequest() { onResponse?(["request_id": requestID, "accepted": false]) }
+}
+
+private final class MeetingAgentOptionButton: NSButton {
+    weak var field: NSTextField?
+    @objc func choose() { field?.stringValue = title }
 }
 
 /// Keeps the native switch's activation and accessibility behavior while
@@ -755,7 +868,7 @@ private final class MessageCell: NSView {
         addSubview(bubble)
         body.font = .systemFont(ofSize: 14); body.textColor = MeetingVisualStyle.ink
         detail.font = .systemFont(ofSize: 10); detail.textColor = MeetingVisualStyle.faint
-        files.orientation = .vertical; files.alignment = .leading; files.spacing = 6
+        files.orientation = .vertical; files.alignment = .leading; files.spacing = 16
         let stack = NSStackView(views: [body, files, detail]); stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 8
         stack.translatesAutoresizingMaskIntoConstraints = false; bubble.addSubview(stack)
         body.widthAnchor.constraint(equalTo:stack.widthAnchor).isActive=true
@@ -779,21 +892,41 @@ private final class MessageCell: NSView {
         let user = message["role"] as? String == "user"
         let text = message["text"] as? String ?? ""
         if renderedText != text || renderedPlain != user || renderedBasePath != referenceBaseURL.path {
-            let rich = MeetingMarkdown.render(text, plain: user)
-            let references = MeetingAssistantLinks.references(in: text)
             for view in files.arrangedSubviews { files.removeArrangedSubview(view); view.removeFromSuperview() }
-            var seen = Set<String>()
-            for ref in references {
-                if let url = MeetingAssistantLinks.localURL(ref.target, base: referenceBaseURL), seen.insert(url.path).inserted {
+            let rich = MeetingMarkdown.render(user ? text : "", plain: user)
+            body.apply(rich); body.isHidden = !user || text.isEmpty
+            if user {
+                var seen = Set<String>()
+                for ref in MeetingAssistantLinks.references(in: text) {
+                    guard let url = MeetingAssistantLinks.localURL(ref.target, base: referenceBaseURL), seen.insert(url.path).inserted else { continue }
                     let row = MeetingAssistantFileRow(label: ref.label, url: url)
                     files.addArrangedSubview(row); row.widthAnchor.constraint(equalTo: files.widthAnchor).isActive = true
+                }
+            } else {
+                let content = MeetingAssistantLinks.content(in: text, base: referenceBaseURL)
+                let hasImages = content.contains { if case .file(_, let url) = $0 { return MeetingAssistantLinks.isBitmap(url) }; return false }
+                var attachments: [MeetingAssistantFileRow] = []
+                for part in content {
+                    let view: NSView
+                    switch part {
+                    case .text(let prose):
+                        let paragraph = MeetingMarkdownTextView(frame: .zero)
+                        paragraph.apply(MeetingMarkdown.render(prose, plain: false)); view = paragraph
+                    case .file(let label, let url):
+                        let row = MeetingAssistantFileRow(label: label, url: url)
+                        if hasImages && !MeetingAssistantLinks.isBitmap(url) { attachments.append(row); continue }
+                        view = row
+                    }
+                    files.addArrangedSubview(view); view.widthAnchor.constraint(equalTo: files.widthAnchor).isActive = true
+                }
+                if !attachments.isEmpty {
+                    let disclosure = MeetingAssistantAttachments(rows: attachments)
+                    files.addArrangedSubview(disclosure); disclosure.widthAnchor.constraint(equalTo: files.widthAnchor).isActive = true
                 }
             }
             renderedText = text
             renderedPlain = user
             renderedBasePath = referenceBaseURL.path
-            body.apply(rich)
-            body.isHidden = rich.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             // Only user bubbles need a preferred width. Measuring a table
             // without a text-container width on every status update is costly.
             if user { userWidth.constant = max(56, ceil(rich.size().width) + 24) }

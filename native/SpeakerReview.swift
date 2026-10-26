@@ -173,7 +173,7 @@ struct SpeakerReviewIndex {
             guard (0..<8).contains(slot) else{return nil}
             let candidate=SessionSpeakerKey(session:session,source:source,epoch:epoch,identity:"slot:\(slot)")
             guard let key=keys.first(where:{$0==names.canonical(candidate)}),
-                  let name=names.displayName(speaker:key),name.origin == .manual else{return nil}
+                  let name=names.displayName(speaker:key),name.origin == .manual || name.origin == .voiceprint else{return nil}
             if !participants.contains(key) {participants.append(key)}
         }
         return participants.isEmpty ? nil:participants

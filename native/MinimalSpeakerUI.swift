@@ -61,6 +61,7 @@ private final class MinimalSpeakerReviewController:NSObject,NSWindowDelegate,NST
     private var index:SpeakerReviewIndex?
     private var visibleEntries:[SpeakerReviewEntry]=[]
     private var mappedParts:[SpeakerReviewTextPart]=[]
+    private var renderedParagraphCount=0
     private var selectedPartIDs:[String]=[]
     private var selectedTurnIDs:[String]=[]
     private var partItems:[String:[String:Any]]=[:]
@@ -192,8 +193,8 @@ private final class MinimalSpeakerReviewController:NSObject,NSWindowDelegate,NST
         let turns=owner.readingTurns()
         let value=SpeakerReviewIndex.build(session:session,turns:turns,names:owner.naming)
         index=value
-        otherEntries=(value.unassigned+value.simultaneous).sorted{if $0.start != $1.start{return $0.start<$1.start};if $0.end != $1.end{return $0.end<$1.end};return $0.id<$1.id}
-        choices=value.people.map{.person($0.key)}+(!otherEntries.isEmpty ? [.unassigned]:[])
+        otherEntries=value.unassigned
+        choices=value.people.map{.person($0.key)}+(!value.simultaneous.isEmpty ? [.simultaneous]:[])+(!otherEntries.isEmpty ? [.unassigned]:[])
         let newChoiceIDs=choices.map(choiceIdentity),newChoiceTitles=choices.map{title($0,index:value)},newChoiceTooltips=choices.map{choiceTooltip($0)}
         let oldChoiceIDs=previousChoices.map(choiceIdentity)
         let oldFilterTitles=filter.itemTitles
@@ -210,7 +211,7 @@ private final class MinimalSpeakerReviewController:NSObject,NSWindowDelegate,NST
         let selected:Int?
         if let wanted=wanted {selected=choices.firstIndex{if case .person(let key)=$0 {return key==owner.naming.canonical(wanted)};return false}}
         else if previousWasUnassigned {selected=choices.firstIndex{if case .unassigned=$0 {return true};return false}}
-        else if previousWasSimultaneous {selected=choices.firstIndex{if case .unassigned=$0 {return true};return false}}
+        else if previousWasSimultaneous {selected=choices.firstIndex{if case .simultaneous=$0 {return true};return false}}
         else {selected=choices.isEmpty ? nil:0}
         let nextSelection=selected ?? 0
         if listChanged || filter.indexOfSelectedItem != nextSelection {filter.selectItem(at:nextSelection)}
@@ -242,7 +243,7 @@ private final class MinimalSpeakerReviewController:NSObject,NSWindowDelegate,NST
         switch choice {
         case .person(let key):return "person|\(key.session)|\(key.source)|\(key.epoch)|\(key.identity)"
         case .unassigned:return "other"
-        case .simultaneous:return "other"
+        case .simultaneous:return "simultaneous"
         }
     }
 
@@ -431,31 +432,66 @@ private final class MinimalSpeakerReviewController:NSObject,NSWindowDelegate,NST
     private func renderEntries(_ entries:[SpeakerReviewEntry]) {
         let text=NSMutableAttributedString(string:"")
         var mappings:[SpeakerReviewTextPart]=[];var items:[String:[String:Any]]=[:]
+        // The unresolved view is a sentence review, not a bag of isolated
+        // words. Restore reading context without changing any speaker evidence.
+        // Only original unresolved parts get actionable mappings, with their
+        // original turn IDs; a sentence containing several people is never a
+        // new unit of speaker assignment.
+        let contextual:Bool={if case .unassigned=currentChoice{return true};return false}()
+        func scope(_ parent:String,_ item:[String:Any])->String {
+            [parent,item["source_id"] as? String ?? "",item["epoch"] as? String ?? ""].joined(separator:"\u{001F}")
+        }
+        let context=contextual ? Dictionary(grouping:owner?.readingTurns() ?? [],by:{scope($0.parent,$0.item)}):[:]
+        var paragraphs:[[SpeakerReviewEntry]]=[],positions:[String:Int]=[:]
         for entry in entries {
-            let start=owner?.transcriptTimeHeading(entry.start) ?? TranscriptTimeline.timestamp(entry.start)
+            let key=scope(entry.parent,entry.turn.item)
+            if contextual,let position=positions[key] {paragraphs[position].append(entry)}
+            else {positions[key]=paragraphs.count;paragraphs.append([entry])}
+        }
+        if contextual {
+            func beginning(_ paragraph:[SpeakerReviewEntry])->Double {
+                let entry=paragraph[0]
+                return context[scope(entry.parent,entry.turn.item)]?.first.map{TranscriptTimeline.start($0.item)} ?? entry.start
+            }
+            paragraphs.sort {let a=beginning($0),b=beginning($1);return a != b ? a<b:$0[0].id<$1[0].id}
+        }
+        renderedParagraphCount=paragraphs.count
+        for paragraph in paragraphs {
+            let entry=paragraph[0]
+            let selected=paragraph.flatMap { value in (value.turn.parts.isEmpty ? [(value.id,value.turn.item)]:value.turn.parts).map{($0.0,value.id)} }
+            let turnIDs=Dictionary(selected,uniquingKeysWith:{first,_ in first})
+            let selectedIDs=Set(turnIDs.keys)
+            let unresolved=Set(paragraph.flatMap(\.unresolvedPartIDs))
+            let originalParts=paragraph.flatMap{$0.turn.parts.isEmpty ? [($0.id,$0.turn.item)]:$0.turn.parts}
+            let sentence=context[scope(entry.parent,entry.turn.item)]?.flatMap{$0.parts.isEmpty ? [($0.id,$0.item)]:$0.parts} ?? []
+            let parts = !sentence.isEmpty && Set(originalParts.map{$0.0}).isSubset(of:Set(sentence.map{$0.0})) ? sentence:originalParts
+            let at=parts.first.map{TranscriptTimeline.start($0.1)} ?? entry.start
+            let start=owner?.transcriptTimeHeading(at) ?? TranscriptTimeline.timestamp(at)
             let source=audioSourceLabel(entry.turn.item)
-            let reason=entry.personKey==nil ? " · "+entryLabel(entry):""
+            let reason=contextual ? " · 原句 · 下划线部分待确认":(entry.personKey==nil ? " · "+entryLabel(entry):"")
             let heading=(start+"  ·  "+source+reason+"\n")
             let headingStyle=NSMutableParagraphStyle();headingStyle.lineSpacing=4;headingStyle.paragraphSpacing=4
             text.append(NSAttributedString(string:heading,attributes:[.font:NSFont.systemFont(ofSize:12),.foregroundColor:MeetingVisualStyle.muted,.paragraphStyle:headingStyle]))
-            let parts=entry.turn.parts.isEmpty ? [(entry.id,entry.turn.item)] : entry.turn.parts
             let bodyStyle=NSMutableParagraphStyle();bodyStyle.lineSpacing=7;bodyStyle.paragraphSpacing=24
             for (id,item) in parts {
                 let body=item["text"] as? String ?? ""
                 let manualName=owner?.naming.name(segment:id)
-                if entry.unresolvedPartIDs.contains(id),let manualName {
+                if unresolved.contains(id),let manualName {
                     text.append(NSAttributedString(string:"〔"+manualName+"〕",attributes:[.font:NSFont.systemFont(ofSize:12),.foregroundColor:MeetingVisualStyle.muted]))
                 }
                 let bodyStart=text.length
                 var bodyAttributes:[NSAttributedString.Key:Any]=[.font:NSFont.systemFont(ofSize:16),.foregroundColor:MeetingVisualStyle.ink,.paragraphStyle:bodyStyle]
-                if entry.unresolvedPartIDs.contains(id),manualName==nil {
+                if contextual && !unresolved.contains(id) {bodyAttributes[.foregroundColor]=MeetingVisualStyle.muted}
+                if unresolved.contains(id),manualName==nil {
                     bodyAttributes[.underlineStyle]=NSUnderlineStyle.single.rawValue
                     bodyAttributes[.toolTip]="归属尚未确认；可在“其他发言”中查看并人工更正。"
                 }
                 text.append(NSAttributedString(string:body,attributes:bodyAttributes))
                 let range=NSRange(location:bodyStart,length:(body as NSString).length)
-                if range.length>0 {mappings.append(SpeakerReviewTextPart(range:range,id:id,turnID:entry.id,item:item))}
-                items[id]=item
+                if !contextual || selectedIDs.contains(id) {
+                    if range.length>0 {mappings.append(SpeakerReviewTextPart(range:range,id:id,turnID:turnIDs[id] ?? entry.id,item:item))}
+                    items[id]=item
+                }
             }
             text.append(NSAttributedString(string:"\n",attributes:[.paragraphStyle:bodyStyle]))
         }
@@ -830,13 +866,13 @@ private final class MinimalSpeakerReviewController:NSObject,NSWindowDelegate,NST
               overlapController.nameField.isEnabled,overlapController.renameButton.isEnabled,overlapController.assignButton.isEnabled,
               overlapController.originalButton.isEnabled else{throw Failure(code:"speaker_review_named_overlap_ui_projection")}
         overlapController.choices=[.unassigned]
-        overlapController.otherEntries=(overlapIndex.unassigned+overlapIndex.simultaneous).sorted{if $0.start != $1.start{return $0.start<$1.start};return $0.id<$1.id}
+        overlapController.otherEntries=overlapIndex.unassigned
         overlapController.filter.removeAllItems();overlapController.filter.addItem(withTitle:overlapController.title(.unassigned,index:overlapIndex))
         overlapController.filter.selectItem(at:0);overlapController.displayCurrentChoice()
         let unknownPart=overlapController.mappedPart(for:"unknown-overlap")
         guard overlapController.choices.count==1,overlapController.title(.unassigned,index:overlapIndex)=="其他发言 · 可查看",
-              overlapController.visibleEntries.count==overlapIndex.unassigned.count+overlapIndex.simultaneous.count,
-              overlapController.visibleEntries.map(\.id)==["named-overlap","unknown-overlap"],
+              overlapController.visibleEntries.count==overlapIndex.unassigned.count,
+              overlapController.visibleEntries.map(\.id)==["unknown-overlap"],
               !overlapController.textView.string.contains("〔待确认〕"),
               (unknownPart.flatMap{overlapController.textView.textStorage?.attribute(.underlineStyle,at:$0.range.location,effectiveRange:nil) as? Int} ?? 0) != 0,
               unknownPart.flatMap{overlapController.textView.textStorage?.attribute(.toolTip,at:$0.range.location,effectiveRange:nil) as? String}?.contains("其他发言")==true else{throw Failure(code:"speaker_review_other_speech_single_entry")}
@@ -1199,6 +1235,26 @@ private final class MinimalSpeakerReviewController:NSObject,NSWindowDelegate,NST
     }
 
     private func mappedPart(for id:String)->SpeakerReviewTextPart? {mappedParts.first{$0.id==id}}
+    @MainActor func renderSavedContext(directory:URL)throws->[String:Any] {
+        guard Credential.offline,owner?.previewRenderOnly==true else{throw Failure(code:"saved_context_review_scope")}
+        let window=SpeakerReviewWindow(contentRect:NSRect(x:0,y:0,width:800,height:720),styleMask:[.titled,.closable,.resizable],backing:.buffered,defer:false)
+        present(in:window,for:nil);window.orderOut(nil)
+        defer {window.close()}
+        guard let row=choices.firstIndex(where:{if case .unassigned=$0{return true};return false}) else{return ["paragraphs":0,"parts":0]}
+        filter.selectItem(at:row);displayCurrentChoice();updateControls();updateTextGeometry()
+        let expected=Set(visibleEntries.flatMap(\.partIDs)),actual=Set(mappedParts.map(\.id))
+        guard expected==actual,mappedParts.count==actual.count,renderedParagraphCount<=visibleEntries.count,
+              mappedParts.allSatisfy({(textView.string as NSString).substring(with:$0.range)==$0.item["text"] as? String}) else{throw Failure(code:"saved_context_mapping_changed")}
+        textView.setSelectedRange(NSRange(location:0,length:(textView.string as NSString).length));updateSelection()
+        guard Set(selectedPartIDs)==expected else{throw Failure(code:"saved_context_selection_leaked")}
+        if selectedTurnIDs.count>1 {guard !nameField.isEnabled,!renameButton.isEnabled,!assignButton.isEnabled else{throw Failure(code:"saved_context_cross_person_assignment")}}
+        textView.setSelectedRange(NSRange(location:0,length:0));updateSelection()
+        textView.scrollRangeToVisible(NSRange(location:0,length:0));window.contentView?.layoutSubtreeIfNeeded()
+        try textView.string.write(to:directory.appendingPathComponent("other-speech-context.txt"),atomically:true,encoding:.utf8)
+        try saveWindow(window,to:directory.appendingPathComponent("other-speech-context.png"))
+        return ["original_entries":visibleEntries.count,"paragraphs":renderedParagraphCount,"parts":actual.count,
+                "all_unresolved_parts_preserved":true,"context_cannot_be_reassigned":true,"original_turn_boundaries_preserved":true]
+    }
     private func saveWindow(_ window:NSWindow,to url:URL)throws {
         guard let view=window.contentView else {throw Failure(code:"speaker_review_view_missing")}
         let bounds=view.bounds
@@ -1207,6 +1263,10 @@ private final class MinimalSpeakerReviewController:NSObject,NSWindowDelegate,NST
         guard let png=bitmap.representation(using:.png,properties:[:]) else {throw Failure(code:"speaker_review_png_unavailable")}
         try png.write(to:url,options:.atomic)
     }
+}
+
+@MainActor func renderSavedUnassignedReview(owner:Delegate,directory:URL)throws->[String:Any] {
+    try MinimalSpeakerReviewController(owner:owner).renderSavedContext(directory:directory)
 }
 
 extension Delegate {

@@ -10,6 +10,19 @@ from codex_runtime import CodexRuntime, RuntimeErrorCode
 class CodexTransportTests(unittest.IsolatedAsyncioTestCase):
     """Protocol failure injection; live subscription evidence is a separate probe."""
 
+    async def test_user_execution_and_listener_reset_permissions_every_turn(self):
+        runtime=CodexRuntime();runtime.request=AsyncMock(return_value={'turn':{'id':'t'}})
+        await runtime.start_turn('thread','我主动交办时要能完整执行',execution_directory='/tmp/zaichang-output')
+        execution=runtime.request.await_args.args[1]
+        self.assertEqual(execution['approvalPolicy'],'on-request')
+        self.assertEqual(execution['sandboxPolicy']['type'],'workspaceWrite')
+        self.assertEqual(execution['cwd'],'/tmp/zaichang-output')
+        await runtime.start_turn('thread','旁听保持只读')
+        listener=runtime.request.await_args.args[1]
+        self.assertEqual(listener['approvalPolicy'],'never')
+        self.assertEqual(listener['sandboxPolicy']['type'],'readOnly')
+        self.assertNotIn('model',listener)
+
     async def test_lost_start_reply_blocks_replay_without_blocking_other_thread(self):
         runtime = CodexRuntime()
         runtime._send = AsyncMock()

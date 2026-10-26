@@ -486,13 +486,19 @@ enum SpeakerRefinementArtifact {
             if try speakerJSONEqual(output,prior) {return}
             if output["basis"] as? String=="unknown",output["reason"] as? String=="acoustic_unresolved",Set(output.keys)==Set(["basis","reason"]) {return}
             guard output["basis"] as? String=="meeting_reconciliation",output["acoustic_verified"] as? Bool==true,
-                  Set(output.keys).isSubset(of:Set(["basis","source_id","epoch","identity_key","acoustic_verified","echo_of","solo_verified","slot_continuity"])) else{throw SpeakerRefinementArtifactError.invalidArtifact}
+                  Set(output.keys).isSubset(of:Set(["basis","source_id","epoch","identity_key","acoustic_verified","echo_of","solo_verified","slot_continuity","local_continuity"])) else{throw SpeakerRefinementArtifactError.invalidArtifact}
             if output["slot_continuity"] != nil {
                 guard output["slot_continuity"] as? Bool==true,oldBasis=="anonymous_cluster" || oldBasis=="meeting_reconciliation",
                       let lo=event["start"] as? Double,let hi=event["end"] as? Double,hi>lo,hi-lo<1.5 else{throw SpeakerRefinementArtifactError.invalidArtifact}
             }
             var scoped=event;scoped["speaker"]=output
             guard let key=SessionSpeakerKey.from(scoped),evidence.contains(key) else{throw SpeakerRefinementArtifactError.unknownSlot}
+            if output["local_continuity"] != nil {
+                guard output["local_continuity"] as? Bool==true,oldBasis=="unknown" || (oldBasis=="multiple" && output["solo_verified"] as? Bool==true),
+                      key.source==event["source_id"] as? String,key.epoch==event["epoch"] as? String,
+                      let lo=event["start"] as? Double,let hi=event["end"] as? Double,hi>lo,hi-lo<=4,
+                      output["echo_of"]==nil,output["slot_continuity"]==nil else{throw SpeakerRefinementArtifactError.invalidArtifact}
+            }
             if let echo=output["echo_of"] {
                 guard audioSourceCoreID(event["source_id"] as? String ?? "")=="mic",let id=echo as? String,
                       let range=echoReferences[id],let lo=event["start"] as? Double,let hi=event["end"] as? Double,hi>lo,
