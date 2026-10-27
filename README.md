@@ -15,7 +15,7 @@
 
 <p align="center"><sub>Apple Silicon · macOS 15+ · 开源 MIT · 转写与 AI 使用你自己的服务账号</sub></p>
 
-## 会议里，原文和助理在同一个窗口
+## 会议里，原文和概览在同一个窗口
 
 ![真实原生界面：英文原文、逐句中文翻译和会议概览](docs/assets/demo-overview-20261027.png)
 
