@@ -111,6 +111,7 @@ enum SavedVoiceRecognition {
                       (item["speaker"] as? [String:Any])?["echo_of"] == nil,
                       (item["speaker"] as? [String:Any])?["slot_continuity"] as? Bool != true,
                       (item["speaker"] as? [String:Any])?["local_continuity"] as? Bool != true,
+                      (item["speaker"] as? [String:Any])?["bridged"] as? Bool != true,
                       audioSourceCoreID(item["source_id"] as? String ?? "") != "mic" || audioSourceCoreID(key.source)=="mic",
                       (item["quality_flags"] as? [String] ?? []).isEmpty,
                       let start=item["start"] as? Double,let end=item["end"] as? Double,start.isFinite,end.isFinite,start>=0,end-start>=2,end<=86400,

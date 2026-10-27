@@ -482,11 +482,22 @@ enum SpeakerRefinementArtifact {
     private static func validateSpeaker(_ output:[String:Any],prior:[String:Any],event:[String:Any],evidence:Set<SessionSpeakerKey>,allowAnonymousRemap:Bool,acoustic:Bool=false,echoReferences:[String:(Double,Double)]=[:])throws {
         let oldBasis=prior["basis"] as? String
         guard oldBasis != nil else{throw SpeakerRefinementArtifactError.invalidArtifact}
-        if acoustic,(["unknown","anonymous_cluster","meeting_reconciliation","channel"].contains(oldBasis!) || (oldBasis=="multiple" && output["solo_verified"] as? Bool==true)) {
+        let echoOutput=output["basis"] as? String=="unknown" && output["reason"] as? String=="playback_echo"
+        if acoustic,(["unknown","anonymous_cluster","meeting_reconciliation","channel"].contains(oldBasis!) || (oldBasis=="multiple" && (output["solo_verified"] as? Bool==true || output["bridged"] as? Bool==true || echoOutput))) {
+            // An echo copy must lie inside simultaneous remote speech.
+            func validateEcho(_ value:Any?)throws {
+                guard audioSourceCoreID(event["source_id"] as? String ?? "")=="mic",let id=value as? String,
+                      let range=echoReferences[id],let lo=event["start"] as? Double,let hi=event["end"] as? Double,hi>lo,
+                      max(0,min(hi,range.1)-max(lo,range.0))/(hi-lo)>=0.5 else{throw SpeakerRefinementArtifactError.invalidArtifact}
+            }
             if try speakerJSONEqual(output,prior) {return}
             if output["basis"] as? String=="unknown",output["reason"] as? String=="acoustic_unresolved",Set(output.keys)==Set(["basis","reason"]) {return}
+            if echoOutput {
+                guard Set(output.keys)==Set(["basis","reason","echo_of"]) else{throw SpeakerRefinementArtifactError.invalidArtifact}
+                try validateEcho(output["echo_of"]);return
+            }
             guard output["basis"] as? String=="meeting_reconciliation",output["acoustic_verified"] as? Bool==true,
-                  Set(output.keys).isSubset(of:Set(["basis","source_id","epoch","identity_key","acoustic_verified","echo_of","solo_verified","slot_continuity","local_continuity"])) else{throw SpeakerRefinementArtifactError.invalidArtifact}
+                  Set(output.keys).isSubset(of:Set(["basis","source_id","epoch","identity_key","acoustic_verified","echo_of","solo_verified","slot_continuity","local_continuity","bridged"])) else{throw SpeakerRefinementArtifactError.invalidArtifact}
             if output["slot_continuity"] != nil {
                 guard output["slot_continuity"] as? Bool==true,oldBasis=="anonymous_cluster" || oldBasis=="meeting_reconciliation",
                       let lo=event["start"] as? Double,let hi=event["end"] as? Double,hi>lo,hi-lo<1.5 else{throw SpeakerRefinementArtifactError.invalidArtifact}
@@ -499,11 +510,12 @@ enum SpeakerRefinementArtifact {
                       let lo=event["start"] as? Double,let hi=event["end"] as? Double,hi>lo,hi-lo<=4,
                       output["echo_of"]==nil,output["slot_continuity"]==nil else{throw SpeakerRefinementArtifactError.invalidArtifact}
             }
-            if let echo=output["echo_of"] {
-                guard audioSourceCoreID(event["source_id"] as? String ?? "")=="mic",let id=echo as? String,
-                      let range=echoReferences[id],let lo=event["start"] as? Double,let hi=event["end"] as? Double,hi>lo,
-                      max(0,min(hi,range.1)-max(lo,range.0))/(hi-lo)>=0.85 else{throw SpeakerRefinementArtifactError.invalidArtifact}
+            if output["bridged"] != nil {
+                guard output["bridged"] as? Bool==true,["unknown","multiple","channel"].contains(oldBasis!),
+                      let lo=event["start"] as? Double,let hi=event["end"] as? Double,hi>lo,hi-lo<=2,
+                      output["echo_of"]==nil,output["slot_continuity"]==nil,output["local_continuity"]==nil else{throw SpeakerRefinementArtifactError.invalidArtifact}
             }
+            if let echo=output["echo_of"] {try validateEcho(echo)}
             return
         }
         if oldBasis != "unknown" && !(allowAnonymousRemap && oldBasis=="anonymous_cluster") {

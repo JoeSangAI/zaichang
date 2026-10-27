@@ -197,11 +197,6 @@ struct VoiceprintRecommendation:Equatable {
         self.personID=personID;self.name=name;self.archiveRevision=archiveRevision;self.evidenceCount=evidenceCount;self.support=support;self.groupConsistent=groupConsistent;self.recognizedSupport=recognizedSupport
     }
 }
-func quickVoiceConfirmationSegmentIDs(candidate:VoiceprintRecommendation,groupIDs:[String],learningEnabled:Bool)->[String] {
-    guard learningEnabled,!groupIDs.isEmpty else{return []}
-    let scope=candidate.groupConsistent ? groupIDs:candidate.support.map(\.id).filter{groupIDs.contains($0)}
-    return Array(Set(scope)).sorted()
-}
 struct VoiceprintEvidence {
     let id:String;let revision:Int;let key:SessionSpeakerKey;let start:Double;let end:Double;let vector:[Double];let context:VoiceprintAcousticContext
     static func events(from parent:[String:Any],domain:String)->[[String:Any]] {

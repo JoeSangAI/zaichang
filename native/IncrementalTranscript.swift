@@ -113,7 +113,7 @@ struct TranscriptExportSnapshot {
         return speaker["basis"] as? String=="multiple" && speaker["reason"] as? String=="overlap" ? "多人重叠":"待确认"
     }
     private func turnLabel(_ turn:ReadingTurn)->String {
-        if turn.parts.contains(where:{part in let speaker=part.1["speaker"] as? [String:Any] ?? [:];return speaker["basis"] as? String=="multiple" && speaker["reason"] as? String=="overlap"}) {return "多人重叠"}
+        if turn.parts.contains(where:{part in let speaker=part.1["speaker"] as? [String:Any] ?? [:];return speaker["basis"] as? String=="multiple" && speaker["reason"] as? String=="overlap" && identity(part.0,part.1)==nil}) {return "多人重叠"}
         if let part=turn.parts.first(where:{identity($0.0,$0.1) != nil}) {return label(part.0,part.1)}
         return label(turn.id,turn.item)
     }

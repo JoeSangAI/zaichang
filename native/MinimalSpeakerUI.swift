@@ -24,13 +24,15 @@ private final class SpeakerReviewWindow:NSWindow {
     var reviewController:MinimalSpeakerReviewController?
 }
 
-private final class MinimalSpeakerReviewController:NSObject,NSWindowDelegate,NSTextViewDelegate,NSTextFieldDelegate,AVAudioPlayerDelegate {
+private final class MinimalSpeakerReviewController:NSObject,NSWindowDelegate,NSTextViewDelegate,NSComboBoxDelegate,AVAudioPlayerDelegate {
     weak var owner:Delegate?
     weak var window:NSWindow?
     private let filter=NSPopUpButton(frame:.zero,pullsDown:false)
     private let coarseStatus=CoarseProcessingStatusView()
     private let target=NSPopUpButton(frame:.zero,pullsDown:false)
-    private let nameField=NSTextField(string:"")
+    // Typing or picking an existing name of this meeting joins that person;
+    // the list prevents a second spelling from creating a second person.
+    private let nameField=NSComboBox(string:"")
     private let renameButton=NSButton(title:"确认",target:nil,action:nil)
     private let reuseGroupButton=NSPopUpButton(frame:.zero,pullsDown:true)
     private let assignButton=NSButton(title:"重新归属",target:nil,action:nil)
@@ -124,6 +126,7 @@ private final class MinimalSpeakerReviewController:NSObject,NSWindowDelegate,NST
         // never when AppKit ends editing while focus moves to another control.
         nameField.target=nil;nameField.action=nil
         nameField.setAccessibilityLabel("发言人姓名")
+        nameField.completes=true;nameField.numberOfVisibleItems=10;nameField.toolTip="可输入新姓名，或从本场已有发言人中选择以合并。"
         renameButton.target=self;renameButton.action=#selector(renameSelectedPerson)
         reuseGroupButton.setAccessibilityLabel("合并到本场已有发言人组")
         reuseGroupButton.toolTip="明确选择一个本场已有组；同名人物不会自动合并。"
@@ -194,6 +197,8 @@ private final class MinimalSpeakerReviewController:NSObject,NSWindowDelegate,NST
         let value=SpeakerReviewIndex.build(session:session,turns:turns,names:owner.naming)
         index=value
         otherEntries=value.unassigned
+        let existingNames=meetingNames(value)
+        if (nameField.objectValues as? [String]) != existingNames {nameField.removeAllItems();nameField.addItems(withObjectValues:existingNames)}
         choices=value.people.map{.person($0.key)}+(!value.simultaneous.isEmpty ? [.simultaneous]:[])+(!otherEntries.isEmpty ? [.unassigned]:[])
         let newChoiceIDs=choices.map(choiceIdentity),newChoiceTitles=choices.map{title($0,index:value)},newChoiceTooltips=choices.map{choiceTooltip($0)}
         let oldChoiceIDs=previousChoices.map(choiceIdentity)
@@ -312,6 +317,18 @@ private final class MinimalSpeakerReviewController:NSObject,NSWindowDelegate,NST
     @objc private func rejectVoice() {guard !persistenceInFlight,let key=selectedChoiceKey else{return};nameDraftChanged=false;owner?.rejectVoiceprintRecommendation(key);refresh(preferred:key)}
     @objc private func changeFilter() {stopPreview();nameDraftChanged=false;displayCurrentChoice();updateControls()}
     func controlTextDidChange(_ notification:Notification) {nameDraftChanged=true;updateControls()}
+    func comboBoxSelectionDidChange(_ notification:Notification) {
+        // The field text updates after this callback; take the picked value.
+        guard let name=nameField.objectValueOfSelectedItem as? String else{return}
+        nameField.stringValue=name;nameDraftChanged=true;updateControls()
+    }
+    private func meetingNames(_ value:SpeakerReviewIndex)->[String] {
+        var seen=Set<String>()
+        return value.people.compactMap{owner?.naming.displayName(speaker:$0.key)?.value}.filter{seen.insert($0).inserted}
+    }
+    private func existingPerson(named name:String)->SpeakerReviewPerson? {
+        index?.people.first{owner?.naming.displayName(speaker:$0.key)?.value==name}
+    }
     func control(_ control:NSControl,textView:NSTextView,doCommandBy commandSelector:Selector)->Bool {
         if commandSelector == #selector(NSResponder.insertNewline(_:)) {
             if textView.hasMarkedText() {return false}
@@ -646,7 +663,7 @@ private final class MinimalSpeakerReviewController:NSObject,NSWindowDelegate,NST
         if candidate != nil,owner.naming.values.contains(where:{row in owner.naming.key(segment:row.key).map{person.keys.contains($0)}==true && row.value != name}) {
             scopeLabel.stringValue="这组已有不同的人工姓名，请在“更多更正”中逐段核对。";return
         }
-        let previous=owner.naming
+        let previous=owner.naming,joined=existingPerson(named:name).map{$0.key != person.key} ?? false
         guard owner.naming.renameSpeaker(keys:person.keys,name:name) else{return}
         owner.cancelPendingVoiceprintMemory()
         // Keep per-source identity keys intact. A grouped rename must not enroll
@@ -662,12 +679,21 @@ private final class MinimalSpeakerReviewController:NSObject,NSWindowDelegate,NST
             } else {owner.rememberManualVoiceprint(key:key,name:name)}
         }
         let scope=person.keys.count>1 ? "\(person.keys.count)个本场声音分组、":""
-        persistMutation(owner,previous:previous,preferred:key,success:"已保存姓名：本场\(scope)「\(person.title)」的 \(person.entries.count) 轮发言。",failure:"姓名未保存；已恢复原姓名，输入内容保留，可重试。",preserveDraft:true)
+        persistMutation(owner,previous:previous,preferred:key,success:joined ? "已合并到本场「\(name)」：\(person.entries.count) 轮发言。":"已保存姓名：本场\(scope)「\(person.title)」的 \(person.entries.count) 轮发言。",failure:"姓名未保存；已恢复原姓名，输入内容保留，可重试。",preserveDraft:true)
     }
     private func saveSelectedName() {
         guard let owner,!persistenceInFlight,!selectedPartIDs.isEmpty,selectedTurnIDs.count==1,renameButton.isEnabled else{return}
         let ids=selectedPartIDs,name=nameField.stringValue.trimmingCharacters(in:.whitespacesAndNewlines),previous=owner.naming
-        guard owner.naming.confirmSegments(ids,name:name,learn:VoiceprintLearningPolicy().isEnabled) else{return}
+        let learn=VoiceprintLearningPolicy().isEnabled
+        if let person=existingPerson(named:name),owner.naming.assignBatch(segmentIDs:ids,to:person.key,humanConfirmed:true) {
+            // Join the existing person instead of labelling a loose sentence.
+            if owner.naming.name(speaker:person.key)==nil {owner.naming.renameSpeaker(keys:person.keys,name:name)}
+            owner.naming.attachConfirmation(segmentIDs:ids,name:name,learn:learn)
+            owner.cancelPendingVoiceprintMemory()
+            persistMutation(owner,previous:previous,preferred:person.key,success:"已归入「"+name+"」；仅修改所选发言。",failure:"归属未保存；已恢复原归属，可重试。",preserveDraft:true)
+            return
+        }
+        guard owner.naming.confirmSegments(ids,name:name,learn:learn) else{return}
         persistMutation(owner,previous:previous,preferred:selectedChoiceKey,success:"已保存「"+name+"」；仅修改所选发言。",failure:"姓名未保存；已恢复原姓名，输入内容保留，可重试。",preserveDraft:true)
     }
 

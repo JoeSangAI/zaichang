@@ -12,6 +12,8 @@ enum MeetingAcousticRefinement {
     struct Anchor {let key:SessionSpeakerKey;let source:String;let start:Double;let end:Double;let text:String;let vector:[Double]}
     struct Profile {let key:SessionSpeakerKey;let anchors:[Anchor];let center:[Double]}
     struct Match {let key:SessionSpeakerKey;let score:Double;let margin:Double}
+    /// AEC output/raw microphone energy at or below this is loudspeaker playback.
+    static let playbackSuppression=0.5
     // Language uncertainty concerns words, not the speaker's voice.
     static func usableVoice(_ event:[String:Any])->Bool {
         event["final"] as? Bool==true && event["end_time_known"] as? Bool==true &&
@@ -89,9 +91,17 @@ enum MeetingAcousticRefinement {
             let raw="mic-raw"+source.dropFirst(3)
             return FileManager.default.fileExists(atPath:directory.appendingPathComponent(raw+"-manifest.json").path) ? raw:source
         }
+        /// AEC output / raw microphone energy ratio. Speech from the room keeps
+        /// ~0.9+; loudspeaker playback picked up by the microphone is mostly
+        /// removed by AEC. Long spans are read in bounded 10-second windows.
         func suppression(_ source:String,_ lo:Double,_ hi:Double)->Double? {
-            let raw=voiceSource(source);guard raw != source,let a=try? window(raw,lo,hi),let b=try? window(source,lo,hi),!a.isEmpty else{return nil}
-            let ar=a.reduce(0.0){$0+Double($1*$1)},br=b.reduce(0.0){$0+Double($1*$1)}
+            let raw=voiceSource(source);guard raw != source,hi>lo else{return nil}
+            var ar=0.0,br=0.0,cursor=lo
+            while hi-cursor>=0.05 {
+                let next=min(hi,cursor+10);defer{cursor=next}
+                guard let a=try? window(raw,cursor,next),let b=try? window(source,cursor,next),!a.isEmpty else{return nil}
+                ar+=a.reduce(0.0){$0+Double($1*$1)};br+=b.reduce(0.0){$0+Double($1*$1)}
+            }
             return ar>1e-8 ? sqrt(br/ar):nil
         }
     }
@@ -149,7 +159,7 @@ enum MeetingAcousticRefinement {
                 guard let key=SessionSpeakerKey.from(row),let lo=row["start"] as? Double,let hi=row["end"] as? Double,hi-lo>=1.5 else{continue}
                 let length=min(3,hi-lo),count=min(3,max(1,Int((hi-lo)/3)))
                 let middle=(lo+hi)/2,a=middle-length/2,b=middle+length/2
-                if !(audioSourceCoreID(source)=="mic" && audio.suppression(source,a,b).map{$0<0.25}==true) {
+                if !(audioSourceCoreID(source)=="mic" && audio.suppression(source,a,b).map{$0<=playbackSuppression}==true) {
                     anchorCandidates[key,default:[]].append(Anchor(key:key,source:source,start:a,end:b,text:row["text"] as? String ?? "",vector:[]))
                 }
                 // Even one long utterance can supply separate, non-overlapping
@@ -157,7 +167,7 @@ enum MeetingAcousticRefinement {
                 // enrollment or multiple independent consent examples.
                 for i in 0..<count where count>1 {
                     let a=count==1 ? (lo+hi-length)/2:lo+Double(i)*(hi-lo-length)/Double(count-1),b=a+length
-                    if audioSourceCoreID(source)=="mic",let ratio=audio.suppression(source,a,b),ratio<0.25 {continue}
+                    if audioSourceCoreID(source)=="mic",let ratio=audio.suppression(source,a,b),ratio<=playbackSuppression {continue}
                     singleUtteranceCandidates[key,default:[]].append(Anchor(key:key,source:source,start:a,end:b,text:row["text"] as? String ?? "",vector:[]))
                 }
             }
@@ -362,21 +372,34 @@ enum MeetingAcousticRefinement {
             matches[i]=Match(key:group[0].key,score:0,margin:0);retainedSlots.insert(i)
         }
         // Echo removal is a reading projection, never deletion of the source.
-        // Require independent audio identity, AEC attenuation, matching words
-        // and simultaneous remote speech. Double talk / local questions stay.
-        let remote=units.indices.filter{audioSourceCoreID(units[$0].source) != "mic" && matches[$0] != nil}
-        for (i,u) in units.enumerated() where u.usable && audioSourceCoreID(u.source)=="mic" {
-            guard let m=matches[i],m.score>=0.65 else{continue}
-            let a=normalized(u.text);guard a.count>=4 else{continue}
-            let duration=min(3,u.end-u.start),mid=(u.start+u.end)/2
-            guard duration>=0.25 else{continue}
-            let ratio=audio.suppression(u.source,mid-duration/2,mid+duration/2)
-            guard ratio.map{$0<0.20}==true || echoGroups.contains(m.key) else{continue}
-            if let j=remote.first(where:{j in
-                let r=units[j],overlap=max(0,min(u.end,r.end)-max(u.start,r.start))
-                return matches[j]!.key==m.key && overlap/(u.end-u.start)>=0.85 && sameWords(a,normalized(r.text))
-            }) {echoes[i]=units[j].id}
+        // A microphone near the loudspeaker yields a second, often garbled ASR
+        // copy of remote speech, so its words rarely match. AEC measures the
+        // copy directly: during remote speech it removes most raw microphone
+        // energy, while a local talker keeps most of it, even in double talk.
+        // A clear match to a microphone-only voice still stays local speech.
+        // Without AEC evidence, the same voice saying the same words at the
+        // same time is required instead.
+        let remote=units.indices.filter{audioSourceCoreID(units[$0].source) != "mic"}
+        for (i,u) in units.enumerated() where u.usable && audioSourceCoreID(u.source)=="mic" && u.end-u.start>=0.25 {
+            let covering=remote.map{j in (j,max(0,min(u.end,units[j].end)-max(u.start,units[j].start)))}.max{$0.1<$1.1}
+            guard let covering,covering.1/(u.end-u.start)>=0.5 else{continue}
+            let j=covering.0,overlap=covering.1
+            if let ratio=audio.suppression(u.source,u.start,u.end),ratio<=playbackSuppression {
+                // AEC also dampens a quiet local reply during double talk. Keep
+                // it when it sounds like this meeting's microphone voice; real
+                // playback copies score near zero against that voice.
+                let duration=min(3,u.end-u.start),mid=(u.start+u.end)/2,lo=mid-duration/2,hi=mid+duration/2
+                let local=vector(u.source,lo,hi).map{v in groups.indices.contains{g in
+                    groups[g].allSatisfy{audioSourceCoreID($0.key.source)=="mic"} &&
+                    (score(v,references[g].filter{!($0.source==u.source && $0.start<hi && $0.end>lo)}) ?? 0)>=0.45
+                }} ?? false
+                if !local {echoes[i]=units[j].id;continue}
+            }
+            guard let m=matches[i],m.score>=0.65,echoGroups.contains(m.key),overlap/(u.end-u.start)>=0.85,normalized(u.text).count>=4,
+                  matches[j]?.key==m.key,sameWords(normalized(u.text),normalized(units[j].text)) else{continue}
+            echoes[i]=units[j].id
         }
+        for i in echoes.keys {matches[i]=nil}
         // Recover word fragments from local speaker activity, including voices
         // whose meeting-wide embedding profile could not be built. Only raw
         // non-overlapping identities (including manual corrections) are anchors.
@@ -387,14 +410,14 @@ enum MeetingAcousticRefinement {
             return row["speaker"] as? [String:Any] ?? [:]
         }
         let continuityReferences=referenceUnits.enumerated().compactMap { i,u -> Unit? in
-            guard u.usable,!u.overlap,let key=u.key,u.end-u.start>=0.4,
+            guard u.usable,!u.overlap,echoes[i]==nil,let key=u.key,u.end-u.start>=0.4,
                   !(matches[i].map { match in
                       !groups.contains(where:{$0[0].key==match.key && $0.contains(where:{$0.key==key})}) && match.key != key
                   } ?? false) else{return nil}
             return u
         }
         var localContinuity=Set<Int>()
-        for (i,u) in units.enumerated() where u.usable && u.key==nil && matches[i]==nil && u.end-u.start<=4 {
+        for (i,u) in units.enumerated() where u.usable && u.key==nil && matches[i]==nil && echoes[i]==nil && u.end-u.start<=4 {
             guard ["unknown","multiple"].contains(rawSpeaker(u)["basis"] as? String ?? "") else{continue}
             let epoch=events[u.parent]["epoch"] as? String
             let references=continuityReferences.filter{$0.key?.epoch==epoch && $0.source==u.source}
@@ -403,15 +426,50 @@ enum MeetingAcousticRefinement {
             matches[i]=Match(key:key,score:0,margin:0);localContinuity.insert(i)
             if u.overlap {soloVerified.insert(i)}
         }
+        // The online diarizer splits one sentence into word runs and leaves
+        // particles or overlap blips between two runs of the same voice
+        // unresolved ("…食材越严格，其实|越是|…"). Inside one sentence only,
+        // bridge a short unresolved block flanked by the same person, or one
+        // that opens/closes the sentence next to a single person. Human labels,
+        // echoes and a positive contrary voice match still block it.
+        func groupIndex(_ key:SessionSpeakerKey)->Int? {groups.firstIndex{$0.contains{$0.key==key}}}
+        func samePerson(_ a:SessionSpeakerKey,_ b:SessionSpeakerKey)->Bool {a==b || groupIndex(a).map{$0==groupIndex(b)}==true}
+        func resolvedKey(_ i:Int)->SessionSpeakerKey? {
+            // A human-protected neighbour anchors with its corrected identity.
+            guard units[i].usable else{return referenceUnits[i].usable && !referenceUnits[i].overlap ? referenceUnits[i].key:nil}
+            guard echoes[i]==nil else{return nil}
+            return matches[i]?.key ?? (units[i].overlap ? nil:units[i].key)
+        }
+        var bridged=Set<Int>(),first=0
+        while first<units.count {
+            var last=first;while last<units.count && units[last].parent==units[first].parent {last+=1}
+            var i=first
+            while i<last {
+                guard resolvedKey(i)==nil,units[i].usable,echoes[i]==nil else{i+=1;continue}
+                var j=i;while j<last && resolvedKey(j)==nil && units[j].usable && echoes[j]==nil {j+=1}
+                defer{i=j}
+                let lo=units[i].start,hi=units[j-1].end
+                let left=i==first ? nil:resolvedKey(i-1).flatMap{lo-units[i-1].end<=0.6 ? $0:nil}
+                let right=j==last ? nil:resolvedKey(j).flatMap{units[j].start-hi<=0.6 ? $0:nil}
+                var key:SessionSpeakerKey?
+                if let l=left,let r=right,samePerson(l,r),hi-lo<=2 {key=l}
+                else if let l=left,j==last,hi-lo<=0.8 {key=l}
+                else if let r=right,i==first,hi-lo<=0.8 {key=r}
+                guard let key,!(i..<j).contains(where:{k in direct[k].map{!samePerson($0.key,key) && $0.score>=0.62 && $0.margin>=0.18} ?? false}) else{continue}
+                for k in i..<j {matches[k]=Match(key:key,score:0,margin:0);bridged.insert(k)}
+            }
+            first=last
+        }
         var projected=events,changed=Set<Int>(),resolved=0,unverifiedOriginalRetained=0
-        for (i,u) in units.enumerated() where u.usable && (!u.overlap || soloVerified.contains(i)) {
+        for (i,u) in units.enumerated() where u.usable && (!u.overlap || soloVerified.contains(i) || bridged.contains(i) || echoes[i] != nil) {
             var speaker:[String:Any]
-            if let m=matches[i] {
+            if let echo=echoes[i] {speaker=["basis":"unknown","reason":"playback_echo","echo_of":echo]}
+            else if let m=matches[i] {
                 speaker=["basis":"meeting_reconciliation","source_id":u.source,"epoch":events[u.parent]["epoch"] ?? NSNull(),"identity_key":try JSONSerialization.jsonObject(with:JSONEncoder().encode(m.key)),"acoustic_verified":true]
                 if soloVerified.contains(i) {speaker["solo_verified"]=true}
                 if retainedSlots.contains(i) {speaker["slot_continuity"]=true}
                 if localContinuity.contains(i) {speaker["local_continuity"]=true}
-                if let echo=echoes[i] {speaker["echo_of"]=echo};resolved+=1
+                if bridged.contains(i) {speaker["bridged"]=true};resolved+=1
             } else if u.key != nil {
                 // Missing a whole-meeting profile OR a short-window match is
                 // not evidence against the online diarizer. Keep its original
@@ -429,7 +487,7 @@ enum MeetingAcousticRefinement {
             ["segment_id":events[index]["segment_id"]!,"original_sha256":try SpeakerRefinementArtifact.originalEventSHA256(events[index]),"speaker":projected[index]["speaker"] ?? events[index]["speaker"] ?? [:],"speaker_runs":projected[index]["speaker_runs"] ?? []]
         }
         guard try meeting.transcriptHashes()==hashes,try SpeakerRefinementArtifact.snapshotSHA256(directory:directory,cacheID:cacheID,includeAuxiliaryAudio:true)==snapshot else{throw Failure(code:"acoustic_source_changed")}
-        let result:[String:Any] = ["schema":1,"method":method,"model":model,"cache_id":cacheID,"session":request.session,"source_sha256":hashes,"snapshot_sha256":snapshot,"records":records,"summary":["units":units.count,"resolved":resolved,"echoes":echoes.count,"original_profiles":profiles.count,"short_profiles":shortProfiles.count,"voices":groups.count,"solo_recovered":soloVerified.count,"slot_retained":retainedSlots.count,"local_continuity":localContinuity.count,"unverified_original_retained":unverifiedOriginalRetained,"segmentation_windows":segmentation.predictions],"capture":false,"cloud":false]
+        let result:[String:Any] = ["schema":1,"method":method,"model":model,"cache_id":cacheID,"session":request.session,"source_sha256":hashes,"snapshot_sha256":snapshot,"records":records,"summary":["units":units.count,"resolved":resolved,"echoes":echoes.count,"original_profiles":profiles.count,"short_profiles":shortProfiles.count,"voices":groups.count,"solo_recovered":soloVerified.count,"slot_retained":retainedSlots.count,"local_continuity":localContinuity.count,"bridged":bridged.count,"unverified_original_retained":unverifiedOriginalRetained,"segmentation_windows":segmentation.predictions],"capture":false,"cloud":false]
         _=try SpeakerRefinementArtifact.validateApply(object:result,events:events,sourceHashes:hashes,directory:directory,cacheID:cacheID)
         return result
     }

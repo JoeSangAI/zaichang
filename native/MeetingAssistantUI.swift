@@ -349,7 +349,6 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
     @objc func changeRecordingMode(){guard canSelectRecordingMode else{recordingModePicker?.selectItem(at:displayedLocalMode ? 1:0);return};modeUserSelected=true;localOnlyMode=recordingModePicker?.indexOfSelectedItem==1;persistRecordingStartPreference();newRecordingPending=localOnlyMode;diagnostic.stringValue=localOnlyMode ? "只保存录音，不上传":"边录音，边生成文字";updateUI()}
     func beginLocalOnlyFlow(){
         guard !audioAssetOperationBusy else{showTransientFeedback("录音文件正在保存，请稍后开始");return}
-        (workspaceOwner ?? self).voiceprintService?.cancelHistoricalLearning()
         prepareAutomaticCapture()
         guard Bundle.main.object(forInfoDictionaryKey:"LocalRecordingAllowed") as? Bool==true else{newRecordingPending=true;phase.phase = .idle;diagnostic.stringValue="当前版本不支持录音，请更新应用";updateUI();return}
         titleProvider=nil;titleTextAllowed=false
@@ -359,7 +358,6 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
     }
     func beginCloudSessionFlow(){
         guard !audioAssetOperationBusy else{showTransientFeedback("录音文件正在保存，请稍后开始");return}
-        (workspaceOwner ?? self).voiceprintService?.cancelHistoricalLearning()
         prepareAutomaticCapture()
         let fixture=Credential.offline && previewRenderOnly && startupWorkerFixture != nil ? startupCredentialFixture:nil
         guard (!Credential.offline || fixture != nil),Bundle.main.object(forInfoDictionaryKey:"LocalRecordingAllowed") as? Bool==true,["com.tencent.meeting","*microphone*","*system*"].contains(sourceBundle) else{phase.error="暂时无法开始转写，请重试";updateUI();return}
@@ -382,7 +380,6 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
         guard child==nil,!credentialReadJob.waiting,!processingAudio,!preparingModels,!([.connecting,.recording,.paused,.stopping].contains(phase.phase)) else{diagnostic.stringValue="正在保存上一场录音，请稍候";return}
         meetingDocumentGeneration &+= 1
         detachSavedCoarseRefinement();speakerRefinementLifecycle.begin(session:nil);speakerRefinementNeedsRetry=false
-        (workspaceOwner ?? self).voiceprintService?.cancelHistoricalLearning()
         invalidateAutoTitle();titleProvider=nil;titleTextAllowed=false;speakerReviewWindow?.close();speakerReviewWindow=nil
         // Clear the old live context before changing the visible title. Any UI
         // refresh during new-meeting setup must not publish that title to the
@@ -741,7 +738,6 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
         // already cancelled by the user must not clear that cancellation.
         suppressAutomaticRefinementAfterStop=false
         (workspaceOwner ?? self).stopSpeakerAudioPreview()
-        (workspaceOwner ?? self).voiceprintService?.cancelHistoricalLearning()
         if Credential.offline && previewRenderOnly,let fixture=startupWorkerFixture,let request=overrideRequest {fixture(request);return}
         guard !Credential.offline else{phase.phase = .failed;phase.error="离线入口禁止启动生产工作进程";updateUI();return}
         let proc=Process();let stdin=Pipe();let stdout=Pipe();proc.executableURL=URL(fileURLWithPath:"/usr/local/bin/python3");proc.arguments=["-u",root+"/gui_worker.py"]
@@ -1282,7 +1278,9 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
         let manualNames=Set(turn.parts.compactMap{part in
             naming.displayName(segment:part.0).flatMap{$0.origin == .manual ? $0.value:nil}
         })
-        if let overlap=turn.parts.first(where:{part in let speaker=part.1["speaker"] as? [String:Any] ?? [:];return speaker["basis"] as? String=="multiple" && speaker["reason"] as? String=="overlap"}) {
+        // An overlap blip that already carries an identity (manual or bridged)
+        // belongs to that person's turn; only an unowned overlap labels it.
+        if let overlap=turn.parts.first(where:{part in let speaker=part.1["speaker"] as? [String:Any] ?? [:];return speaker["basis"] as? String=="multiple" && speaker["reason"] as? String=="overlap" && readingIdentity(part.0,part.1)==nil}) {
             if manualNames.count==1 && turn.parts.allSatisfy({naming.displayName(segment:$0.0)?.origin == .manual}) {
                 return manualNames.first!
             }

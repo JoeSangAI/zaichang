@@ -1403,13 +1403,6 @@ struct CaptureControlAcknowledgement {
                 guard data.count<=2*1024*1024 else{throw Failure(code:"refinement_result_too_large")}
                 print(String(decoding:data,as:UTF8.self));return
             }
-            if args.count==3,args[1]=="--historical-voice-samples" {
-                let input=FileHandle.standardInput.readData(ofLength:65537)
-                guard !input.isEmpty,input.count<=65536 else{throw Failure(code:"historical_voice_request_too_large")}
-                let request=try JSONDecoder().decode(HistoricalVoiceLearningRequest.self,from:input)
-                let result=try historicalVoiceSamples(request:request,model:URL(fileURLWithPath:args[2]))
-                print(String(data:try JSONEncoder().encode(result),encoding:.utf8)!);return
-            }
             if args.count==3,args[1]=="--automatic-acoustic-refinement" {
                 let input=FileHandle.standardInput.readData(ofLength:65537)
                 guard !input.isEmpty,input.count<=65536 else{throw Failure(code:"acoustic_request_too_large")}

@@ -11,7 +11,6 @@ final class VoiceprintRecommendationService {
     private var approvedSession:String?
     var learningUpdate:((String,String)->Void)?
     private var previousLearningStatus=""
-    private let historicalWorker=HistoricalVoiceLearningWorker()
     private let learningPolicy=VoiceprintLearningPolicy()
     init(store:VoiceprintArchiveStore) {self.store=store}
     // The committed session names remain the authority if a crash interrupts
@@ -115,10 +114,9 @@ final class VoiceprintRecommendationService {
             matcher.archive=next;loaded=true
         }
     }
-    func cancelHistoricalLearning() {historicalWorker.cancel()}
     func setContinuousLearningEnabled(_ enabled:Bool) {
         learningPolicy.setEnabled(enabled)
-        if !enabled {cancelHistoricalLearning();queue.async{self.approved=[];self.approvedSession=nil}}
+        if !enabled {queue.async{self.approved=[];self.approvedSession=nil}}
     }
     private func learnAutomaticSaved(result:SavedVoiceRecognitionResult,folder:URL,job:SpeakerRefinementJob,token:UUID,commitGate:((()throws->Void)throws->Void)?)throws->[[String:Any]] {
         guard learningPolicy.isEnabled,job.isCurrent(token),let old=try store.load(),old.schema==2 else{return []}
@@ -191,45 +189,6 @@ final class VoiceprintRecommendationService {
                 self.matcher.archive=try self.store.load();self.loaded=true
                 DispatchQueue.main.async{done(.success(report))}
             }catch {DispatchQueue.main.async{done(.failure(error))}}
-        }
-    }
-    func learnHistorical(record:SessionVoiceConfirmation,folder:URL,environmentLabel:String?,executable:URL,model:URL,done:@escaping(Result<String,Error>)->Void) {
-        guard learningPolicy.isEnabled else{done(.failure(Failure(code:"voice_learning_not_authorized")));return}
-        // Record data comes only from a successfully persisted explicit edit.
-        // File hashing and process setup remain off the UI and matching path.
-        let tokenRecord=record,ticket=historicalWorker.reserve()
-        queue.async {
-            do {
-                guard self.historicalWorker.isCurrent(ticket) else{throw HistoricalVoiceLearningError.cancelled}
-                guard self.learningPolicy.isEnabled else{throw Failure(code:"voice_learning_not_authorized")}
-                let file=folder.appendingPathComponent("session-names.json")
-                let info=try file.resourceValues(forKeys:[.isSymbolicLinkKey,.fileSizeKey])
-                guard info.isSymbolicLink != true,(info.fileSize ?? Int.max)<=4*1024*1024 else{throw HistoricalVoiceLearningError.invalidRequest}
-                let data=try Data(contentsOf:file)
-                let request=HistoricalVoiceLearningRequest(folder:folder.path,session:record.session,confirmationID:record.id,namesSHA256:historicalVoiceHash(data),segmentIDs:record.segmentIDs,environmentLabel:environmentLabel,inputKind:self.store.domain)
-                let confirmed=try historicalVoiceValidateConfirmation(request)
-                let saved=try JSONDecoder().decode(SessionVoiceConfirmation.self,from:JSONSerialization.data(withJSONObject:confirmed))
-                guard saved==tokenRecord else{throw HistoricalVoiceLearningError.changedConfirmation}
-                self.historicalWorker.start(request:request,executable:executable,model:model,reservedToken:ticket) { token,result in
-                    self.queue.async {
-                        do {
-                            guard self.historicalWorker.isCurrent(token) else{throw HistoricalVoiceLearningError.cancelled}
-                            let values=try result.get();try historicalVoiceValidateResult(values,request:request)
-                            let prior=try self.store.load(),identity=self.personID(for:record,in:prior)
-                            let contribution=VoiceprintLearningContribution(confirmationID:record.id,personID:identity,name:record.name,sharedPerson:record.person,confirmedAt:record.createdAt,samples:values.samples)
-                            let next=try archiveAddingVoiceConfirmation(prior,contribution:contribution,domain:self.store.domain)
-                            guard self.historicalWorker.isCurrent(token) else{throw HistoricalVoiceLearningError.cancelled}
-                            _ = try historicalVoiceValidateConfirmation(request)
-                            try self.store.save(next,expectedRevision:prior?.revision,expectAbsent:prior==nil,commitGate:{replace in
-                                try self.learningPolicy.commitIfEnabled {try self.historicalWorker.commitIfCurrent(token,replace)}
-                            })
-                            self.matcher.archive=next;self.loaded=true
-                            let ready=next.people.contains{$0.id==identity && $0.samples.contains(where:{sample in values.samples.contains(sample)})}
-                            DispatchQueue.main.async{done(.success(ready ? "已从所选原音记住声音，可随姓名标注撤销。":"已保留这段声音参考；还需至少3段独立且一致的确认。"))}
-                        }catch{DispatchQueue.main.async{done(.failure(error))}}
-                    }
-                }
-            }catch{DispatchQueue.main.async{done(.failure(error))}}
         }
     }
     func reset(_ session:String?) {queue.async {self.matcher.reset(session:session);self.approved=[];self.approvedSession=nil}}
@@ -318,7 +277,7 @@ final class VoiceprintRecommendationService {
             }catch{self.matcher.archive=nil;self.loaded=false;DispatchQueue.main.async{done([],[:],[],"声音记忆暂未更新；请在发言人处重试，姓名标注不受影响。")}}
         }
     }
-    func cancelPendingMemory(session:String?=nil) {cancelHistoricalLearning();queue.async{if session==nil || self.approvedSession==session {self.approved=[];self.approvedSession=nil}}}
+    func cancelPendingMemory(session:String?=nil) {queue.async{if session==nil || self.approvedSession==session {self.approved=[];self.approvedSession=nil}}}
     func dismiss(_ key:SessionSpeakerKey) {queue.async{self.matcher.dismiss(key)}}
     func discard(_ ids:[String]) {queue.async{for id in ids {self.matcher.remove(id)}}}
     func profiles(done:@escaping(VoiceprintArchive?,String?)->Void) {queue.async{do{try self.load();let archive=self.matcher.archive;DispatchQueue.main.async{done(archive,nil)}}catch{DispatchQueue.main.async{done(nil,"声音记忆暂时无法读取，请重试。")}}}}
@@ -331,7 +290,6 @@ final class VoiceprintRecommendationService {
             }catch{DispatchQueue.main.async{done(false)}}
         }
     }
-    func disable(_ person:String,done:@escaping(Bool)->Void) {profiles{archive,_ in guard let archive else{done(false);return};self.updateEnabled([person:false],revision:archive.revision,done:done)}}
     func recognizeSaved(_ result:SavedVoiceRecognitionResult,done:@escaping([SessionSpeakerKey:VoiceprintRecommendation],Set<SessionSpeakerKey>)->Void) {
         queue.async {
             do {
@@ -415,7 +373,6 @@ extension Delegate {
         confirmationController?.cancelQuickInteraction()
         savedVoiceRecognitionJob.cancel()
         if !isHistoryReader {historyReader?.savedVoiceRecognitionJob.cancel()}
-        voiceprintManagementOwner.voiceprintService?.cancelHistoricalLearning()
         voiceprintGeneration &+= 1;voiceprintCandidates=[:];voiceprintService?.reset(session)
     }
     func observeVoiceprint(_ event:[String:Any]) {
@@ -450,23 +407,6 @@ extension Delegate {
     func rememberManualVoiceprint(key:SessionSpeakerKey,name:String) {
         guard VoiceprintLearningPolicy().isEnabled,key.session==activeSession,naming.name(speaker:key)==name else{return}
         naming.attachConfirmation(segmentIDs:naming.segmentIDs(for:key),name:name)
-    }
-    func learnConfirmedHistoricalVoice(_ record:SessionVoiceConfirmation,environmentLabel:String?) {
-        let owner=voiceprintManagementOwner
-        guard isHistoryReader,!owner.recordingBusy,
-              let cache=currentCacheID,UUID(uuidString:cache) != nil,record.session==activeSession,
-              naming.voiceConfirmations.contains(record) else{voiceprintStatus="当前会议仍在进行，暂不能学习所选历史原音。";showTransientFeedback(voiceprintStatus);return}
-        if owner.voiceprintService==nil {owner.configureVoiceprintRecommendations()}
-        let generation=meetingDocumentGeneration,session=record.session,revision=naming.correctionRevision
-        voiceprintStatus="正在本机读取所选原音，可随时撤销姓名或开始录音以取消。";showTransientFeedback(voiceprintStatus,nameUndo:true)
-        owner.voiceprintService?.learnHistorical(record:record,folder:recoveryBase().appendingPathComponent(cache),environmentLabel:environmentLabel,executable:owner.captureExecutableURL,model:URL(fileURLWithPath:owner.root).appendingPathComponent("native/local-embedding-install/3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx")) { [weak self] result in
-            guard let self,self.activeSession==session,self.currentCacheID==cache,self.meetingDocumentGeneration==generation,self.naming.correctionRevision==revision else{return}
-            switch result {
-            case .success(let message):self.voiceprintStatus=message
-            case .failure(let error):self.voiceprintStatus=(error as? HistoricalVoiceLearningError) == .cancelled ? "原音学习已取消，姓名标注保留。":"姓名已保存；原音不可用、证据不足或已变化，未新增声音记忆。"
-            }
-            self.showTransientFeedback(self.voiceprintStatus,nameUndo:true);self.confirmationController?.setMemoryStatus(self.voiceprintStatus)
-        }
     }
     func synchronizeCommittedVoiceMemory(session:String,confirmations:[SessionVoiceConfirmation],revision:Int) {
         guard !previewRenderOnly || isHistoryReader || voiceprintService != nil else{return}
@@ -554,14 +494,5 @@ extension Delegate {
             reader.refreshOpenSpeakerReview()
         }
         owner.reloadLibraryAfterVoiceprintNameWrite()
-    }
-    func disableVoiceprintRecommendation(_ key:SessionSpeakerKey) {
-        guard let candidate=voiceprintRecommendation(for:key),let service=voiceprintManagementOwner.voiceprintService else{return}
-        service.disable(candidate.personID) { [weak self] ok in
-            guard let self else{return}
-            if ok {
-                self.revokeDisabledVoiceprintNames([candidate.personID])
-            }else{self.voiceprintStatus="未能关闭此人的推荐，请重试。"}
-        }
     }
 }
