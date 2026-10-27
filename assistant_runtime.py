@@ -7,6 +7,7 @@ import asyncio
 import contextlib
 import hashlib
 import json
+import logging
 import os
 import re
 import sqlite3
@@ -1018,13 +1019,18 @@ class AssistantRuntime:
         try:
             thread_id = row["thread_id"]
             if fresh:
+                model, effort = 'gpt-6.1-terra', 'medium'  # Overview and conversation threads share one route.
                 result = await self.runtime.start_thread(self.cwd, ephemeral=True, sandbox="read-only", approval_policy="never",
-                    dynamic_tools=[] if is_overview else self._dynamic_tools(),
+                    dynamic_tools=[] if is_overview else self._dynamic_tools(), model=model, effort=effort,
                     developer_instructions=("You produce a concise, structured meeting overview from the provided finalized speech segments only. "
                                             "Do not use filesystem, web, MCP, tools, or outside context. Never infer decisions, tasks, owners, or deadlines. "
                                             "Every non-empty item must cite exact source quotes and segment IDs from the supplied meeting projection."
                                             if is_overview else self._listener_prompt()))
                 thread_id = result["thread"]["id"]
+                logging.getLogger(__name__).warning('zaichang-model-route %s', _compact({
+                    'kind': row['kind'], 'requested_model': model, 'requested_effort': effort,
+                    'reported_model': result.get('model'), 'reported_effort': result.get('reasoningEffort'),
+                    'task_id': task_id, 'thread_id': thread_id}))
                 self.runtime_threads.add(thread_id)
                 self._set_task(task_id, thread_id=thread_id)
             if self.store.task(task_id)["status"] == "cancelling":
@@ -1134,6 +1140,9 @@ class AssistantRuntime:
                 return
 
     async def _handle_event(self, task_id, method, params):
+        if method == 'thread/tokenUsage/updated':
+            logging.getLogger(__name__).warning('zaichang-model-usage %s', _compact({
+                'task_id': task_id, 'usage': params.get('tokenUsage')}))
         # Show observable work, never private reasoning or raw tool arguments.
         if task_id in self.user_turns and method in ("item/started", "item/completed"):
             kind = (params.get("item") or {}).get("type")

@@ -183,11 +183,18 @@ class CodexRuntime:
     async def start_thread(self, cwd: str, *, ephemeral: bool = True,
                            sandbox: str = "read-only", approval_policy: str = "on-request",
                            dynamic_tools: list[dict] | None = None,
-                           developer_instructions: str | None = None):
-        # Keep the user's configured model/effort; don't choose a cheaper model.
+                           developer_instructions: str | None = None,
+                           model: str | None = None, effort: str | None = None):
+        # Explicit per-purpose defaults apply only to new threads; existing turns retain their settings.
         params = {"cwd": cwd, "approvalPolicy": approval_policy,
                   "sandbox": sandbox, "ephemeral": True,
                   "config": {"features.multi_agent": False, "features.multi_agent_v2": False}}
+        if model is not None:
+            params['model'] = model
+        if effort is not None:
+            params['config']['model_reasoning_effort'] = effort
+        if model is not None:
+            params['config']['service_tier'] = 'default'
         if dynamic_tools:
             if not self.experimental_api:
                 raise RuntimeErrorCode("dynamic_tools_require_experimental_api")
