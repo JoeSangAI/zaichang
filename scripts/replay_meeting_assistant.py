@@ -289,6 +289,7 @@ class ReplayService(AssistantRuntime):
         self.timeline = timeline
         self.token_total = {}
         self.current_turn = None
+        self.work_started = {}
 
     def _schedule_overview(self, *args, **kwargs):
         # This entry point validates the assistant; P2's independent tests cover overview.
@@ -303,23 +304,37 @@ class ReplayService(AssistantRuntime):
         if after == self.revisions.get(workspace_id, 0):
             start = clock.now
             await clock.wait(clock.revision, maximum)
-            target = min(clock.now + 20, start + maximum, clock.duration)
-            if target > clock.now:
-                if not clock.offline: await asyncio.sleep((target-clock.now)/clock.speed)
-                clock.now = target
-            await self.cmd_context(workspace_id, {**self.replay_context,
-                'segments': [{**s, 'final': True} for s in clock.visible()],
-                'meeting_state': 'ended' if clock.ended else 'recording'})
+            first_new = clock.now
+            # Same batching policy as production, on the simulated meeting clock.
+            while True:
+                target = min(clock.now + self.wait_batch_seconds, start + maximum, clock.duration)
+                if target > clock.now:
+                    if not clock.offline: await asyncio.sleep((target-clock.now)/clock.speed)
+                    clock.now = target
+                await self.cmd_context(workspace_id, {**self.replay_context,
+                    'segments': [{**s, 'final': True} for s in clock.visible()],
+                    'meeting_state': 'ended' if clock.ended else 'recording'})
+                if (clock.ended or clock.now >= start + maximum
+                        or not self._batch_too_small(workspace_id, after, first_new, clock.now)):
+                    break
         return self._meeting_delta(workspace_id, after)
 
     async def _dynamic_tool(self, row, params):
         result = await super()._dynamic_tool(row, params)
         clock = self.meeting_clock
         self.timeline['tools'].append({'at_seconds': clock.now, 'name': params.get('tool'), 'success': result['success']})
+        if params.get('tool') == 'start_task' and result['success']:
+            self.work_started[json.loads(result['contentItems'][0]['text'])['task_id']] = clock.now
         if params.get('tool') == 'say' and result['success']:
             args = params['arguments']; args = json.loads(args) if isinstance(args, str) else args
             self.timeline['says'].append({'at_seconds': clock.now, 'text': args['text'], 'context': clock.visible()[-3:]})
         return result
+
+    async def _request_user(self, method, params):
+        # Nobody is present to approve during a replay; decline and keep the record.
+        self.timeline.setdefault('declined_requests', []).append({'at_seconds': self.meeting_clock.now, 'method': method,
+            'detail': {k: params.get(k) for k in ('reason', 'command', 'cwd') if params.get(k)}})
+        return self._decline_request(method)
 
     async def _run_turn(self, task_id, thread_id, prompt, **kwargs):
         record = {'at_seconds': self.meeting_clock.now, 'thread_id': thread_id, 'token_usage': None}
@@ -345,7 +360,7 @@ async def replay(context, out, *, speed=1, offline=False):
     timeline = {'offline': offline, 'cache_id': context['cache_id'], 'source': context['source'],
                 'store': str(store.directory), 'says': [], 'tools': [], 'turns': [], 'errors': []}
     service = ReplayService(store, Path.home(), context=context, timeline=timeline, speed=speed, fake=offline,
-                            runtime_factory=OfflineRuntime if offline else CodexRuntime)
+                            output_root=out/'work-output', runtime_factory=OfflineRuntime if offline else CodexRuntime)
     try:
         bound = await service.bind('replay', {k: context[k] for k in ('cache_id', 'session_id', 'title')})
         workspace = bound['workspace_id']
@@ -358,6 +373,10 @@ async def replay(context, out, *, speed=1, offline=False):
             if row['status'] in ('failed','interrupted'): raise RuntimeError(row['error'])
             if service.meeting_clock.ended and not service.task_workers: break
         timeline['final_state'] = await service._snapshot(workspace, announce=False)
+        timeline['work'] = [{'title': r['title'], 'goal': r['goal'], 'status': r['status'], 'error': r['error'],
+                             'started_at_seconds': service.work_started.get(r['id']),
+                             'results': [m['text'] for m in store.messages(workspace) if m['task_id'] == r['id'] and m['role'] == 'assistant']}
+                            for r in store.tasks(workspace) if r['kind'] == 'work']
         timeline['final_revision'] = service.meeting_clock.revision
         timeline['completed'] = True
     except (Exception, asyncio.CancelledError) as exc:
@@ -369,6 +388,9 @@ async def replay(context, out, *, speed=1, offline=False):
         for row in timeline['says']:
             lines += [f"## {row['at_seconds']:.3f}s", '', row['text'], '']
             lines += ['> '+s['speaker']+'：'+s['text'] for s in row['context']]
+        for row in timeline.get('work', []):
+            lines += ['', f"## 后台任务 · {row['title']}（{row['status']}，开始于 {row['started_at_seconds'] or 0:.0f}s）", '', row['goal'], '']
+            lines += [text for text in row['results']]
         (out/'timeline.md').write_text('\n'.join(lines)+'\n')
     return timeline
 

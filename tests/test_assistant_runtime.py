@@ -586,11 +586,12 @@ class AssistantRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_segment_limit_reports_omitted_speech_even_when_short(self):
         ctx = {"title": "侧栏检查", "segments": [
-            {"id": str(i), "text": "检查"} for i in range(101)]}
+            {"id": str(i), "text": "检查", "start": i * 61} for i in range(101)]}
         text = self.service._context_text(ctx)
         self.assertIn("Transcript preview truncated", text)
-        self.assertNotIn("[0 ]", text)
-        self.assertIn("[100 ] 检查", text)
+        self.assertNotIn("\n0:00 未知：检查", text)
+        self.assertIn("\n1:01 未知：检查", text)
+        self.assertIn("\n1:41:40 未知：检查", text)
 
     async def test_long_title_cannot_evict_meeting_references(self):
         text = self.service._context_text({"title": "侧栏" * 30000,

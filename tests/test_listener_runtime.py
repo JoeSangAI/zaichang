@@ -210,15 +210,23 @@ class ListenerTests(unittest.IsolatedAsyncioTestCase):
             await self.event('turn/completed'); await self.wait(lambda:not self.service.task_workers)
             self.assertEqual(self.row()['status'],'completed')
 
+    # Batching asserts on length; keep the words independent of README edits.
+    WORDS = '我们先确认本周要验证的三件事：模拟人物的数据来源、真人对照的样本，以及哪一个品牌问题最适合作为第一个实验，下周一前把方案发给大家看。'
+
+    async def speak(self, text, revision=1):
+        await self.service.cmd_context('w', {'meeting_state': 'recording', 'segments': [
+            {'id': 'readme', 'text': self.speech, 'final': True, 'revision': 1},
+            {'id': 'next', 'text': text, 'final': True, 'revision': revision, 'start': 65, 'speaker': '主持人'}]})
+
     async def test_wait_batches_new_revision_and_reads_latest(self):
         await self.listen(); current=self.service.revisions['w']
         waiting=asyncio.create_task(self.tool('meeting_wait',{'after_revision':current,'max_wait_seconds':1}))
-        await asyncio.sleep(.005); await self.context('recording',2)
+        await asyncio.sleep(.005); await self.speak(self.WORDS[:40])
         await asyncio.sleep(.005); self.assertFalse(waiting.done())
-        await self.context('recording',3)
+        await self.speak(self.WORDS)
         result=json.loads((await waiting)['contentItems'][0]['text'])
         self.assertEqual(result['revision'],current+2)
-        self.assertEqual(result['segments'][0]['revision'],3)
+        self.assertEqual(result['speech'],['1:05 主持人：'+self.WORDS])
         self.assertFalse((await self.tool('meeting_wait',{'after_revision':999,'max_wait_seconds':0}))['success'])
         self.assertTrue((await self.tool('meeting_read',{'offset':0,'limit':1}))['success'])
         self.assertTrue((await self.tool('meeting_search',{'query':self.speech}))['success'])
@@ -408,3 +416,105 @@ class ListenerTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(request.done())
         await self.service.cmd_respond('w',{'request_id':request_id,'accepted':True,'answers':{'save':'true'}})
         self.assertEqual(await request,{'action':'accept','content':{'save':True}})
+
+    def work(self):
+        return next(r for r in self.store.tasks('w') if r['kind'] == 'work')
+
+    async def work_event(self, method, item=None):
+        row = self.work()
+        await self.fake.events[row['thread_id']].put({'method': method, 'params': {
+            'threadId': row['thread_id'], 'turnId': row['turn_id'],
+            'turn': {'id': row['turn_id'], 'status': 'completed'}, 'item': item or {}}})
+
+    async def start_work(self):
+        await self.listen()
+        result = await self.tool('start_task', {'title': '查 Qoder 校园推广', 'goal': self.speech})
+        self.assertTrue(result['success'], result)
+        await self.wait(lambda: self.work()['turn_id'] is not None)
+        return json.loads(result['contentItems'][0]['text'])
+
+    def test_listener_prompt_lets_listening_speak(self):
+        prompt = AssistantRuntime._listener_prompt()
+        self.assertNotIn('不发消息', prompt); self.assertNotIn('不需要回应', prompt)
+        self.assertIn('say', prompt); self.assertIn('start_task', prompt)
+
+    async def test_start_task_works_beside_listening_and_reports_back(self):
+        data = await self.start_work()
+        work = self.work()
+        self.assertEqual((data['task_id'], work['origin'], work['status']), (work['id'], 'proactive', 'running'))
+        # Listening keeps its own turn while the work runs on a separate thread.
+        self.assertEqual((self.row()['status'], self.service.turn_modes[self.row()['id']]), ('running', 'listen'))
+        self.assertNotEqual(work['thread_id'], self.row()['thread_id'])
+        options = self.fake.threads[work['thread_id']]
+        self.assertEqual([t['name'] for t in options['dynamic_tools']], ['meeting_read', 'meeting_search'])
+        start = [p for m, p in self.fake.requests if m == 'turn/start' and p['threadId'] == work['thread_id']][-1]
+        self.assertTrue(start['execution_directory'].startswith(str(Path(self.tmp.name) / 'outputs')))
+        self.assertIn(self.speech, start['input'][0]['text'])
+        state = await self.service.cmd_snapshot('w', {})
+        self.assertEqual([w['title'] for w in state['work']], ['查 Qoder 校园推广'])
+        self.assertFalse(state['awaiting_response'])
+        await self.work_event('item/completed', {'id': 'answer', 'type': 'agentMessage', 'phase': 'final_answer', 'text': self.speech})
+        await self.work_event('turn/completed')
+        await self.wait(lambda: self.work()['status'] == 'completed')
+        state = await self.service.cmd_snapshot('w', {})
+        self.assertEqual(state['work'], [])
+        reply = [m for m in state['messages'] if m['role'] == 'assistant'][-1]
+        self.assertEqual((reply['text'], reply['origin']), (f'**查 Qoder 校园推广**\n\n{self.speech}', 'proactive'))
+        background = self.service._with_background('w', {}, 'other-listener')['background']
+        self.assertEqual((background[0]['status'], background[0]['result']), ('completed', reply['text']))
+        self.assertEqual(self.row()['status'], 'running')
+
+    async def test_work_threads_cannot_speak_or_spawn(self):
+        await self.start_work()
+        work = self.work()
+        for name, args in (('say', {'text': self.speech}), ('start_task', {'title': 'x', 'goal': 'y'}),
+                           ('meeting_wait', {'after_revision': 0, 'max_wait_seconds': 0})):
+            result = await self.service._on_server_request('item/tool/call', {'threadId': work['thread_id'],
+                'turnId': work['turn_id'], 'callId': name, 'tool': name, 'arguments': args})
+            self.assertFalse(result['success'], name)
+        read = await self.service._on_server_request('item/tool/call', {'threadId': work['thread_id'],
+            'turnId': work['turn_id'], 'callId': 'read', 'tool': 'meeting_search', 'arguments': {'query': self.speech[:6]}})
+        self.assertTrue(read['success'])
+
+    async def test_cancel_work_keeps_listening_on(self):
+        await self.start_work()
+        result = await self.service.cmd_cancel_work('w', {})
+        self.assertEqual(result, {'cancelled': 1})
+        await self.wait(lambda: self.work()['status'] == 'completed')
+        self.assertTrue(self.store.workspace('w')['proactive'])
+        self.assertEqual((self.row()['status'], self.service.turn_modes[self.row()['id']]), ('running', 'listen'))
+        self.assertEqual((await self.service.cmd_snapshot('w', {}))['work'], [])
+
+    async def test_work_concurrency_cap_and_queue_limit(self):
+        await self.listen()
+        results = [await self.tool('start_task', {'title': f'任务{i}', 'goal': self.speech}, call=f'c{i}') for i in range(7)]
+        self.assertEqual([r['success'] for r in results], [True] * 6 + [False])
+        statuses = [r['status'] for r in self.store.tasks('w') if r['kind'] == 'work']
+        self.assertEqual((statuses.count('running'), statuses.count('queued')), (2, 4))
+
+    async def test_bookkeeping_changes_are_not_resent(self):
+        await self.listen(); await self.speak(self.WORDS)
+        seen = self.service.revisions['w']
+        await self.speak(self.WORDS, revision=7)  # projection batch rewrite only
+        self.assertGreater(self.service.revisions['w'], seen)
+        self.assertEqual(self.service._meeting_delta('w', seen)['speech'], [])
+
+    async def test_thin_batch_stays_open_until_enough_words(self):
+        await self.listen(); current = self.service.revisions['w']
+        waiting = asyncio.create_task(self.tool('meeting_wait', {'after_revision': current, 'max_wait_seconds': 1}))
+        await asyncio.sleep(.005); await self.speak('嗯对')
+        await asyncio.sleep(.1); self.assertFalse(waiting.done())
+        await self.speak('嗯对。' + self.WORDS)
+        result = json.loads((await asyncio.wait_for(waiting, .5))['contentItems'][0]['text'])
+        self.assertEqual(result['speech'], ['1:05 主持人：嗯对。' + self.WORDS])
+
+    async def test_background_rides_along_only_when_changed(self):
+        await self.start_work()
+        listener = self.row()['id']
+        first = self.service._with_background('w', {}, listener)
+        self.assertEqual(first['background'][0]['status'], 'running')
+        self.assertNotIn('background', self.service._with_background('w', {}, listener))
+        await self.work_event('item/completed', {'id': 'answer', 'type': 'agentMessage', 'phase': 'final_answer', 'text': self.speech})
+        await self.work_event('turn/completed')
+        await self.wait(lambda: self.work()['status'] == 'completed')
+        self.assertEqual(self.service._with_background('w', {}, listener)['background'][0]['status'], 'completed')

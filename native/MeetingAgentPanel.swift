@@ -201,6 +201,7 @@ final class MeetingAgentPanel: NSView {
         activitySpinner.widthAnchor.constraint(equalToConstant: 16).isActive = true
         activitySpinner.heightAnchor.constraint(equalToConstant: 16).isActive = true
         activityLabel.font = .systemFont(ofSize: 12); activityLabel.textColor = MeetingVisualStyle.muted
+        activityLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         let stop = NSButton(title: "停止", target: self, action: #selector(cancelCurrentTask))
         stop.isBordered = false; stop.font = .systemFont(ofSize: 12)
         activityRow.orientation = .horizontal; activityRow.spacing = 8
@@ -410,32 +411,53 @@ final class MeetingAgentPanel: NSView {
         let data = overview["data"] as? [String: Any] ?? [:]
         let rich = NSMutableAttributedString(string: "")
         overviewEvidence.removeAll()
-        func paragraph(_ text: String, size: CGFloat = 14, weight: NSFont.Weight = .regular, color: NSColor = MeetingVisualStyle.ink, after: CGFloat = 10) {
-            let style = NSMutableParagraphStyle(); style.lineSpacing = 5; style.paragraphSpacing = after
+        func paragraph(_ text: String, size: CGFloat = 14, weight: NSFont.Weight = .regular, color: NSColor = MeetingVisualStyle.ink, before: CGFloat = 0, after: CGFloat = 10) {
+            let style = NSMutableParagraphStyle(); style.lineSpacing = 4; style.paragraphSpacingBefore = before; style.paragraphSpacing = after
             rich.append(NSAttributedString(string: text + "\n", attributes: [.font: NSFont.systemFont(ofSize: size, weight: weight), .foregroundColor: color, .paragraphStyle: style]))
         }
-        func evidence(_ item: [String: Any]) {
+        // The source quote is a trailing glyph on the same line, not a line of its own.
+        func evidenceLink(_ item: [String: Any]) -> NSAttributedString? {
             let refs = item["evidence"] as? [[String: Any]] ?? []
             let quotes = refs.compactMap { $0["quote"] as? String }.filter { !$0.isEmpty }
-            guard !quotes.isEmpty else { return }
+            guard !quotes.isEmpty else { return nil }
             let id = String(overviewEvidence.count); overviewEvidence[id] = quotes.map { "“\($0)”" }.joined(separator: "\n\n")
-            let style = NSMutableParagraphStyle(); style.paragraphSpacing = 14
-            rich.append(NSAttributedString(string: "查看原话 ↗\n", attributes: [.font: NSFont.systemFont(ofSize: 11), .foregroundColor: MeetingVisualStyle.faint, .paragraphStyle: style, .link: URL(string: "zaichang-evidence://quote/\(id)")!]))
+            return NSAttributedString(string: "\u{00A0}↗", attributes: [.font: NSFont.systemFont(ofSize: 12), .foregroundColor: MeetingVisualStyle.faint,
+                                                                 .link: URL(string: "zaichang-evidence://quote/\(id)")!, .toolTip: "查看原话"])
         }
         if let topic = data["current_topic"] as? [String: Any], let text = topic["text"] as? String, !text.isEmpty {
-            paragraph("当前议题", size: 11, color: MeetingVisualStyle.muted, after: 6)
-            paragraph(text, size: 19, weight: .semibold, after: 8); evidence(topic)
+            paragraph("当前议题", size: 11, color: MeetingVisualStyle.muted, after: 4)
+            let style = NSMutableParagraphStyle(); style.lineSpacing = 3; style.paragraphSpacing = 6
+            rich.append(NSAttributedString(string: text, attributes: [.font: NSFont.systemFont(ofSize: 19, weight: .semibold), .foregroundColor: MeetingVisualStyle.ink, .paragraphStyle: style]))
+            if let link = evidenceLink(topic) { rich.append(link) }
+            rich.append(NSAttributedString(string: "\n", attributes: [.paragraphStyle: style]))
         }
-        for (key, title) in [("discussion_points", "讨论要点"), ("decisions", "已定事项"), ("actions", "接下来"), ("open_questions", "待讨论")] {
-            let items = data[key] as? [[String: Any]] ?? []
+        // Conclusions first; background last. Each item is one bulleted line led by a bold keyword or owner.
+        for (key, title, bullet) in [("decisions", "已定事项", "✓"), ("actions", "接下来", "→"), ("open_questions", "待讨论", "?"), ("discussion_points", "讨论要点", "•")] {
+            let items = (data[key] as? [[String: Any]] ?? []).filter { !(($0["text"] as? String) ?? "").isEmpty }
             guard !items.isEmpty else { continue }
-            paragraph(title, size: 14, weight: .semibold, after: 10)
+            paragraph("\(title)  \(items.count)", size: 12, weight: .semibold, color: MeetingVisualStyle.quietAccent, before: rich.length == 0 ? 0 : 14, after: 6)
+            let style = NSMutableParagraphStyle(); style.lineSpacing = 4; style.paragraphSpacing = 8
+            style.firstLineHeadIndent = 0; style.headIndent = 18
+            style.tabStops = [NSTextTab(textAlignment: .left, location: 18)]; style.defaultTabInterval = 18
+            let body: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 14), .foregroundColor: MeetingVisualStyle.ink, .paragraphStyle: style]
+            var strong = body; strong[.font] = NSFont.systemFont(ofSize: 14, weight: .semibold)
+            var quiet = body; quiet[.font] = NSFont.systemFont(ofSize: 12); quiet[.foregroundColor] = MeetingVisualStyle.muted
             for item in items {
-                guard let text = item["text"] as? String, !text.isEmpty else { continue }
-                paragraph(text, after: 4)
-                let metadata = [item["owner"] as? String, item["deadline"] as? String].compactMap { $0 }.filter { !$0.isEmpty }
-                if !metadata.isEmpty { paragraph(metadata.joined(separator: " · "), size: 12, color: MeetingVisualStyle.muted, after: 4) }
-                evidence(item)
+                var text = (item["text"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                var lead = ""
+                if let owner = item["owner"] as? String, !owner.isEmpty {
+                    lead = owner
+                    if text.hasPrefix(owner) { text = String(text.dropFirst(owner.count)).trimmingCharacters(in: CharacterSet(charactersIn: " ：:，,")) }
+                } else if let colon = text.firstIndex(where: { $0 == "：" || $0 == ":" }), (2...12).contains(text.distance(from: text.startIndex, to: colon)) {
+                    lead = String(text[..<colon]); text = String(text[text.index(after: colon)...]).trimmingCharacters(in: .whitespaces)
+                }
+                var bulletAttributes = quiet; bulletAttributes[.font] = NSFont.systemFont(ofSize: 13)
+                rich.append(NSAttributedString(string: bullet + "\t", attributes: bulletAttributes))
+                if !lead.isEmpty { rich.append(NSAttributedString(string: lead + "：", attributes: strong)) }
+                rich.append(NSAttributedString(string: text, attributes: body))
+                if let deadline = item["deadline"] as? String, !deadline.isEmpty { rich.append(NSAttributedString(string: " · " + deadline, attributes: quiet)) }
+                if let link = evidenceLink(item) { rich.append(link) }
+                rich.append(NSAttributedString(string: "\n", attributes: body))
             }
         }
 
@@ -461,6 +483,10 @@ final class MeetingAgentPanel: NSView {
     }
 
     @objc private func cancelCurrentTask() {
+        // Stopping background work must not also switch listening off.
+        if state["awaiting_response"] as? Bool != true, !(state["work"] as? [[String: Any]] ?? []).isEmpty {
+            onCommand?("cancel_work", [:]); return
+        }
         onCommand?("cancel", [:])
     }
 
@@ -569,9 +595,15 @@ final class MeetingAgentPanel: NSView {
             order.append(view)
         }
         let busy = state["awaiting_response"] as? Bool == true
-        activityContainer.isHidden = !busy; activityHeight.constant = busy ? 26 : 0
-        if busy {
-            activityLabel.stringValue = !requests.isEmpty ? "等待你确认" : state["conversation_status"] as? String == "cancelling" ? "正在停止…" : (state["activity"] as? String ?? "正在思考…")
+        // Background work runs beside the conversation; the row names it when nothing else is pending.
+        let work = (state["work"] as? [[String: Any]] ?? []).compactMap { $0["title"] as? String }.filter { !$0.isEmpty }
+        let shown = busy || !work.isEmpty
+        activityContainer.isHidden = !shown; activityHeight.constant = shown ? 26 : 0
+        if shown {
+            activityLabel.stringValue = !requests.isEmpty ? "等待你确认" : busy ? (state["conversation_status"] as? String == "cancelling" ? "正在停止…" : (state["activity"] as? String ?? "正在思考…"))
+                : "后台：" + work.joined(separator: "、")
+            activityLabel.lineBreakMode = .byTruncatingTail
+            activityLabel.toolTip = work.isEmpty ? nil : "后台正在做：\n" + work.joined(separator: "\n")
             activitySpinner.isHidden = !requests.isEmpty
             if requests.isEmpty { activitySpinner.startAnimation(nil) } else { activitySpinner.stopAnimation(nil) }
         } else { activitySpinner.stopAnimation(nil) }
