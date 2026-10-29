@@ -245,6 +245,19 @@ func requireMicrophoneStartAvailable(installed:Bool) throws {
     guard !installed else{throw Failure(code:"microphone_already_started")}
 }
 
+// After the input unit is rebound, the engine can still report the previous
+// route's tap format (48 kHz built-in → 24 kHz AirPods). A tap whose rate differs
+// from the hardware raises an Objective-C exception that aborts the helper, so
+// follow the bound hardware; a device still switching is a recoverable change.
+func microphoneTapFormat(cached:AVAudioFormat,hardware:AVAudioFormat) throws->AVAudioFormat {
+    guard hardware.sampleRate>0,hardware.channelCount>0 else{throw Failure(code:"input_device_changed")}
+    if cached.sampleRate==hardware.sampleRate,cached.channelCount>0 {return cached}
+    guard let current=AVAudioFormat(standardFormatWithSampleRate:hardware.sampleRate,channels:hardware.channelCount) else{
+        throw Failure(code:"input_device_changed")
+    }
+    return current
+}
+
 // Shared by real resume and device-free regression fixtures. A running engine
 // alone is insufficient: only fresh admitted PCM can acknowledge a resume.
 func waitForMicrophoneResume(timeout:Double=1,stillRequested:()->Bool,
@@ -476,7 +489,7 @@ final class Microphone {
         try check(AudioUnitGetProperty(unit,kAudioOutputUnitProperty_CurrentDevice,kAudioUnitScope_Global,0,&actual,&size),"microphone_read_device")
         guard actual==device else {throw Failure(code:"microphone_device_mismatch")}
         boundDevice=actual
-        let format = input.outputFormat(forBus: 0)
+        let format = try microphoneTapFormat(cached:input.outputFormat(forBus:0),hardware:input.inputFormat(forBus:0))
         let converter = try PCMConverter(format,microphoneChannelSelection:true)
         var info=microphoneDeviceSnapshot(actual)
         info["sample_rate"]=format.sampleRate;info["channels"]=format.channelCount

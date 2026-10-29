@@ -1132,7 +1132,10 @@ func runSourceCaptureSession(config: Config) async throws {
         micValues["clean_signal"]=cleanBox.signalMetrics()
         let echoSnapshot=echoDiagnostics.snapshot(micTrack:micTrack,rawTrack:rawTrack,referenceTrack:referenceTrack)
         micValues["echo_processing"]=echoSnapshot
-        health["mic"] = micValues
+        // A continued meeting records "mic-gN". Reporting the same lane again as
+        // "mic" binds one ASR task to two tracks, and the worker's fee meter then
+        // stops the recording about a second after every continue.
+        health[micTrack] = micValues
         metadata["microphone_capture_diagnostics"]=microphoneDiagnostics
         metadata["capture_signal_health"]=health
         persistEchoDiagnostics()
@@ -1331,7 +1334,11 @@ func runSourceCaptureSession(config: Config) async throws {
                 pauseTransition=nil
                 var resumeCommitted=false
                 defer {if !resumeCommitted {revokeResume()}}
-                try microphone.start(rawBox)
+                // A headset still switching profiles is a route change, not a
+                // fault: pause again and let the device auto-resume retry.
+                guard try revalidateMicrophoneOrPause(routeChangePause:routeChangePause,validate:{
+                    try microphone.start(rawBox);return true
+                }) else{continue}
                 // Keep the reference interval unopened until the paused budget
                 // clock has been resumed. Otherwise uptime spent paused leaks
                 // into the new interval and mic/reference packets no longer align.

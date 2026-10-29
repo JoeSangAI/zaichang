@@ -70,6 +70,15 @@ class MeterContract(unittest.TestCase):
         m.observe({'type':'health','elapsed_seconds':3,'mic':{'task_id':'b','sent_audio_seconds':3,'task_attempted_audio_seconds':1}})
         self.assertEqual(m.snapshot()['input_audio_seconds'],'3')
 
+    def test_continued_meeting_health_reports_microphone_once(self):
+        # The helper names a continued microphone lane "mic-gN" only; the same
+        # task under "mic" too used to raise here and stop every continue.
+        m=FeeMeter()
+        m.observe({'type':'health','elapsed_seconds':18,'mic-g4':{'task_id':'a','sent_audio_seconds':1}})
+        self.assertEqual(m.snapshot()['input_audio_seconds'],'1')
+        with self.assertRaises(ValueError):
+            FeeMeter().observe({'type':'health','elapsed_seconds':18,'mic':{'task_id':'a'},'mic-g4':{'task_id':'a'}})
+
     def test_cumulative_usage_not_summed(self):
         m=FeeMeter()
         for value in [3,6,9,9,6]:m.observe({'type':'usage_provider','track':'mic','task_id':'a','duration':value,'final':False})

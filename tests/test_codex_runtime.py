@@ -12,11 +12,15 @@ class CodexTransportTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_user_execution_and_listener_reset_permissions_every_turn(self):
         runtime=CodexRuntime();runtime.request=AsyncMock(return_value={'turn':{'id':'t'}})
-        await runtime.start_turn('thread','我主动交办时要能完整执行',execution_directory='/tmp/zaichang-output')
+        await runtime.start_turn('thread','我主动交办时要能完整执行',execution_directory='/tmp/zaichang-output',full_access=True)
         execution=runtime.request.await_args.args[1]
-        self.assertEqual(execution['approvalPolicy'],'on-request')
-        self.assertEqual(execution['sandboxPolicy']['type'],'workspaceWrite')
+        self.assertEqual(execution['approvalPolicy'],'never')
+        self.assertEqual(execution['sandboxPolicy']['type'],'dangerFullAccess')
         self.assertEqual(execution['cwd'],'/tmp/zaichang-output')
+        await runtime.start_turn('thread','旁听自己发起的任务只写作品目录',execution_directory='/tmp/zaichang-output')
+        proactive=runtime.request.await_args.args[1]
+        self.assertEqual(proactive['approvalPolicy'],'never')
+        self.assertEqual(proactive['sandboxPolicy'],{'type':'workspaceWrite','writableRoots':['/tmp/zaichang-output'],'networkAccess':True})
         await runtime.start_turn('thread','旁听保持只读')
         listener=runtime.request.await_args.args[1]
         self.assertEqual(listener['approvalPolicy'],'never')

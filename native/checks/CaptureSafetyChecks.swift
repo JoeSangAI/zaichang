@@ -927,6 +927,15 @@ func captureSafetyChecks(directory:URL) async throws->[String:Any] {
     catch {precondition((error as? Failure)?.code=="microphone_already_started")}
     try requireMicrophoneStartAvailable(installed:false)
     checks.append("duplicate_microphone_start_is_rejected_before_installing_second_tap")
+    let builtIn=AVAudioFormat(standardFormatWithSampleRate:48_000,channels:1)!
+    let headset=AVAudioFormat(standardFormatWithSampleRate:24_000,channels:1)!
+    let followed=try microphoneTapFormat(cached:builtIn,hardware:headset)
+    precondition(followed.sampleRate==24_000 && followed.channelCount==1)
+    let keptHeadset=try microphoneTapFormat(cached:headset,hardware:headset)
+    precondition(keptHeadset===headset)
+    do {_=try microphoneTapFormat(cached:builtIn,hardware:AVAudioFormat());preconditionFailure("switching device admitted")}
+    catch {precondition((error as? Failure)?.code=="input_device_changed")}
+    checks.append("microphone_tap_follows_rebound_headset_rate_instead_of_aborting")
     var recoveringEngine=false,resumeRestartCount=0
     let notificationDuringClosedGate=try reconcileMicrophoneConfiguration(admitted:false,expectedDevice:120,currentDevice:120,
         defaultDevice:120,formatMatches:true,engineRunning:recoveringEngine,restartAttempts:0,restart:{resumeRestartCount+=1;recoveringEngine=true})

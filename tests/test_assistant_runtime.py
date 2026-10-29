@@ -64,10 +64,11 @@ class FakeAppServer:
             return {"turn": {"id": turn_id}}
         return {}
 
-    async def start_turn(self, thread_id, text, *, output_schema=None, execution_directory=None):
+    async def start_turn(self, thread_id, text, *, output_schema=None, execution_directory=None, full_access=False):
         params = {"threadId": thread_id, "input": [{"type": "text", "text": text}]}
         if execution_directory:
             params["execution_directory"] = execution_directory
+            params["full_access"] = full_access
         if output_schema:
             params["outputSchema"] = output_schema
         return await self.request("turn/start", params)
@@ -97,12 +98,15 @@ class FakeAppServer:
         await q.put({"method": "turn/completed", "params": {"threadId": thread_id,
             "turn": {"id": turn_id, "status": "completed"}}})
 
-    async def event(self, thread_id, **kwargs):
+    async def event(self, thread_id, timeout=None, **kwargs):
         queue = self.events.setdefault(thread_id, asyncio.Queue())
+        deadline = None if timeout is None else asyncio.get_running_loop().time() + timeout
         while not self.closed:
             try:
                 return await asyncio.wait_for(queue.get(), .01)
             except asyncio.TimeoutError:
+                if deadline is not None and asyncio.get_running_loop().time() >= deadline:
+                    raise
                 continue
         raise RuntimeErrorCode("runtime_disconnected")
 

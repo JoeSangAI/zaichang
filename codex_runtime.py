@@ -205,16 +205,18 @@ class CodexRuntime:
         return result
 
     async def start_turn(self, thread_id: str, text: str, *, output_schema: dict | None = None,
-                         execution_directory: str | None = None):
+                         execution_directory: str | None = None, full_access: bool = False):
         if thread_id in self.uncertain_starts:
             raise RuntimeErrorCode("turn_start_requires_reconciliation")
         params = {"threadId": thread_id, "input": [{"type": "text", "text": text}],
                   "approvalPolicy": "never", "sandboxPolicy": {"type": "readOnly", "networkAccess": output_schema is None}}
         if execution_directory and output_schema is None:
-            params.update(cwd=execution_directory, approvalPolicy="on-request",
-                          approvalsReviewer="user",
-                          sandboxPolicy={"type": "workspaceWrite", "writableRoots": [execution_directory],
-                                         "networkAccess": True})
+            # Nobody can approve mid-meeting, so execution never asks. Work the
+            # user handed over runs with full access; work the listener started
+            # from meeting speech may only write its own output directory.
+            sandbox = {"type": "dangerFullAccess"} if full_access else {
+                "type": "workspaceWrite", "writableRoots": [execution_directory], "networkAccess": True}
+            params.update(cwd=execution_directory, approvalPolicy="never", sandboxPolicy=sandbox)
         if output_schema:
             params["outputSchema"] = output_schema
         return await self.request("turn/start", params)
