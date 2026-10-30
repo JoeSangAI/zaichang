@@ -105,13 +105,13 @@ final class RecordingLevelView:NSView {
     override func draw(_ dirtyRect:NSRect) {
         // Drawn on the charcoal capsule. Name and status live in the tooltip and
         // accessibility value; the plot itself is the visible state.
-        let iconSize:CGFloat=14
+        let iconSize:CGFloat=12
         if let symbol=NSImage(systemSymbolName:name=="麦克风" ? "mic":"desktopcomputer",accessibilityDescription:nil)?
-            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize:12,weight:.medium).applying(NSImage.SymbolConfiguration(paletteColors:[NSColor.white.withAlphaComponent(0.72)]))) {
+            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize:10.5,weight:.medium).applying(NSImage.SymbolConfiguration(paletteColors:[NSColor.white.withAlphaComponent(0.72)]))) {
             symbol.draw(in:NSRect(x:0,y:bounds.midY-iconSize/2,width:iconSize,height:iconSize))
         }
-        let plot=NSRect(x:iconSize+8,y:bounds.midY-12,width:max(1,bounds.width-iconSize-10),height:24)
-        let step:CGFloat=5,barWidth:CGFloat=3
+        let plot=NSRect(x:iconSize+7,y:bounds.midY-9,width:max(1,bounds.width-iconSize-9),height:18)
+        let step:CGFloat=4,barWidth:CGFloat=2
         let count=max(1,Int(plot.width/step)),recent=Array(samples.suffix(count))
         let silent=recent.allSatisfy{$0<=0}
         let clipping=peak>=0.99
@@ -119,7 +119,7 @@ final class RecordingLevelView:NSView {
             // Newest samples sit on the right; a silent source is a row of flat dots.
             let index=recent.count-count+i,value=index>=0 ? recent[index]:0
             let normalized=value>0 ? min(1,max(0,(20*log10(value)+60)/54)):0
-            let h=max(3,CGFloat(normalized)*plot.height)
+            let h=max(2,CGFloat(normalized)*plot.height)
             (silent || value<=0 ? NSColor.white.withAlphaComponent(0.22):clipping ? NSColor.systemOrange:barColor).setFill()
             NSBezierPath(roundedRect:NSRect(x:plot.minX+CGFloat(i)*step,y:plot.midY-h/2,width:barWidth,height:h),xRadius:barWidth/2,yRadius:barWidth/2).fill()
         }
@@ -131,7 +131,7 @@ final class RecordingLevelView:NSView {
 final class RecordingTransportSurface:NSView {
     override init(frame:NSRect) {
         super.init(frame:frame);wantsLayer=true;layer?.masksToBounds=false
-        layer?.borderWidth=MeetingVisualStyle.charcoalBorderWidth;layer?.shadowOpacity=0.2;layer?.shadowRadius=14;layer?.shadowOffset=CGSize(width:0,height:-6)
+        layer?.borderWidth=MeetingVisualStyle.charcoalBorderWidth;layer?.shadowOpacity=0.16;layer?.shadowRadius=10;layer?.shadowOffset=CGSize(width:0,height:-3)
     }
     required init?(coder:NSCoder) {fatalError("init(coder:) has not been implemented")}
     override var wantsUpdateLayer:Bool {true}
@@ -154,7 +154,7 @@ final class RecordingLiveDot:NSView {
     private(set) var tone:Tone = .hidden
     override init(frame:NSRect) {super.init(frame:frame);wantsLayer=true;setAccessibilityElement(false)}
     required init?(coder:NSCoder) {fatalError("init(coder:) has not been implemented")}
-    override var intrinsicContentSize:NSSize {NSSize(width:8,height:8)}
+    override var intrinsicContentSize:NSSize {NSSize(width:6,height:6)}
     override func layout() {super.layout();layer?.cornerRadius=bounds.height/2}
     func show(_ next:Tone) {
         guard next != tone else{return}
@@ -181,11 +181,11 @@ final class RecordingModeChip:NSButton {
     }
     required init?(coder:NSCoder) {fatalError("init(coder:) has not been implemented")}
     private func refreshTitle() {
-        let text=NSMutableAttributedString(string:titles[selectedIndex]+" ",attributes:[.font:NSFont.systemFont(ofSize:12,weight:.medium),.foregroundColor:NSColor.white.withAlphaComponent(0.86)])
+        let text=NSMutableAttributedString(string:titles[selectedIndex]+" ",attributes:[.font:NSFont.systemFont(ofSize:11.5,weight:.medium),.foregroundColor:NSColor.white.withAlphaComponent(0.86)])
         text.append(NSAttributedString(string:"⌄",attributes:[.font:NSFont.systemFont(ofSize:11,weight:.semibold),.foregroundColor:NSColor.white.withAlphaComponent(0.62),.baselineOffset:2]))
         attributedTitle=text;setAccessibilityValue(titles[selectedIndex]);invalidateIntrinsicContentSize()
     }
-    override var intrinsicContentSize:NSSize {let size=attributedTitle.size();return NSSize(width:ceil(size.width)+22,height:26)}
+    override var intrinsicContentSize:NSSize {let size=attributedTitle.size();return NSSize(width:ceil(size.width)+18,height:22)}
     override func layout() {super.layout();layer?.cornerRadius=bounds.height/2;layer?.backgroundColor=NSColor.white.withAlphaComponent(isEnabled ? 0.10:0.05).cgColor}
     @objc private func showChoices() {
         let menu=NSMenu()
@@ -222,7 +222,7 @@ extension Delegate {
         // the full document width, so no fixed width reaches the window.
         let container=NSView();container.translatesAutoresizingMaskIntoConstraints=false
         let surface=RecordingTransportSurface();surface.translatesAutoresizingMaskIntoConstraints=false;container.addSubview(surface);recordingTransportView=container
-        let row=stack(.horizontal,spacing:16);row.alignment = .centerY;row.distribution = .fill;row.translatesAutoresizingMaskIntoConstraints=false;surface.addSubview(row)
+        let row=stack(.horizontal,spacing:12);row.alignment = .centerY;row.distribution = .fill;row.translatesAutoresizingMaskIntoConstraints=false;surface.addSubview(row)
         // Controls resolve as on a dark surface; the surface itself follows the window so its charcoal tracks light/dark.
         row.appearance=NSAppearance(named:.darkAqua)
         let mic=RecordingLevelView(),computer=RecordingLevelView();mic.name="麦克风";computer.name="电脑声音";computer.barColor=MeetingVisualStyle.capsuleComputerBar;microphoneLevel=mic;computerLevel=computer
@@ -230,13 +230,13 @@ extension Delegate {
         mic.setContentHuggingPriority(.defaultLow-1,for:.horizontal);computer.setContentHuggingPriority(.defaultLow-1,for:.horizontal)
         // Left: live dot + timer over the state line, or 开始录音 + mode chip before a meeting.
         let dot=RecordingLiveDot();recordingLiveDot=dot
-        let clock=label("00:00",size:21,weight:.semibold);clock.font = .monospacedDigitSystemFont(ofSize:21,weight:.semibold);clock.textColor = .white;recordingTimeLabel=clock
+        let clock=label("00:00",size:16,weight:.semibold);clock.font = .monospacedDigitSystemFont(ofSize:16,weight:.semibold);clock.textColor = .white;recordingTimeLabel=clock
         heading.textColor=MeetingVisualStyle.capsuleSecondary;heading.font = .systemFont(ofSize:11)
         let chip=RecordingModeChip();chip.onSelect={[weak self] index in self?.selectRecordingModeFromChip(index)};recordingModeChip=chip
         let titleLine=stack(.horizontal,spacing:10);titleLine.alignment = .centerY;titleLine.addArrangedSubview(clock);titleLine.addArrangedSubview(chip)
         let timing=stack(.vertical,spacing:1);timing.alignment = .leading;timing.addArrangedSubview(titleLine);timing.addArrangedSubview(heading)
         heading.widthAnchor.constraint(lessThanOrEqualToConstant:220).isActive=true
-        let lead=stack(.horizontal,spacing:10);lead.alignment = .centerY;lead.addArrangedSubview(dot);lead.addArrangedSubview(timing)
+        let lead=stack(.horizontal,spacing:8);lead.alignment = .centerY;lead.addArrangedSubview(dot);lead.addArrangedSubview(timing)
         lead.setContentHuggingPriority(.defaultHigh,for:.horizontal)
         // Waveforms shrink to their minimum before the state line truncates.
         heading.setContentCompressionResistancePriority(.defaultLow+1,for:.horizontal);clock.setContentCompressionResistancePriority(.required,for:.horizontal)
@@ -247,21 +247,21 @@ extension Delegate {
         // The button title and tooltip already say what it does.
         let caption=label("开始录音",size:10.5);caption.textColor = .secondaryLabelColor;caption.isHidden=true;recordingActionCaption=caption
         row.addArrangedSubview(lead);row.addArrangedSubview(mic);row.addArrangedSubview(computer);row.addArrangedSubview(trailing)
-        let preferred=surface.widthAnchor.constraint(equalToConstant:600);preferred.priority = .defaultLow
+        let preferred=surface.widthAnchor.constraint(equalToConstant:520);preferred.priority = .defaultLow;recordingCapsuleWidth=preferred
         NSLayoutConstraint.activate([surface.centerXAnchor.constraint(equalTo:container.centerXAnchor),surface.topAnchor.constraint(equalTo:container.topAnchor,constant:6),surface.bottomAnchor.constraint(equalTo:container.bottomAnchor,constant:-14),
-                                     surface.widthAnchor.constraint(lessThanOrEqualTo:container.widthAnchor,constant:-24),preferred,surface.heightAnchor.constraint(equalToConstant:66),
-                                     row.leadingAnchor.constraint(equalTo:surface.leadingAnchor,constant:22),row.trailingAnchor.constraint(equalTo:surface.trailingAnchor,constant:-10),row.centerYAnchor.constraint(equalTo:surface.centerYAnchor),
-                                     mic.widthAnchor.constraint(equalTo:computer.widthAnchor),mic.heightAnchor.constraint(equalToConstant:28),computer.heightAnchor.constraint(equalToConstant:28)])
+                                     surface.widthAnchor.constraint(lessThanOrEqualTo:container.widthAnchor,constant:-24),preferred,surface.heightAnchor.constraint(equalToConstant:50),
+                                     row.leadingAnchor.constraint(equalTo:surface.leadingAnchor,constant:18),row.trailingAnchor.constraint(equalTo:surface.trailingAnchor,constant:-8),row.centerYAnchor.constraint(equalTo:surface.centerYAnchor),
+                                     mic.widthAnchor.constraint(equalTo:computer.widthAnchor),mic.heightAnchor.constraint(equalToConstant:22),computer.heightAnchor.constraint(equalToConstant:22)])
         return container
     }
     func installTransportNotes(_ notes:MeetingNotesController) {
         // With the assistant panel, notes are its 笔记 tab; the capsule gets a button only without that panel.
         guard !assistantEnabled else {return}
         let toggle=notes.toggle
-        toggle.title="";toggle.toolTip="记笔记：在右栏「笔记」记录，随本场一起保存";toggle.image=NSImage(systemSymbolName:"note.text",accessibilityDescription:"笔记")?.withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize:15,weight:.medium))
+        toggle.title="";toggle.toolTip="记笔记：在右栏「笔记」记录，随本场一起保存";toggle.image=NSImage(systemSymbolName:"note.text",accessibilityDescription:"笔记")?.withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize:13,weight:.medium))
         toggle.isBordered=false;toggle.bezelStyle = .regularSquare;toggle.imagePosition = .imageOnly;toggle.contentTintColor = .white
-        toggle.wantsLayer=true;toggle.layer?.cornerRadius=20;toggle.layer?.backgroundColor=NSColor.white.withAlphaComponent(0.09).cgColor
-        if toggle.constraints.isEmpty {NSLayoutConstraint.activate([toggle.widthAnchor.constraint(equalToConstant:40),toggle.heightAnchor.constraint(equalToConstant:40)])}
+        toggle.wantsLayer=true;toggle.layer?.cornerRadius=15;toggle.layer?.backgroundColor=NSColor.white.withAlphaComponent(0.09).cgColor
+        if toggle.constraints.isEmpty {NSLayoutConstraint.activate([toggle.widthAnchor.constraint(equalToConstant:30),toggle.heightAnchor.constraint(equalToConstant:30)])}
         if let center=notesTransportStack {center.insertArrangedSubview(notes.toggle,at:center.arrangedSubviews.firstIndex(where:{$0 === action}) ?? center.arrangedSubviews.count)}
     }
     private func emptyMeetingItem()->CachedMeeting? {(workspaceOwner ?? self).recoveries.first{$0.id==currentCacheID}}
@@ -307,6 +307,8 @@ extension Delegate {
             level.isHidden=false;level.alphaValue=isHistoryReader ? 0:1
             level.setAccessibilityHidden(isHistoryReader)
         }
+        // A saved meeting has no live waveforms; the capsule hugs what it still shows.
+        recordingCapsuleWidth?.constant=isHistoryReader ? 0:520
         let current=displayedLocalMode,live=[.connecting,.recording,.paused,.stopping].contains(phase.phase)
         switcher.selectedSegment=(live || isHistoryReader) ? (current ? 1:0):(localOnlyMode ? 1:0)
         switcher.isEnabled=canSelectRecordingMode
@@ -394,7 +396,7 @@ extension Delegate {
         refreshEmptyMeetingActions()
         let startPrompt=choosing && phase.phase != .failed
         recordingTimeLabel?.stringValue=startPrompt ? "开始录音":phase.time
-        recordingTimeLabel?.font=startPrompt ? .systemFont(ofSize:15,weight:.semibold):.monospacedDigitSystemFont(ofSize:21,weight:.semibold)
+        recordingTimeLabel?.font=startPrompt ? .systemFont(ofSize:14,weight:.semibold):.monospacedDigitSystemFont(ofSize:16,weight:.semibold)
         recordingTimeLabel?.textColor=owner.phase.phase == .paused ? NSColor.white.withAlphaComponent(0.8):.white
         recordingActionCaption?.stringValue=action.title
         refreshAudioLevels()

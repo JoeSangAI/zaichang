@@ -222,10 +222,10 @@ final class RecordingPrimaryButton:NSButton {
             let fill:NSColor=resumeStyle && isEnabled ? (isHighlighted ? MeetingVisualStyle.capsulePaperPressed:MeetingVisualStyle.capsulePaper):fillColor
             fill.setFill();NSBezierPath(ovalIn:rect).fill()
             let glyphColor:NSColor=resumeStyle && isEnabled ? MeetingVisualStyle.capsuleInk:.white
-            if brandedRecordGlyph {MeetingVoiceGlyph.draw(in:NSRect(x:bounds.midX-10,y:bounds.midY-10,width:20,height:20),color:glyphColor)}
+            if brandedRecordGlyph {MeetingVoiceGlyph.draw(in:NSRect(x:bounds.midX-8,y:bounds.midY-8,width:16,height:16),color:glyphColor)}
             else if let image=image {
-                let icon=image.withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize:15,weight:.bold).applying(NSImage.SymbolConfiguration(paletteColors:[glyphColor]))) ?? image
-                icon.draw(in:NSRect(x:bounds.midX-8+(resumeStyle ? 1:0),y:bounds.midY-8,width:16,height:16))
+                let icon=image.withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize:11,weight:.bold).applying(NSImage.SymbolConfiguration(paletteColors:[glyphColor]))) ?? image
+                icon.draw(in:NSRect(x:bounds.midX-6+(resumeStyle ? 1:0),y:bounds.midY-6,width:12,height:12))
             }
             if isKeyboardFocused {let focus=NSBezierPath(ovalIn:bounds.insetBy(dx:0.5,dy:0.5));focus.lineWidth=2;MeetingVisualStyle.keyboardFocus.setStroke();focus.stroke()}
             return

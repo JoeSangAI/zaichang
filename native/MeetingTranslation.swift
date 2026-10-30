@@ -290,7 +290,7 @@ extension Delegate {
     func makeTranslationControl() -> NSView {
         let row=stack(.horizontal,spacing:6);row.alignment = .centerY
         let title=label("中文翻译",size:12);title.textColor=MeetingVisualStyle.muted
-        let toggle=MeetingTintedSwitch();toggle.backgroundColor=MeetingVisualStyle.surface;toggle.controlSize = .mini;toggle.target=self;toggle.action=#selector(toggleTranslation)
+        let toggle=MeetingTintedSwitch();toggle.target=self;toggle.action=#selector(toggleTranslation)
         toggle.toolTip="将已定稿英文逐句译成中文";toggle.setAccessibilityLabel("中文翻译");toggle.isEnabled=currentCacheID != nil
         translationSwitch=toggle;toggle.widthAnchor.constraint(equalToConstant:32).isActive=true;toggle.heightAnchor.constraint(equalToConstant:20).isActive=true;row.addArrangedSubview(title);row.addArrangedSubview(toggle)
         translationService.onChange={ [weak self] in

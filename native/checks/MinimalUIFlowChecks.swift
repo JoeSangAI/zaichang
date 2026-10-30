@@ -67,7 +67,7 @@ private struct MinimalFixtureTitleProvider:MeetingTitleProvider {
     try check(SpeakerReviewIndex.build(session:session,turns:owner.readingTurns(),names:owner.naming).people.count==2,"merge_undo_restores_groups")
     owner.window.setContentSize(NSSize(width:640,height:480));owner.layoutWorkspace();owner.window.contentView!.layoutSubtreeIfNeeded()
     let compactControl = owner.action.convert(owner.action.bounds, to: owner.window.contentView!)
-    try check(owner.action.frame.width>=44 && owner.action.frame.height>=44 &&
+    try check(owner.action.frame.width>=34 && owner.action.frame.height>=34 &&
               owner.window.contentView!.bounds.contains(compactControl) && !owner.action.isHiddenOrHasHiddenAncestor &&
               owner.sidebar.isHidden,"compact_primary_control_visible")
     journal.wait();owner.previewRenderOnly=false;owner.titleProvider=MinimalFixtureTitleProvider();owner.titleTextAllowed=true

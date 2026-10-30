@@ -195,6 +195,11 @@ private final class MeetingLibraryMouseProbe:NSTableView {
     try check(app.historyReader?.action.isHiddenOrHasHiddenAncestor==false && (app.historyReader?.action.frame.width ?? 0)>0 && (app.historyReader?.action.frame.height ?? 0)>0,
               "stopped_history_append_control_is_actually_visible")
     try snapshot(app,"history-append-b-stopped")
+    if let reader=app.historyReader,let capsule=reader.recordingCapsuleWidth?.firstItem as? NSView {
+        capsule.superview?.layoutSubtreeIfNeeded()
+        let control=reader.action.convert(reader.action.bounds,to:capsule)
+        try check(capsule.frame.width<420 && capsule.frame.height==50 && capsule.bounds.contains(control),"saved_meeting_capsule_hugs_its_content_\(capsule.frame)_\(control)")
+    }
     app.phase.phase = .recording;app.updateUI();app.window.contentView?.layoutSubtreeIfNeeded()
     try check(app.historyReader?.action.isHiddenOrHasHiddenAncestor==false && (app.historyReader?.action.frame.width ?? 0)>0 && (app.historyReader?.action.frame.height ?? 0)>0,
               "active_b_history_append_control_is_actually_visible")

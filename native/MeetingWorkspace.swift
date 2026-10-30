@@ -133,7 +133,7 @@ extension Delegate {
         let eyebrow=label("新会议 · 实时转写",size:13);eyebrow.textColor=MeetingVisualStyle.muted;meetingEyebrow=eyebrow;words.addArrangedSubview(eyebrow)
         meetingTitleField=NSTextField();meetingTitleField.isBordered=false;meetingTitleField.drawsBackground=false;meetingTitleField.focusRingType = .none;meetingTitleField.font = MeetingVisualStyle.titleFont();meetingTitleField.textColor=MeetingVisualStyle.ink;meetingTitleField.stringValue=meetingTitle;meetingTitleField.placeholderString="会议名称";meetingTitleField.delegate=self;meetingTitleField.lineBreakMode = .byTruncatingTail;meetingTitleField.setAccessibilityLabel("会议名称");words.addArrangedSubview(meetingTitleField)
         heading=label("准备就绪",size:12);heading.textColor = MeetingVisualStyle.muted;heading.lineBreakMode = .byTruncatingTail;heading.setContentCompressionResistancePriority(.defaultLow,for:.horizontal);header.addArrangedSubview(words)
-        action=RecordingPrimaryButton(title:"开始录音",target:self,action:#selector(primaryWorkspaceAction));action.bezelStyle = .rounded;action.controlSize = .large;action.isBordered=false;action.wantsLayer=true;action.layer?.cornerRadius=12;action.widthAnchor.constraint(equalToConstant:46).isActive=true;action.heightAnchor.constraint(equalToConstant:46).isActive=true;action.font = .systemFont(ofSize:14,weight:.semibold);action.setAccessibilityLabel("开始录音或继续录音");(action as? RecordingPrimaryButton)?.circularTransport=true
+        action=RecordingPrimaryButton(title:"开始录音",target:self,action:#selector(primaryWorkspaceAction));action.bezelStyle = .rounded;action.controlSize = .large;action.isBordered=false;action.wantsLayer=true;action.layer?.cornerRadius=12;action.widthAnchor.constraint(equalToConstant:34).isActive=true;action.heightAnchor.constraint(equalToConstant:34).isActive=true;action.font = .systemFont(ofSize:14,weight:.semibold);action.setAccessibilityLabel("开始录音或继续录音");(action as? RecordingPrimaryButton)?.circularTransport=true
         main.addArrangedSubview(header);readingAlignedRows.append(header)
         historyLiveButton=ImmediateButton(title:"返回当前记录",target:self,action:#selector(returnFromHistory));historyLiveButton.bezelStyle = .inline;historyLiveButton.lineBreakMode = .byTruncatingTail;historyLiveButton.isHidden=true;main.addArrangedSubview(historyLiveButton)
         let tools=stack(.horizontal,spacing:10);tools.distribution = .fill;tools.alignment = .centerY
@@ -159,7 +159,8 @@ extension Delegate {
         // Waveform plots can shrink with the document; their preferred 180pt
         // widths must not enlarge the window's content beyond its visible frame.
         for level in [microphoneLevel,computerLevel].compactMap({$0}) {
-            level.setContentCompressionResistancePriority(.defaultLow,for:.horizontal)
+            // Below the capsule's preferred width, so the capsule can hug its controls.
+            level.setContentCompressionResistancePriority(.defaultLow-2,for:.horizontal)
             // Icon plus at least five bars; the capsule also holds the timer and notes now.
             level.widthAnchor.constraint(greaterThanOrEqualToConstant:assistantEnabled ? 30 : 48).isActive=true
         }

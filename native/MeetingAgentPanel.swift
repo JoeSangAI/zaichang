@@ -527,7 +527,7 @@ final class MeetingAgentPanel: NSView {
         onCommand?("cancel", [:])
     }
 
-    @objc private func toggleProactive(_ sender: NSSwitch) {
+    @objc private func toggleProactive(_ sender: MeetingTintedSwitch) {
         guard !suppressSwitchAction else { return }
         let enabled = sender.state == .on
         sender.needsDisplay = true
@@ -806,7 +806,7 @@ private final class MeetingListeningCard: NSView {
         layer?.backgroundColor = (on ? MeetingVisualStyle.accentTint : MeetingVisualStyle.quietFill).cgColor
         layer?.borderColor = (on ? MeetingVisualStyle.accentTintBorder : MeetingVisualStyle.border).cgColor
     }
-    func install(title: NSTextField, toggle: NSSwitch) {
+    func install(title: NSTextField, toggle: MeetingTintedSwitch) {
         titleField = title; detail.font = .systemFont(ofSize: 12); detail.lineBreakMode = .byTruncatingTail
         let words = NSStackView(views: [title, detail]); words.orientation = .vertical; words.alignment = .leading; words.spacing = 2
         for view in [mark, words, toggle] as [NSView] { view.translatesAutoresizingMaskIntoConstraints = false; addSubview(view) }
@@ -966,36 +966,54 @@ private final class MeetingAgentResizeHandle: NSView {
     }
 }
 
-/// Native NSSwitch retains tracking, keyboard and accessibility behavior. A
-/// display-only child paints the app's green/gray treatment over system accent.
-final class MeetingTintedSwitch: NSSwitch {
-    var backgroundColor=NSColor.textBackgroundColor {didSet {surface.needsDisplay=true}}
-    private lazy var surface=MeetingSwitchSurface(owner:self)
-    override var state:NSControl.StateValue {didSet {surface.needsDisplay=true}}
-    override var isEnabled:Bool {didSet {surface.needsDisplay=true}}
+/// Drawn whole rather than painted over NSSwitch: inside a layer-backed card the
+/// system knob shows above any child view. Keeps click, keyboard and VoiceOver.
+final class MeetingTintedSwitch: NSControl {
+    var state:NSControl.StateValue = .off {didSet {if state != oldValue {needsLayout=true;needsDisplay=true}}}
+    private var interactive=true,placedBounds=NSRect.zero
+    private weak var storedTarget:AnyObject?
+    private var storedAction:Selector?
+    private let track=CALayer(),knob=CALayer()
+    override var target:AnyObject? {get {storedTarget} set {storedTarget=newValue}}
+    override var action:Selector? {get {storedAction} set {storedAction=newValue}}
+    override var isEnabled:Bool {get {interactive} set {interactive=newValue;needsDisplay=true}}
+    override var intrinsicContentSize:NSSize {NSSize(width:38,height:22)}
+    override var wantsUpdateLayer:Bool {true}
+    override var acceptsFirstResponder:Bool {interactive}
+    override var needsPanelToBecomeKey:Bool {false}
     override init(frame frameRect:NSRect) {
-        super.init(frame:frameRect);focusRingType = .none
-        surface.frame=bounds;surface.autoresizingMask=[.width,.height];addSubview(surface)
+        super.init(frame:frameRect);wantsLayer=true
+        knob.backgroundColor=NSColor.white.cgColor;knob.shadowOpacity=0.2;knob.shadowRadius=1;knob.shadowOffset=CGSize(width:0,height:-0.5)
+        layer?.addSublayer(track);layer?.addSublayer(knob)
+        setAccessibilityElement(true);setAccessibilityRole(.checkBox);setAccessibilitySubrole(.switch)
     }
     required init?(coder:NSCoder) {fatalError("init(coder:) has not been implemented")}
-    override func layout() {super.layout();surface.frame=bounds}
-    override func viewDidChangeEffectiveAppearance() {super.viewDidChangeEffectiveAppearance();surface.needsDisplay=true}
-}
-private final class MeetingSwitchSurface:NSView {
-    weak var owner:MeetingTintedSwitch?
-    init(owner:MeetingTintedSwitch) {self.owner=owner;super.init(frame:.zero);setAccessibilityElement(false)}
-    required init?(coder:NSCoder) {fatalError("init(coder:) has not been implemented")}
-    override func hitTest(_ point:NSPoint)->NSView? {nil}
-    override func draw(_ dirtyRect:NSRect) {
-        guard let owner,bounds.width>0,bounds.height>0 else{return}
-        owner.backgroundColor.setFill();NSBezierPath(rect:bounds).fill()
-        let track=bounds.insetBy(dx:1,dy:2),active=owner.state == .on
-        let color=active ? MeetingVisualStyle.accent:NSColor(calibratedWhite:0.78,alpha:1)
-        color.withAlphaComponent(owner.isEnabled ? 1:0.4).setFill()
-        NSBezierPath(roundedRect:track,xRadius:track.height/2,yRadius:track.height/2).fill()
-        let diameter=max(1,track.height-4)
-        let x=active ? track.maxX-diameter-2:track.minX+2
-        NSColor.white.setFill();NSBezierPath(ovalIn:NSRect(x:x,y:track.minY+2,width:diameter,height:diameter)).fill()
+    override func layout() {
+        super.layout()
+        let frame=bounds.insetBy(dx:1,dy:2),diameter=max(1,frame.height-4)
+        let x=state == .on ? frame.maxX-diameter-2:frame.minX+2
+        CATransaction.begin()
+        CATransaction.setDisableActions(placedBounds != bounds || NSWorkspace.shared.accessibilityDisplayShouldReduceMotion)
+        track.frame=frame;track.cornerRadius=frame.height/2
+        knob.frame=NSRect(x:x,y:frame.minY+2,width:diameter,height:diameter);knob.cornerRadius=diameter/2
+        CATransaction.commit();placedBounds=bounds
+    }
+    override func updateLayer() {
+        track.backgroundColor=(state == .on ? MeetingVisualStyle.accent:NSColor(calibratedWhite:0.78,alpha:1)).cgColor
+        track.opacity=interactive ? 1:0.4
+    }
+    override func drawFocusRingMask() {NSBezierPath(roundedRect:track.frame,xRadius:track.cornerRadius,yRadius:track.cornerRadius).fill()}
+    override var focusRingMaskBounds:NSRect {bounds}
+    override func mouseDown(with event:NSEvent) {}
+    override func mouseUp(with event:NSEvent) {if bounds.contains(convert(event.locationInWindow,from:nil)) {toggle()}}
+    override func keyDown(with event:NSEvent) {if event.charactersIgnoringModifiers == " " {toggle()} else {super.keyDown(with:event)}}
+    override func performClick(_ sender:Any?) {toggle()}
+    override func accessibilityPerformPress()->Bool {toggle();return true}
+    override func accessibilityValue()->Any? {state == .on ? 1:0}
+    private func toggle() {
+        guard interactive else{return}
+        state=state == .on ? .off:.on
+        _=sendAction(storedAction,to:storedTarget)
     }
 }
 

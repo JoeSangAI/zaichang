@@ -117,12 +117,23 @@ import SQLite3
     let priorCommandHandler = controller.panel.onCommand
     var panelCommand: (String, [String: Any])?
     controller.panel.onCommand = { panelCommand = ($0, $1) }
-    let proactiveToggle = descendants(controller.panel).compactMap { $0 as? NSSwitch }.first
+    let proactiveToggle = descendants(controller.panel).compactMap { $0 as? MeetingTintedSwitch }.first
     try check(proactiveToggle != nil && proactiveToggle?.state == .off, "proactive_switch_is_visible_and_defaults_off")
     try check(!descendants(controller.panel).compactMap { $0 as? NSButton }.contains { $0.title.contains("新任务") },
               "manual_new_task_entry_removed")
     proactiveToggle?.performClick(nil)
     try check(panelCommand?.0 == "proactive" && panelCommand?.1["enabled"] as? Bool == true, "proactive_switch_sends_enabled_command")
+    if let toggle = proactiveToggle {
+        // One knob on a clear background: nothing of a system switch underneath.
+        toggle.layoutSubtreeIfNeeded(); toggle.displayIfNeeded()
+        let width = 76, height = 44, pixels = UnsafeMutablePointer<UInt8>.allocate(capacity: width * height * 4); defer { pixels.deallocate() }
+        pixels.initialize(repeating: 0, count: width * height * 4)
+        let canvas = CGContext(data: pixels, width: width, height: height, bitsPerComponent: 8, bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        canvas.scaleBy(x: 2, y: 2); toggle.layer?.render(in: canvas)
+        let pixel = { (x: Int, y: Int) -> (r: UInt8, g: UInt8, a: UInt8) in let i = (y * width + x) * 4; return (pixels[i], pixels[i + 1], pixels[i + 3]) }
+        try check(toggle.state == .on && pixel(0, 0).a == 0 && pixel(width - 1, height - 1).a == 0, "switch_has_no_background_block")
+        try check(pixel(14, 22).r > 150 && pixel(14, 22).g < 110 && pixel(width - 18, 22).g > 230, "switch_on_shows_one_knob_at_the_right")
+    }
 
     var noTaskState = controller.state; noTaskState["active_task_id"] = NSNull(); noTaskState["tasks"] = []
     controller.panel.apply(noTaskState); panelCommand = nil
