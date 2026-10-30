@@ -52,6 +52,14 @@ class PublicExportTests(unittest.TestCase):
                 self.assertEqual((tree / 'public/README.md').read_text(), 'committed\n')
                 self.assertFalse((tree / 'public/new.png').exists())
 
+    def test_hand_edit_on_github_blocks_until_taken_back(self):
+        import sync_public
+        recorded, wanted = {'README.md': 'old'}, {'README.md': 'old'}
+        self.assertEqual(sync_public.edited_outside_export({'README.md': 'hand'}, recorded, wanted), ['README.md'])
+        self.assertEqual(sync_public.edited_outside_export({'new.png': 'hand'}, {}, {}), ['new.png'])
+        self.assertEqual(sync_public.edited_outside_export({'README.md': 'hand'}, recorded, {'README.md': 'hand'}), [])
+        self.assertEqual(sync_public.edited_outside_export({'README.md': 'old'}, recorded, {'README.md': 'new'}), [])
+
 
 if __name__ == '__main__':
     unittest.main()
