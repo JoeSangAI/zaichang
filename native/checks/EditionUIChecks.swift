@@ -103,5 +103,5 @@ import AppKit
     try check(token=="example-token","archive_accepts_configured_app_identity")
     try Data(#"{"schema":1,"archive":{"url":"file:///tmp/service","app_id":"example"}}"#.utf8).write(to:configURL)
     try check(!RuntimeConfiguration.archiveEnabled && owner.makeMeetingArchiveButton().isHidden,"invalid_archive_config_stays_hidden")
-    return checks
+    return checks+(try firstRunGuideChecks(directory:directory))
 }

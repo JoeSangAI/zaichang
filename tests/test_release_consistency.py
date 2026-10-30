@@ -13,6 +13,9 @@ import install_standalone
 
 
 class ReleaseConsistencyTests(unittest.TestCase):
+    def test_first_run_guide_was_reviewed_for_this_release(self):
+        self.assertEqual(app_version.first_run_review_problem(), '')
+
     def test_every_installer_ships_the_one_version(self):
         self.assertEqual(install_standalone.VERSION, app_version.VERSION)
         self.assertEqual(install_standalone.BUILD, app_version.BUILD)

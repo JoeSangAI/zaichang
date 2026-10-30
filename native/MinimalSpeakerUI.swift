@@ -1759,7 +1759,7 @@ private final class SpeakerChip:NSView {
 }
 
 /// Rounded action: charcoal when primary, outlined otherwise.
-private final class SpeakerPillButton:NSButton {
+final class SpeakerPillButton:NSButton {
     var handler:()->Void
     private let primary:Bool,small:Bool
     init(title:String,primary:Bool,small:Bool=false,handler:@escaping ()->Void) {

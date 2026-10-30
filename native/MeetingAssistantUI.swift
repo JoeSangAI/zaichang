@@ -79,7 +79,7 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
     let autoTitle=MeetingAutoTitle();var titleProvider:MeetingTitleProvider?;var titleTextAllowed=false;var titleTask:Task<Void,Never>?;var titleRevision=0
     var finalTitleTasks:[String:Task<Void,Never>]=[:]
     var isHistoryReader=false;weak var workspaceOwner:Delegate?;var historyReader:Delegate?;var historyReaderShell:NSWindow?
-    var recordingLiveDot:RecordingLiveDot?;var recordingCapsuleWidth:NSLayoutConstraint?;var recordingModeChip:RecordingModeChip?;var readingAlignedRows:[NSStackView]=[];var settingsLayoutFrames:[(NSView,NSRect)]=[];var notesTransportStack:NSStackView?;var meetingEyebrow:NSTextField?;var emptyFilesButton:NSButton?;var emptyTranscribeButton:NSButton?;var window:NSWindow!;var sheet:NSPanel!;var key:NSSecureTextField!;var keyLabel:NSTextField!;var setupMessage:NSTextField!;var savedLabel:NSTextField!;var save:NSButton!;var change:NSButton!
+    var recordingLiveDot:RecordingLiveDot?;var recordingCapsuleWidth:NSLayoutConstraint?;var firstRunGuide:FirstRunGuide?;var recordingModeChip:RecordingModeChip?;var readingAlignedRows:[NSStackView]=[];var settingsLayoutFrames:[(NSView,NSRect)]=[];var notesTransportStack:NSStackView?;var meetingEyebrow:NSTextField?;var emptyFilesButton:NSButton?;var emptyTranscribeButton:NSButton?;var window:NSWindow!;var sheet:NSPanel!;var key:NSSecureTextField!;var keyLabel:NSTextField!;var setupMessage:NSTextField!;var savedLabel:NSTextField!;var save:NSButton!;var change:NSButton!
     var historyButton:NSButton?;var newButton:NSButton?;var archiveButton:NSButton?;var heading:NSTextField!;var source:NSTextField!;var meter:NSTextField!;var action:NSButton!;var output:NSTextView!;var scroll:NSScrollView!;var empty:NSTextField!;var latest:NSButton!;var footerDetails:NSButton!;var settingsCancel:NSButton!;var diagnostic:NSTextField!
     var phase=UIState();var child:Process?;var quitting=false;var mock=false;var timer:Timer?;var mockTick=0;let vault=MockVault()
     var terminationJobsPending=0;var terminationReplyPending=false;var terminationWriteBarrierStarted=false
@@ -180,7 +180,7 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
         layoutWorkspace();updateUI();configureVoiceprintRecommendations();configureMeetingContext();reconcileDeletedMeetingProjections()
         showMissingCredentialHintIfNeeded()
         if previewRenderOnly {return}
-        reloadLibrary(selectRecent:true)
+        reloadLibrary(selectRecent:true);presentFirstRunGuideIfNeeded()
         if !mock && Bundle.main.object(forInfoDictionaryKey:"LocalRecordingAllowed") as? Bool != true {refreshCloudBudget()}
         if !mock && Bundle.main.object(forInfoDictionaryKey:"LocalRecordingAllowed") as? Bool==true {return}
         if trialCandidate {if !mock && Bundle.main.object(forInfoDictionaryKey:"LocalRecordingAllowed") as? Bool != true && remainingSeconds()<=0 {newRecordingPending=true;diagnostic.stringValue="正在连接转写服务";updateUI()};return}
@@ -298,7 +298,7 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
         do {
             if mock {try vault.save(value.normalized);precondition(vault.bytes==Data(value.normalized.utf8))}
             else {guard authorized else {return};try Credential.save(value.normalized)}
-            key.stringValue="";editing=false;replacing=false;refreshSettings();if diagnostic.stringValue=="去设置里填写百炼密钥" {diagnostic.stringValue="密钥已保存";if currentCacheID==nil {empty?.stringValue="开始后，会议文字会出现在这里"}};setupMessage.stringValue="已保存";sheet.makeFirstResponder(save)
+            key.stringValue="";editing=false;replacing=false;refreshSettings();clearMissingCredentialHint();setupMessage.stringValue="已保存";sheet.makeFirstResponder(save)
         } catch {setupMessage.stringValue=stored ? "没能更换密钥，原密钥仍可用。请重试。" : "没能保存密钥，请重试。"}
     }
     @objc func dismissSettings() {key.stringValue="";window.endSheet(sheet);sheet.orderOut(nil)}
@@ -2006,7 +2006,7 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
         for (name,target) in targets {guard let target=target,let bitmap=target.bitmapImageRepForCachingDisplay(in:target.bounds) else{continue};target.effectiveAppearance.performAsCurrentDrawingAppearance { target.cacheDisplay(in:target.bounds,to:bitmap) };let image=NSImage(size:target.bounds.size);image.lockFocus();target.effectiveAppearance.performAsCurrentDrawingAppearance { NSColor.windowBackgroundColor.setFill();NSBezierPath(rect:NSRect(origin:.zero,size:target.bounds.size)).fill();bitmap.draw(in:NSRect(origin:.zero,size:target.bounds.size)) };image.unlockFocus();guard let tiff=image.tiffRepresentation,let opaque=NSBitmapImageRep(data:tiff) else{continue};if let png=opaque.representation(using:.png,properties:[:]) {try? png.write(to:directory.appendingPathComponent(stamp+"-"+name+".png"))}}
     }
     func installMenus() {
-        let menu=NSMenu();let item=NSMenuItem();menu.addItem(item);let appMenu=NSMenu();let config=appMenu.addItem(withTitle:"设置…",action:#selector(showSettings),keyEquivalent:",");config.target=self;appMenu.addItem(.separator());let quit=appMenu.addItem(withTitle:"退出在场",action:#selector(quitApplication),keyEquivalent:"q");quit.target=self;item.submenu=appMenu
+        let menu=NSMenu();let item=NSMenuItem();menu.addItem(item);let appMenu=NSMenu();let config=appMenu.addItem(withTitle:"设置…",action:#selector(showSettings),keyEquivalent:",");config.target=self;let guideItem=appMenu.addItem(withTitle:"使用引导…",action:#selector(showFirstRunGuide),keyEquivalent:"");guideItem.target=self;appMenu.addItem(.separator());let quit=appMenu.addItem(withTitle:"退出在场",action:#selector(quitApplication),keyEquivalent:"q");quit.target=self;item.submenu=appMenu
         let editItem=NSMenuItem();menu.addItem(editItem);let edit=NSMenu(title:"编辑");edit.addItem(withTitle:"剪切",action:#selector(NSText.cut(_:)),keyEquivalent:"x");edit.addItem(withTitle:"复制",action:#selector(NSText.copy(_:)),keyEquivalent:"c");let paste=edit.addItem(withTitle:"粘贴",action:#selector(paste(_:)),keyEquivalent:"v");paste.target=self;edit.addItem(withTitle:"全选",action:#selector(NSText.selectAll(_:)),keyEquivalent:"a");editItem.submenu=edit
         let find=edit.addItem(withTitle:"搜索原文…",action:#selector(showDocumentSearch),keyEquivalent:"f");find.target=self
         let recovery=edit.addItem(withTitle:"历史会议…",action:#selector(showRecoveries),keyEquivalent:"");recovery.target=self

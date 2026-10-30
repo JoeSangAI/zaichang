@@ -10,6 +10,8 @@ enum RuntimeConfiguration {
         return value == "standalone" ? "standalone":"joe"
     }
     static var standalone:Bool {edition() == "standalone"}
+    /// Where tools the user installed live; a GUI app does not inherit their shell's PATH.
+    static var toolSearchPaths:[String] {["/usr/local/bin","/opt/homebrew/bin",NSHomeDirectory()+"/.local/bin",NSHomeDirectory()+"/.codex/bin","/usr/bin","/bin"]}
     static var bailianService:String {standalone ? "com.joesang.zaichang.standalone.bailian":"com.joesang.meeting-assistant.bailian"}
     static var identityService:String {standalone ? "com.zaichang.app.identity-v2":"com.joesang.meeting-assistant.identity-v2"}
     static func dataRoot(legacyJoeIdentity:Bool=false,info:[String:Any]=Bundle.main.infoDictionary ?? [:],environment:[String:String]=ProcessInfo.processInfo.environment)->URL {

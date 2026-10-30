@@ -85,7 +85,7 @@ if not args.helper_only:
  ui_sources=work/'ui-sources';ui_sources.mkdir(parents=True,exist_ok=True)
  for stale in ui_sources.glob('*.swift'):stale.unlink()
  ui+=['MeetingAssistantLinks','MeetingMarkdown','MeetingMarkdownChecks','MeetingAgentPanel','MeetingAgentBridge','MeetingAgentChecks']
- ui+=['RuntimeConfiguration','RuntimeConfigurationChecks','MeetingMinutes','MeetingMinutesUI','MeetingMinutesChecks','EditionUIChecks']
+ ui+=['RuntimeConfiguration','RuntimeConfigurationChecks','MeetingMinutes','MeetingMinutesUI','MeetingMinutesChecks','EditionUIChecks','FirstRunGuide']
  ui+=['MeetingNotes','MeetingNotesUI','MeetingNotesChecks']
  ui+=['MeetingSpeechIntervals','MeetingAcousticRefinement','SavedVoiceRecognition','SavedVoiceRecognitionUI','SavedVoiceRecognitionChecks','VoiceSuggestionPersistenceChecks','HistoricalVoiceEnrollment','VoiceprintAutomaticLearning','VoiceprintAutomaticLearningChecks']
  for name in ui:shutil.copy2(source_file(name),ui_sources/(name+'.swift'))

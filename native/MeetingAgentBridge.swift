@@ -21,7 +21,7 @@ final class MeetingAgentBridge {
         child.executableURL = URL(fileURLWithPath: "/usr/local/bin/python3")
         child.arguments = ["-u", root + "/assistant_runtime.py", "--store", store.path, "--cwd", NSHomeDirectory()] + (offline ? ["--offline"] : [])
         var env = RuntimeConfiguration.childEnvironment()
-        env["PATH"] = "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:" + (env["PATH"] ?? "")
+        env["PATH"] = (RuntimeConfiguration.toolSearchPaths + [env["PATH"] ?? ""]).joined(separator: ":")
         child.environment = env; child.standardInput = stdin; child.standardOutput = stdout
         // Retain startup diagnostics locally; never send them into the chat.
         // Replaced on launch so repeated failures cannot grow an unbounded log.
