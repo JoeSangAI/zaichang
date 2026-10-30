@@ -1298,20 +1298,72 @@ func applicationTapFormatRegression()throws->[String:Any] {
     let fraction=Double(wrong.padding)/Double(wrong.pcm+wrong.padding)
     precondition(abs(fraction-2.0/3.0)<0.002)
     precondition(correct.pcm==320000 && correct.padding==0)
-    var matching=ApplicationTapClockCheck(),mismatching=ApplicationTapClockCheck(),rejected=false
-    for packet in 0..<20 {
-        var timestamp=AudioTimeStamp();timestamp.mFlags=[.hostTimeValid,.sampleTimeValid]
-        timestamp.mHostTime=AVAudioTime.hostTime(forSeconds:100+Double(packet)*0.02)
-        timestamp.mSampleTime=Double(packet*320)
-        precondition(matching.accepts(timestamp,sampleRate:16000))
-        if !mismatching.accepts(timestamp,sampleRate:48000) {rejected=true}
+    // CoreAudio keeps reporting 48 kHz while frames really arrive at 16 kHz: the real
+    // failure from Feishu with Bluetooth earbuds. Follow delivery, keep the same tap.
+    func tone(_ format:AVAudioFormat,packet:Int,frames:Int)->AVAudioPCMBuffer {
+        let input=AVAudioPCMBuffer(pcmFormat:format,frameCapacity:AVAudioFrameCount(frames))!;input.frameLength=AVAudioFrameCount(frames)
+        for channel in 0..<2 {for frame in 0..<frames {input.floatChannelData![channel][frame]=Float(sin(Double(packet*frames+frame)*2*Double.pi*440/format.sampleRate)*0.2)}}
+        return input
     }
-    precondition(rejected)
-    var invalid=ApplicationTapClockCheck(),reverse=AudioTimeStamp();reverse.mFlags=[.hostTimeValid,.sampleTimeValid]
-    reverse.mHostTime=AVAudioTime.hostTime(forSeconds:100);reverse.mSampleTime=320
-    precondition(invalid.accepts(reverse,sampleRate:16000))
-    reverse.mHostTime=AVAudioTime.hostTime(forSeconds:100.02);reverse.mSampleTime=0
-    precondition(!invalid.accepts(reverse,sampleRate:16000))
+    func crossingsPerSecond(_ pcm:Data)->Double {
+        let samples=pcm.withUnsafeBytes{Array($0.bindMemory(to:Int16.self))}
+        var crossings=0;for i in 1..<max(1,samples.count) where (samples[i-1]<0) != (samples[i]<0) {crossings+=1}
+        return Double(crossings)/(Double(samples.count)/16000)
+    }
+    let reported=AVAudioFormat(commonFormat:.pcmFormatFloat32,sampleRate:48000,channels:2,interleaved:false)!
+    // Without following, 16 kHz frames read as 48 kHz play three times too fast.
+    do {
+        let converter=try PCMConverter(reported);var pcm=Data()
+        for packet in 0..<500 {pcm.append(try converter.convert(tone(AVAudioFormat(commonFormat:.pcmFormatFloat32,sampleRate:16000,channels:2,interleaved:false)!,packet:packet,frames:320).reinterpreted(as:reported)!))}
+        precondition(abs(crossingsPerSecond(pcm)/880-3)<0.3)
+    }
+    let follower=try TapRateFollower(reported:reported)
+    let folder=FileManager.default.temporaryDirectory.appendingPathComponent("tap-follower-"+UUID().uuidString)
+    let journal=try RecordingJournal(directory:folder,track:"remote",freeSpace:{1_000_000_000},alignCaptureTime:true)
+    var corrected:[Double]=[],everything=Data()
+    for packet in 0..<500 {
+        let at=100+Double(packet)*0.02
+        if let rate=try follower.observe(frames:320,at:at) {corrected.append(rate)}
+        let source=AVAudioFormat(commonFormat:.pcmFormatFloat32,sampleRate:16000,channels:2,interleaved:false)!
+        for (data,time) in try follower.accept(tone(source,packet:packet,frames:320).reinterpreted(as:follower.format)!,at:at) {
+            try journal.enqueue(data,at:time);everything.append(data)
+        }
+    }
+    journal.finish();journal.wait()
+    let manifest=try JSONSerialization.jsonObject(with:Data(contentsOf:folder.appendingPathComponent("remote-manifest.json"))) as! [String:Any]
+    let written=manifest["written_bytes"] as! Int,padded=manifest["alignment_padding_bytes"] as! Int
+    precondition(corrected==[16000],"reported 48 kHz must correct once to the delivered 16 kHz")
+    precondition(follower.format.sampleRate==16000 && manifest["error"] is NSNull)
+    precondition(Double(padded)/Double(written)<0.01,"no audio is padded, unlike 2/3 before")
+    precondition(abs(written-320000)<4000,"all ten seconds are kept, including the frames held during detection")
+    precondition(abs(crossingsPerSecond(everything)/880-1)<0.03,"the whole track plays at its real speed")
+    // The call ends and the route returns to 48 kHz: follow it back, in place.
+    for packet in 0..<60 {_=try follower.observe(frames:960,at:110+Double(packet)*0.02)}
+    precondition(follower.format.sampleRate==48000)
+    // AirPods' 24 kHz, and a correct report that must never be touched.
+    let airpods=try TapRateFollower(reported:reported),steady=try TapRateFollower(reported:reported)
+    for packet in 0..<60 {
+        _=try airpods.observe(frames:480,at:200+Double(packet)*0.02)
+        _=try steady.observe(frames:960,at:200+Double(packet)*0.02)
+    }
+    precondition(airpods.format.sampleRate==24000 && steady.format.sampleRate==48000)
+    // Stalls, a single odd window and non-standard rates cannot switch the format.
+    var noisy=TapDeliveryRate(),switched:Double?
+    for packet in 0..<30 {if let rate=noisy.observe(frames:960,at:300+Double(packet)*0.02) {switched=rate}}
+    precondition(switched==48000)
+    var stalled=TapDeliveryRate();switched=nil
+    for packet in 0..<10 {if let rate=stalled.observe(frames:960,at:400+Double(packet)*0.02) {switched=rate}}
+    for packet in 0..<5 {if let rate=stalled.observe(frames:320,at:402+Double(packet)*0.02) {switched=rate}}
+    precondition(switched==nil,"a stall resets measurement instead of reading it as a slower rate")
+    var odd=TapDeliveryRate();switched=nil
+    for packet in 0..<100 {if let rate=odd.observe(frames:600,at:500+Double(packet)*0.02) {switched=rate}}
+    precondition(switched==nil,"30 kHz is not a standard rate")
+    // Repeated failure holds a source back for a while, then lets it retry.
+    var backoff=SourceRetryBackoff()
+    for i in 0..<4 {backoff.recordFailure("app-a",at:Double(i))}
+    precondition(backoff.heldBack(at:4).isEmpty)
+    backoff.recordFailure("app-a",at:4)
+    precondition(backoff.heldBack(at:5)==["app-a"] && backoff.heldBack(at:40).isEmpty)
     return ["old_padding_fraction":fraction,"correct_pcm_bytes":correct.pcm,"correct_padding_bytes":correct.padding,
-            "same_device_rate_change_rejected":rejected,"synthetic_pcm":true,"capture":false,"network":false]
+            "delivery_rate_followed":corrected,"synthetic_pcm":true,"capture":false,"network":false]
 }

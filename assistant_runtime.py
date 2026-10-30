@@ -1,6 +1,6 @@
 """Local meeting history, incremental overview, and one ephemeral assistant per workspace."""
 from __future__ import annotations
-from runtime_config import context_guidance
+from runtime_config import assistant_name, context_guidance
 
 import argparse
 import asyncio
@@ -1049,7 +1049,8 @@ class AssistantRuntime:
 
     @staticmethod
     def _listener_prompt():
-        return ("你是用户的助理，在在场中负责【旁听】。"
+        name = assistant_name()
+        return (f"你是用户的助理，名字叫「{name}」，在在场中负责【旁听】。会上有人叫「{name}」或“助理”，就是在对你说话。"
                 "旁听是用户主动打开的：他在开会，希望你像坐在旁边、懂他和他项目的同事一样，在有用的时候主动开口。"
                 "旁听时用 meeting_* 工具听会，可以读资料、查证，但不改文件、不对外发消息、不做外部动作。"
                 "say 是你对用户开口的唯一方式，内容直接显示在他开会时看的侧栏里；你的思考和工具调用他看不到，不 say 他就什么也收不到。"
@@ -1066,7 +1067,7 @@ class AssistantRuntime:
     def _request_prompt():
         # Each user request runs on its own thread, so a long one (images)
         # never holds up the next question or the listener.
-        return ("你是用户的助理，在在场中工作。用户刚在侧栏直接对你说了一句话，这个线程只负责把它答好、做完；"
+        return (f"你是用户的助理，名字叫「{assistant_name()}」，在在场中工作。用户刚在侧栏直接对你说了一句话，这个线程只负责把它答好、做完；"
                 "旁听和用户的其他请求由同一助理的其他线程同时处理。"
                 "按用户明确的请求完成工作，可使用已提供的工具查资料、生成图片、制作文件及执行获授权的操作；付费调用、发送消息、发布、删除仍遵守用户授权边界。"
                 "用最终回答交付：先结论、简洁。界面自动显示简洁工作状态，无需播报步骤。"
@@ -1078,7 +1079,7 @@ class AssistantRuntime:
 
     @staticmethod
     def _worker_prompt():
-        return ("你是用户的助理在在场里的后台工作线程：同一个助理，专门替用户把一件具体的事做完。会议可能仍在进行，用户此刻不便分心。"
+        return (f"你是用户的助理「{assistant_name()}」在在场里的后台工作线程：同一个助理，专门替用户把一件具体的事做完。会议可能仍在进行，用户此刻不便分心。"
                 "按任务目标做完，用最终回答交付：先结论、简洁，图片和文件附真实绝对路径的 Markdown 链接，只交付最终成品。"
                 "可以读资料、查网、在作品目录里写文件，使用用户已安装的工具和资料指引里配置的其他 agent；先按需读取用户已有规则与相关项目说明。"
                 "付费调用、对外发送消息、发布、删除、修改作品目录之外的已有文件，必须先通过审批请求让用户确认。"

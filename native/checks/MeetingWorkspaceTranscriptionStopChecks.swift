@@ -21,7 +21,7 @@ func meetingWorkspaceTranscriptionPauseChecks(directory:URL)throws->[String] {
     var controlCommands:[[String:Any]]=[]
     paused.mockRecordingControlHandler={controlCommands.append($0)}
     paused.updateUI()
-    try check(paused.action.title=="继续录音" && paused.action.isEnabled && paused.hasPendingTranscriptionWork && paused.recordingModeHint?.stringValue.contains("正在补齐已录文字")==true,
+    try check(paused.action.title=="继续录音" && paused.action.isEnabled && paused.hasPendingTranscriptionWork && paused.meetingEyebrow?.stringValue.hasSuffix(" · 正在补齐已录文字")==true,
               "paused_tail_is_background_status_with_primary_resume")
     try check(paused.newButton?.isEnabled==true && !paused.toolbarAllowedItemIdentifiers(paused.window.toolbar!).contains(NSToolbarItem.Identifier("new")),
               "new_conversation_has_one_sidebar_entry")

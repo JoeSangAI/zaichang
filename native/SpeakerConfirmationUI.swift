@@ -8,7 +8,7 @@ final class SpeakerConfirmationController:NSObject,NSTextFieldDelegate,NSPopover
     let popover=NSPopover()
     let field=NSTextField(string:"")
     let scope=NSButton(checkboxWithTitle:"",target:nil,action:nil)
-    let learn=NSButton(checkboxWithTitle:"用于以后识别声音",target:nil,action:nil)
+    let learn=NSButton(checkboxWithTitle:"记住这个声音",target:nil,action:nil)
     private let environmentField=NSTextField(string:"")
     let status=NSTextField(wrappingLabelWithString:"")
     let confirm=NSButton(title:"确认",target:nil,action:nil)
@@ -126,7 +126,32 @@ final class SpeakerConfirmationController:NSObject,NSTextFieldDelegate,NSPopover
             let actions=NSStackView(views:[reject,spacer,confirm]);actions.spacing=12
             fields=[title,hint,field,status,accessories,actions]
             for row in [hint,accessories,actions] {row.translatesAutoresizingMaskIntoConstraints=false;row.widthAnchor.constraint(equalToConstant:292).isActive=true}
-        }else {fields=[title,field,candidates,scope,learn,status,buttons]}
+        }else {
+            // Show the line being asked about, and offer this meeting's confirmed names as one-click choices.
+            var context:[NSView]=[]
+            let spoken=(turn?.parts.compactMap{$0.1["text"] as? String}.joined() ?? "").trimmingCharacters(in:.whitespacesAndNewlines)
+            if !spoken.isEmpty {
+                let line=NSTextField(wrappingLabelWithString:"“"+spoken+"”");line.font = .systemFont(ofSize:13);line.textColor=MeetingVisualStyle.ink;line.maximumNumberOfLines=3
+                line.preferredMaxLayoutWidth=268
+                let block=NSView();block.wantsLayer=true;block.layer?.cornerRadius=10;block.layer?.backgroundColor=MeetingVisualStyle.quietFill.cgColor
+                block.translatesAutoresizingMaskIntoConstraints=false;line.translatesAutoresizingMaskIntoConstraints=false;block.addSubview(line)
+                NSLayoutConstraint.activate([line.leadingAnchor.constraint(equalTo:block.leadingAnchor,constant:12),line.trailingAnchor.constraint(equalTo:block.trailingAnchor,constant:-12),
+                                             line.topAnchor.constraint(equalTo:block.topAnchor,constant:8),line.bottomAnchor.constraint(equalTo:block.bottomAnchor,constant:-8),block.widthAnchor.constraint(equalToConstant:292)])
+                context.append(block)
+            }
+            var counts:[String:Int]=[:]
+            for reading in owner.readingTurns() {if let name=reading.parts.first.flatMap({owner.naming.name(segment:$0.0)}) {counts[name,default:0]+=1}}
+            let names=counts.sorted{$0.value != $1.value ? $0.value>$1.value:$0.key<$1.key}.prefix(4).map(\.key)
+            if !names.isEmpty {
+                let chips=NSStackView();chips.orientation = .horizontal;chips.spacing=6
+                for name in names {
+                    let chip=NSButton(title:name,target:self,action:#selector(pickMeetingName(_:)));chip.bezelStyle = .rounded;chip.controlSize = .small
+                    chip.setAccessibilityLabel("选择本场的 "+name);chips.addArrangedSubview(chip)
+                }
+                context.append(chips)
+            }
+            fields=[title]+context+[field,candidates,scope,learn,status,buttons]
+        }
         let column=NSStackView(views:fields);column.orientation = .vertical;column.alignment = .leading;column.spacing=12;column.translatesAutoresizingMaskIntoConstraints=false
         root.addSubview(column)
         NSLayoutConstraint.activate([column.leadingAnchor.constraint(equalTo:root.leadingAnchor,constant:16),column.trailingAnchor.constraint(equalTo:root.trailingAnchor,constant:-16),column.topAnchor.constraint(equalTo:root.topAnchor,constant:16),column.bottomAnchor.constraint(equalTo:root.bottomAnchor,constant:-16),status.widthAnchor.constraint(equalTo:field.widthAnchor)])
@@ -328,6 +353,10 @@ final class SpeakerConfirmationController:NSObject,NSTextFieldDelegate,NSPopover
         owner.markAllTranscriptParentsDirty()
     }
     @objc private func undo() {owner?.undoName();popover.close()}
+    @objc private func pickMeetingName(_ sender:NSButton) {
+        field.stringValue=sender.title;selectedPerson=nil;refreshValidity()
+        popover.contentViewController?.view.window?.makeFirstResponder(field)
+    }
     @objc private func openDetails() {popover.close();owner?.openSpeakerReview(for:segmentIDs.first.flatMap{owner?.naming.key(segment:$0)})}
     func popoverDidClose(_ notification:Notification) {
         stopQuickPreview()

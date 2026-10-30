@@ -191,8 +191,7 @@ extension ApplicationTap {
             try check(AudioHardwareCreateAggregateDevice(aggregate as CFDictionary, &device), "create_app_aggregate")
             let format=try applicationTapInputFormat(device:device)
             asbd=format.streamDescription.pointee;capturedInputFormat=format
-            let converter=try PCMConverter(format)
-            var formatClock=ApplicationTapClockCheck()
+            let follower=try TapRateFollower(reported:format)
             let formatInfo:[String:Any]=["type":"capture_format","source_id":sourceID,"tap_sample_rate":declaredTapSampleRate,
                   "input_sample_rate":format.sampleRate,"input_channels":format.channelCount,
                   "input_bytes_per_frame":asbd.mBytesPerFrame]
@@ -200,11 +199,18 @@ extension ApplicationTap {
             emit(formatInfo)
             try check(AudioDeviceCreateIOProcIDWithBlock(&io, device, queue) { _, input, inputTime, _, _ in
                 guard captureAdmissionOpen() else { return }
-                guard formatClock.accepts(inputTime.pointee,sampleRate:format.sampleRate) else{box.fail("app_tap_input_clock_changed");return}
                 let list = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: input))
                 guard let first = list.first, asbd.mBytesPerFrame > 0 else { box.fail("app_tap_empty_format"); return }
                 let frames = AVAudioFrameCount(first.mDataByteSize / asbd.mBytesPerFrame)
-                guard let copied = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frames) else { box.fail("app_tap_copy"); return }
+                let stamp = inputTime.pointee.mFlags.contains(.hostTimeValid) ?
+                    AVAudioTime.seconds(forHostTime: inputTime.pointee.mHostTime) : ProcessInfo.processInfo.systemUptime
+                do {
+                    if let measured=try follower.observe(frames:Int(frames),at:stamp) {
+                        var info=formatInfo;info["input_sample_rate"]=measured;info["measured_from_delivery"]=true
+                        box.journal?.recordCaptureFormat(info);emit(info)
+                    }
+                } catch {box.fail("app_tap_conversion");return}
+                guard let copied = AVAudioPCMBuffer(pcmFormat: follower.format, frameCapacity: frames) else { box.fail("app_tap_copy"); return }
                 copied.frameLength = frames
                 let target = UnsafeMutableAudioBufferListPointer(copied.mutableAudioBufferList)
                 guard target.count == list.count else { box.fail("app_tap_channel_layout"); return }
@@ -213,9 +219,7 @@ extension ApplicationTap {
                           let from = source.mData, let to = destination.mData else { box.fail("app_tap_buffer_layout"); return }
                     memcpy(to, from, Int(source.mDataByteSize))
                 }
-                let stamp = inputTime.pointee.mFlags.contains(.hostTimeValid) ?
-                    AVAudioTime.seconds(forHostTime: inputTime.pointee.mHostTime) : ProcessInfo.processInfo.systemUptime
-                do { let data = try converter.convert(copied); if !data.isEmpty { _ = writeCapturedPCMIfAdmitted(data,at:stamp,to:box) } }
+                do { for (data,time) in try follower.accept(copied,at:stamp) { _ = writeCapturedPCMIfAdmitted(data,at:time,to:box) } }
                 catch { box.fail("app_tap_conversion") }
             }, "create_app_tap_io")
             try check(AudioDeviceStart(device, io), "start_app_tap")
@@ -236,8 +240,8 @@ final class ProcessAudioSourceController {
     var sources: [ProcessAudioSource] { active.values.map(\.source).sorted { $0.sourceID < $1.sourceID } }
 
     @discardableResult
-    func refresh(boxForSource: (ProcessAudioSource) throws -> Mailbox) throws -> ProcessAudioRouteChange {
-        let desired = try ProcessAudioInventory.snapshot(excludingPIDs: Set(selfAudioPIDs()))
+    func refresh(holdingBack: Set<String> = [], boxForSource: (ProcessAudioSource) throws -> Mailbox) throws -> ProcessAudioRouteChange {
+        let desired = try ProcessAudioInventory.snapshot(excludingPIDs: Set(selfAudioPIDs())).filter { !holdingBack.contains($0.sourceID) }
         return try reconcile(desired, boxForSource: boxForSource)
     }
 

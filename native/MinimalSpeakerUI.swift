@@ -78,6 +78,21 @@ private final class MinimalSpeakerReviewController:NSObject,NSWindowDelegate,NST
     private var openingReadingPosition:Delegate.TranscriptReadingPosition?
     private var shouldNavigateToOriginal=false
     var fixtureConfirmation:((String,String,String)->Bool)?
+    // Card overview (default view). Every card action drives the same controls
+    // as the detailed editor below, so saving, learning and undo stay one path.
+    private let cardsStack=NSStackView()
+    private var cardsScroll:NSScrollView?
+    private var detailColumn:NSView?
+    private let cardsTitle=NSTextField(labelWithString:"")
+    private let cardsHint=NSTextField(labelWithString:"先听一段，再确认或填名字。确认后会记住声音，下次自动认出。")
+    private let cardsCounts=NSStackView()
+    private let cardsStatus=NSTextField(wrappingLabelWithString:"")
+    private let cardsUndo=NSButton(title:"撤销上次",target:nil,action:nil)
+    private let cardsRefine=NSButton(title:"重新整理",target:nil,action:nil)
+    private var cardDrafts:[String:String]=[:]
+    private var cardNamingOpen=Set<String>()
+    private var cardPlaying:String?
+    private(set) var showingDetail=false
 
     init(owner:Delegate) {self.owner=owner}
 
@@ -156,9 +171,15 @@ private final class MinimalSpeakerReviewController:NSObject,NSWindowDelegate,NST
         rejectVoiceButton.target=self;rejectVoiceButton.action=#selector(rejectVoice)
         let column=NSStackView(views:[filterRow,coarseStatus,renameRow,suggestion,scopeLabel,details,scroll,footerRow]);column.orientation = .vertical;column.spacing=12;column.alignment = .leading;column.distribution = .fill
         for view in [column,filterRow,details,assignmentRow,renameRow,selectionLabel,scroll,footerRow,reuseGroupButton] {view.translatesAutoresizingMaskIntoConstraints=false}
-        root.addSubview(column)
+        let back=NSButton(title:"← 返回发言人",target:self,action:#selector(showCards));back.bezelStyle = .inline;back.controlSize = .small
+        column.insertArrangedSubview(back,at:0)
+        let detail=NSView();detail.translatesAutoresizingMaskIntoConstraints=false;detail.addSubview(column);detail.isHidden=true;detailColumn=detail
+        let cards=buildCardsView()
+        root.addSubview(detail);root.addSubview(cards)
         NSLayoutConstraint.activate([
-            column.leadingAnchor.constraint(equalTo:root.leadingAnchor,constant:24),column.trailingAnchor.constraint(equalTo:root.trailingAnchor,constant:-24),column.topAnchor.constraint(equalTo:root.topAnchor,constant:24),column.bottomAnchor.constraint(equalTo:root.bottomAnchor,constant:-24),
+            detail.leadingAnchor.constraint(equalTo:root.leadingAnchor),detail.trailingAnchor.constraint(equalTo:root.trailingAnchor),detail.topAnchor.constraint(equalTo:root.topAnchor),detail.bottomAnchor.constraint(equalTo:root.bottomAnchor),
+            cards.leadingAnchor.constraint(equalTo:root.leadingAnchor),cards.trailingAnchor.constraint(equalTo:root.trailingAnchor),cards.topAnchor.constraint(equalTo:root.topAnchor),cards.bottomAnchor.constraint(equalTo:root.bottomAnchor),
+            column.leadingAnchor.constraint(equalTo:detail.leadingAnchor,constant:24),column.trailingAnchor.constraint(equalTo:detail.trailingAnchor,constant:-24),column.topAnchor.constraint(equalTo:detail.topAnchor,constant:24),column.bottomAnchor.constraint(equalTo:detail.bottomAnchor,constant:-24),
             filterRow.heightAnchor.constraint(equalToConstant:30),scopeLabel.widthAnchor.constraint(equalTo:column.widthAnchor),scroll.heightAnchor.constraint(greaterThanOrEqualToConstant:200),footerRow.heightAnchor.constraint(greaterThanOrEqualToConstant:24)
         ])
         scroll.setContentHuggingPriority(.defaultLow,for:.vertical)
@@ -242,6 +263,7 @@ private final class MinimalSpeakerReviewController:NSObject,NSWindowDelegate,NST
         if hadDraft,previous==selectedChoiceKey {nameField.stringValue=draft;nameDraftChanged=true}
         lastDataEpoch=dataEpoch
         updateControls()
+        rebuildCards()
     }
 
     private func choiceIdentity(_ choice:SpeakerReviewChoice)->String {
@@ -576,7 +598,22 @@ private final class MinimalSpeakerReviewController:NSObject,NSWindowDelegate,NST
         updateControls()
     }
 
+    /// While saved-voice recognition runs, say so on the cards: naming someone now
+    /// cancels that run. Re-checked each second until the job is no longer running.
+    private func updateCardsActivity() {
+        guard let owner else{return}
+        let job=owner.savedVoiceRecognitionJob
+        let running=(job.busy || job.waiting) && owner.voiceprintStatus.hasPrefix("正在本机识别")
+        let idle="先听一段，再确认或填名字。确认后会记住声音，下次自动认出。"
+        let busy="正在按声音认人，通常几秒就好；等它认完再改名，结果不会被打断。"
+        if cardsHint.stringValue != (running ? busy:idle),index.map({!$0.people.isEmpty || !$0.unassigned.isEmpty}) ?? false {
+            cardsHint.stringValue=running ? busy:idle;cardsHint.textColor=running ? MeetingVisualStyle.accentText:MeetingVisualStyle.muted
+        }
+        if running {DispatchQueue.main.asyncAfter(deadline:.now()+1) { [weak self] in guard self?.window?.isVisible==true else{return};self?.updateCardsActivity()}}
+    }
+
     private func updateControls() {
+        updateCardsActivity()
         if let owner=owner {
             coarseStatus.show(owner.coarseProcessingProgress,summary:owner.coarseProcessingSummary,
                               isRecording:owner.phase.phase == .recording,
@@ -720,10 +757,11 @@ private final class MinimalSpeakerReviewController:NSObject,NSWindowDelegate,NST
             } catch {
                 self.stopPreview();self.updateControls();self.selectionLabel.stringValue="所选发言的原音无法试听；请检查录音是否保留、时间是否完整。"
                 self.scopeLabel.stringValue=self.selectionLabel.stringValue
+                self.cardsStatus.stringValue=self.selectionLabel.stringValue;self.cardPlaying=nil;self.rebuildCards()
             }
         }
     }
-    func audioPlayerDidFinishPlaying(_ player:AVAudioPlayer,successfully flag:Bool) {stopPreview();updateControls()}
+    func audioPlayerDidFinishPlaying(_ player:AVAudioPlayer,successfully flag:Bool) {stopPreview();updateControls();cardPlaying=nil;rebuildCards()}
     func audioPlayerDecodeErrorDidOccur(_ player:AVAudioPlayer,error:Error?) {stopPreview();updateControls();selectionLabel.stringValue="录音播放失败，原文件保留。";scopeLabel.stringValue=selectionLabel.stringValue}
     @objc private func reassignSelection() {
         guard let owner=owner,!persistenceInFlight,let target=selectedTarget,!selectedPartIDs.isEmpty else{return}
@@ -778,8 +816,10 @@ private final class MinimalSpeakerReviewController:NSObject,NSWindowDelegate,NST
         owner.markAllTranscriptParentsDirty()
         refresh(preferred:preferred)
         scopeLabel.stringValue="正在保存本场人物修改…"
+        cardsStatus.stringValue="正在保存…"
         owner.persistSessionNames { [weak self,weak owner] result in
             guard let self,let owner,self.persistenceToken==token else{return}
+            defer {self.cardsStatus.stringValue=self.scopeLabel.stringValue}
             self.persistenceInFlight=false;self.persistenceSession=nil;self.persistenceCacheID=nil
             self.persistenceDocumentGeneration=nil
             guard owner.activeSession==session,owner.currentCacheID==cache,owner.meetingDocumentGeneration==generation else {
@@ -798,6 +838,308 @@ private final class MinimalSpeakerReviewController:NSObject,NSWindowDelegate,NST
                 self.refresh(preferred:preferred);self.scopeLabel.stringValue=failure
             }
         }
+    }
+
+    // MARK: Card overview
+
+    private func buildCardsView()->NSView {
+        let container=NSView();container.translatesAutoresizingMaskIntoConstraints=false
+        cardsTitle.font=MeetingVisualStyle.titleFont(24);cardsTitle.textColor=MeetingVisualStyle.ink
+        cardsHint.font = .systemFont(ofSize:13);cardsHint.textColor=MeetingVisualStyle.muted;cardsHint.lineBreakMode = .byTruncatingTail
+        cardsHint.setContentCompressionResistancePriority(.defaultLow,for:.horizontal)
+        cardsCounts.orientation = .horizontal;cardsCounts.spacing=6
+        let words=NSStackView(views:[cardsTitle,cardsHint]);words.orientation = .vertical;words.alignment = .leading;words.spacing=6
+        words.setContentCompressionResistancePriority(.defaultLow,for:.horizontal)
+        let header=NSStackView(views:[words,NSView(),cardsCounts]);header.orientation = .horizontal;header.alignment = .bottom;header.spacing=12
+        cardsStack.orientation = .vertical;cardsStack.alignment = .leading;cardsStack.spacing=14
+        cardsStack.edgeInsets=NSEdgeInsets(top:4,left:0,bottom:24,right:0);cardsStack.translatesAutoresizingMaskIntoConstraints=false
+        let document=SpeakerCardsDocument();document.translatesAutoresizingMaskIntoConstraints=false;document.addSubview(cardsStack)
+        let scroll=NSScrollView();scroll.translatesAutoresizingMaskIntoConstraints=false;scroll.hasVerticalScroller=true;scroll.autohidesScrollers=true
+        scroll.drawsBackground=false;scroll.borderType = .noBorder;scroll.documentView=document;cardsScroll=scroll
+        cardsStatus.font = .systemFont(ofSize:12);cardsStatus.textColor=MeetingVisualStyle.muted;cardsStatus.maximumNumberOfLines=2
+        for button in [cardsUndo,cardsRefine] {button.bezelStyle = .inline;button.isBordered=false;button.contentTintColor=MeetingVisualStyle.ink;button.font = .systemFont(ofSize:13)}
+        cardsUndo.target=self;cardsUndo.action=#selector(undoCorrection)
+        cardsRefine.target=owner;cardsRefine.action=#selector(Delegate.toggleCoarseRefinement)
+        let backToText=SpeakerLinkButton(title:"回到原文",target:self,action:#selector(showOriginal))
+        let footer=NSStackView(views:[cardsUndo,cardsRefine,cardsStatus,NSView(),backToText]);footer.orientation = .horizontal;footer.spacing=16;footer.alignment = .centerY
+        cardsStatus.setContentCompressionResistancePriority(.defaultLow,for:.horizontal)
+        let rule=NSBox();rule.boxType = .separator
+        for view in [header,scroll,rule,footer] as [NSView] {view.translatesAutoresizingMaskIntoConstraints=false;container.addSubview(view)}
+        NSLayoutConstraint.activate([
+            header.leadingAnchor.constraint(equalTo:container.leadingAnchor,constant:32),header.trailingAnchor.constraint(equalTo:container.trailingAnchor,constant:-32),header.topAnchor.constraint(equalTo:container.topAnchor,constant:24),
+            scroll.leadingAnchor.constraint(equalTo:container.leadingAnchor,constant:32),scroll.trailingAnchor.constraint(equalTo:container.trailingAnchor,constant:-32),scroll.topAnchor.constraint(equalTo:header.bottomAnchor,constant:16),scroll.bottomAnchor.constraint(equalTo:rule.topAnchor),
+            rule.leadingAnchor.constraint(equalTo:container.leadingAnchor),rule.trailingAnchor.constraint(equalTo:container.trailingAnchor),rule.bottomAnchor.constraint(equalTo:footer.topAnchor,constant:-12),
+            footer.leadingAnchor.constraint(equalTo:container.leadingAnchor,constant:32),footer.trailingAnchor.constraint(equalTo:container.trailingAnchor,constant:-32),footer.bottomAnchor.constraint(equalTo:container.bottomAnchor,constant:-14),
+            cardsStack.leadingAnchor.constraint(equalTo:document.leadingAnchor),cardsStack.trailingAnchor.constraint(equalTo:document.trailingAnchor),cardsStack.topAnchor.constraint(equalTo:document.topAnchor),cardsStack.bottomAnchor.constraint(equalTo:document.bottomAnchor),
+            document.widthAnchor.constraint(equalTo:scroll.contentView.widthAnchor)])
+        return container
+    }
+
+    private enum CardKind {case suggested(String,SessionNameOrigin),unknown(String?),confirmed(String)}
+    private func cardKind(_ key:SessionSpeakerKey)->CardKind {
+        guard let owner else{return .unknown(nil)}
+        if let manual=owner.naming.name(speaker:key) {return .confirmed(manual)}
+        if let shown=owner.naming.displayName(speaker:key) {return shown.origin == .manual ? .confirmed(shown.value):.suggested(shown.value,shown.origin)}
+        return .unknown(owner.voiceprintRecommendation(for:key)?.name)
+    }
+    private func personID(_ key:SessionSpeakerKey)->String {[key.session,key.source,key.epoch,key.identity].joined(separator:"\u{001F}")}
+    /// The longest turn under 30 seconds, so a single listen is representative and playable.
+    private func representative(_ entries:[SpeakerReviewEntry])->SpeakerReviewEntry? {
+        entries.filter{$0.end-$0.start<=30}.max{($0.end-$0.start)<($1.end-$1.start)} ?? entries.first
+    }
+    private func entryText(_ entry:SpeakerReviewEntry)->String {
+        let parts=entry.turn.parts.isEmpty ? [(entry.id,entry.turn.item)]:entry.turn.parts
+        return parts.compactMap{$0.1["text"] as? String}.joined().trimmingCharacters(in:.whitespacesAndNewlines)
+    }
+    private func spokenSeconds(_ entries:[SpeakerReviewEntry])->Int {Int(entries.reduce(0){$0+max(0,$1.end-$1.start)}.rounded())}
+    private func durationText(_ seconds:Int)->String {seconds<60 ? "\(seconds) 秒":(seconds%60==0 ? "\(seconds/60) 分钟":"\(seconds/60) 分 \(seconds%60) 秒")}
+
+    private func rebuildCards() {
+        guard cardsScroll != nil else{return}
+        for view in cardsStack.arrangedSubviews {cardsStack.removeArrangedSubview(view);view.removeFromSuperview()}
+        for view in cardsCounts.arrangedSubviews {cardsCounts.removeArrangedSubview(view);view.removeFromSuperview()}
+        cardsUndo.isEnabled=owner?.naming.canUndo ?? false
+        cardsRefine.isEnabled=owner?.canRetrySpeakerRefinement==true || owner?.hasRunningCoarseRefinement==true
+        cardsRefine.title=owner?.hasRunningCoarseRefinement==true ? "停止整理":"重新整理"
+        guard let value=index,!value.people.isEmpty || !value.unassigned.isEmpty else {
+            cardsTitle.stringValue="还没有可确认的发言人";cardsHint.stringValue="开始录音或打开一场会议后，这里会按人列出发言。";return
+        }
+        cardsHint.stringValue="先听一段，再确认或填名字。确认后会记住声音，下次自动认出。";cardsHint.textColor=MeetingVisualStyle.muted;updateCardsActivity()
+        let kinds=value.people.map{($0,cardKind($0.key))}
+        func pending(_ kind:CardKind)->Bool {if case .confirmed=kind {return false};return true}
+        let open=kinds.filter{pending($0.1)},done=kinds.filter{!pending($0.1)}
+        cardsTitle.stringValue="本场 \(value.people.count) 位发言人"
+        if !open.isEmpty {cardsCounts.addArrangedSubview(SpeakerChip(text:"待你确认 \(open.count)",tone:.attention))}
+        if !done.isEmpty {cardsCounts.addArrangedSubview(SpeakerChip(text:"已确认 \(done.count)",tone:.quiet))}
+        for (person,kind) in open {add(card:actionCard(person,kind:kind,people:value.people))}
+        if !done.isEmpty {
+            let list=SpeakerCardBox(compact:true)
+            for (offset,(person,kind)) in done.enumerated() {
+                if case .confirmed(let name)=kind {list.stack.addArrangedSubview(confirmedRow(person,name:name,divider:offset>0))}
+            }
+            add(card:list)
+        }
+        if !value.unassigned.isEmpty || !value.simultaneous.isEmpty {add(card:looseSection(value))}
+    }
+    private func add(card:NSView) {
+        cardsStack.addArrangedSubview(card)
+        card.widthAnchor.constraint(equalTo:cardsStack.widthAnchor).isActive=true
+    }
+
+    private func avatar(_ key:SessionSpeakerKey,name:String?,diameter:CGFloat)->NSView {
+        let initial=name.map{MeetingVisualStyle.speakerInitial($0)} ?? MeetingVisualStyle.speakerInitial(owner?.naming.displayLabel(speaker:key) ?? "?")
+        let image=MeetingVisualStyle.speakerAvatar(initial,color:MeetingVisualStyle.speakerColor(name),diameter:diameter,dashed:name==nil)
+        let view=NSImageView(image:image);view.translatesAutoresizingMaskIntoConstraints=false
+        NSLayoutConstraint.activate([view.widthAnchor.constraint(equalToConstant:diameter),view.heightAnchor.constraint(equalToConstant:diameter)])
+        return view
+    }
+    private func playButton(_ id:String,size:CGFloat,action:@escaping ()->Void)->NSView {
+        let button=SpeakerPlayButton(diameter:size,playing:cardPlaying==id,handler:action)
+        button.isEnabled=owner?.currentCacheID != nil && owner?.voiceprintManagementOwner.recordingBusy != true
+        button.toolTip=button.isEnabled ? "试听这一段（仅本机播放）":"录音中或尚未保存时无法试听"
+        return button
+    }
+    private func quote(_ entry:SpeakerReviewEntry,id:String,note:String?)->NSView {
+        let box=SpeakerCardBox(fill:true)
+        let text=NSTextField(wrappingLabelWithString:"“"+entryText(entry)+"”");text.font = .systemFont(ofSize:15);text.textColor=MeetingVisualStyle.ink;text.maximumNumberOfLines=3
+        text.setContentCompressionResistancePriority(.defaultLow,for:.horizontal)
+        let at=owner?.transcriptTimeHeading(entry.start) ?? TranscriptTimeline.timestamp(entry.start)
+        let meta=NSTextField(labelWithString:[at,durationText(max(1,Int((entry.end-entry.start).rounded()))),note].compactMap{$0}.joined(separator:" · "))
+        meta.font = .monospacedDigitSystemFont(ofSize:12,weight:.regular);meta.textColor=MeetingVisualStyle.muted
+        let words=NSStackView(views:[text,meta]);words.orientation = .vertical;words.alignment = .leading;words.spacing=2
+        let row=NSStackView(views:[playButton(id,size:34){[weak self] in self?.play(entry,id:id)},words]);row.orientation = .horizontal;row.alignment = .top;row.spacing=12
+        box.stack.addArrangedSubview(row)
+        return box
+    }
+
+    private func actionCard(_ person:SpeakerReviewPerson,kind:CardKind,people:[SpeakerReviewPerson])->NSView {
+        let card=SpeakerCardBox();let id=personID(person.key)
+        let shownName:String?={if case .suggested(let name,_)=kind {return name};return nil}()
+        let label=owner?.naming.displayLabel(speaker:person.key) ?? "发言人"
+        let title=NSTextField(labelWithString:shownName ?? label);title.font = .systemFont(ofSize:16,weight:.semibold);title.textColor=MeetingVisualStyle.ink
+        let badge:SpeakerChip={
+            if case .suggested(_,let origin)=kind {return SpeakerChip(text:origin == .semantic ? "按自我介绍认出":"声音认出",tone:.quiet)}
+            return SpeakerChip(text:"还不知道是谁",tone:.attention)
+        }()
+        let meta=NSTextField(labelWithString:"\(person.entries.count) 轮 · 共 \(durationText(spokenSeconds(person.entries)))");meta.font = .monospacedDigitSystemFont(ofSize:12,weight:.regular);meta.textColor=MeetingVisualStyle.muted
+        let nameLine=NSStackView(views:[title,badge]);nameLine.orientation = .horizontal;nameLine.spacing=8;nameLine.alignment = .centerY
+        let words=NSStackView(views:[nameLine,meta]);words.orientation = .vertical;words.alignment = .leading;words.spacing=2
+        let more=SpeakerLinkButton(title:"在原文里看这 \(person.entries.count) 轮",target:self,action:#selector(openDetailFromCard(_:)));more.identifier=NSUserInterfaceItemIdentifier(id)
+        let head=NSStackView(views:[avatar(person.key,name:shownName,diameter:36),words,NSView(),more]);head.orientation = .horizontal;head.spacing=12;head.alignment = .centerY
+        card.stack.addArrangedSubview(head)
+        if let entry=representative(person.entries) {card.stack.addArrangedSubview(quote(entry,id:id,note:person.entries.count>1 ? "本场说得最长的一段":nil))}
+        if case .suggested(let name,_)=kind,!cardNamingOpen.contains(id) {
+            let yes=SpeakerPillButton(title:"是\(name)",primary:true){[weak self] in self?.confirm(person,name:name)}
+            let no=SpeakerPillButton(title:"不是，是…",primary:false){[weak self] in self?.rejectSuggestion(person)}
+            let row=NSStackView(views:[yes,no]);row.orientation = .horizontal;row.spacing=10
+            card.stack.addArrangedSubview(row)
+        } else {
+            card.stack.addArrangedSubview(namingRow(person,candidate:{if case .unknown(let candidate)=kind {return candidate};return nil}(),people:people))
+        }
+        return card
+    }
+    private func namingRow(_ person:SpeakerReviewPerson,candidate:String?,people:[SpeakerReviewPerson])->NSView {
+        let id=personID(person.key)
+        let prompt=NSTextField(labelWithString:"这是谁？");prompt.font = .systemFont(ofSize:13);prompt.textColor=MeetingVisualStyle.muted
+        let field=SpeakerNameField(string:cardDrafts[id] ?? "");field.placeholderString="输入姓名";field.setAccessibilityLabel("这位发言人的姓名")
+        field.onChange={[weak self] text in self?.cardDrafts[id]=text}
+        let save=SpeakerPillButton(title:"确认",primary:true){[weak self,weak field] in self?.confirm(person,name:field?.stringValue ?? "")}
+        field.onSubmit={[weak self,weak field] in self?.confirm(person,name:field?.stringValue ?? "")}
+        let entry=NSStackView(views:[prompt,field,save]);entry.orientation = .horizontal;entry.spacing=10;entry.alignment = .centerY
+        field.setContentHuggingPriority(.defaultLow,for:.horizontal)
+        var choices:[(String,String)]=[]
+        if let candidate {choices.append((candidate+" · 声音像",candidate))}
+        for other in people where other.key != person.key {
+            if let name=owner?.naming.name(speaker:other.key),!choices.contains(where:{$0.1==name}) {choices.append((name,name))}
+        }
+        let suggestions=NSStackView();suggestions.orientation = .horizontal;suggestions.spacing=6;suggestions.alignment = .centerY
+        let hint=NSTextField(labelWithString:choices.isEmpty ? "":"可能是");hint.font = .systemFont(ofSize:12);hint.textColor=MeetingVisualStyle.muted
+        if !choices.isEmpty {suggestions.addArrangedSubview(hint)}
+        for (title,name) in choices.prefix(3) {suggestions.addArrangedSubview(SpeakerPillButton(title:title,primary:false,small:true){[weak self] in self?.confirm(person,name:name)})}
+        let others=people.filter{$0.key != person.key}
+        if !others.isEmpty {
+            let merge=SpeakerPillButton(title:"合并到别人…",primary:false,small:true){}
+            merge.handler={[weak self,weak merge] in guard let self,let merge else{return};self.showMergeMenu(person,others:others,from:merge)}
+            suggestions.addArrangedSubview(merge)
+        }
+        let note=NSTextField(labelWithString:"确认后会记住这个声音，以后自动认出。");note.font = .systemFont(ofSize:12);note.textColor=MeetingVisualStyle.muted
+        let column=NSStackView(views:[entry,suggestions,note]);column.orientation = .vertical;column.alignment = .leading;column.spacing=8
+        entry.widthAnchor.constraint(equalTo:column.widthAnchor).isActive=true
+        if suggestions.arrangedSubviews.isEmpty {suggestions.isHidden=true}
+        return column
+    }
+    private func confirmedRow(_ person:SpeakerReviewPerson,name:String,divider:Bool)->NSView {
+        let id=personID(person.key)
+        let title=NSTextField(labelWithString:name);title.font = .systemFont(ofSize:14,weight:.semibold);title.textColor=MeetingVisualStyle.ink
+        let meta=NSTextField(labelWithString:"\(person.entries.count) 轮 · 已确认");meta.font = .monospacedDigitSystemFont(ofSize:12,weight:.regular);meta.textColor=MeetingVisualStyle.muted
+        let rename=SpeakerLinkButton(title:"改名",target:self,action:#selector(openRenameFromRow(_:)));rename.identifier=NSUserInterfaceItemIdentifier(id)
+        var views:[NSView]=[avatar(person.key,name:name,diameter:28),title,meta,NSView()]
+        if let entry=representative(person.entries) {views.append(playButton(id,size:28){[weak self] in self?.play(entry,id:id)})}
+        views.append(rename)
+        let row=NSStackView(views:views);row.orientation = .horizontal;row.spacing=12;row.alignment = .centerY
+        row.edgeInsets=NSEdgeInsets(top:divider ? 10:0,left:0,bottom:0,right:0)
+        if cardNamingOpen.contains(id),let value=index {
+            let column=NSStackView(views:[row,namingRow(person,candidate:nil,people:value.people)]);column.orientation = .vertical;column.alignment = .leading;column.spacing=10
+            row.widthAnchor.constraint(equalTo:column.widthAnchor).isActive=true
+            return column
+        }
+        return row
+    }
+    private func looseSection(_ value:SpeakerReviewIndex)->NSView {
+        let column=NSStackView();column.orientation = .vertical;column.alignment = .leading;column.spacing=8
+        let title=NSTextField(labelWithString:"零散发言");title.font = .systemFont(ofSize:13,weight:.semibold);title.textColor=MeetingVisualStyle.ink
+        let note=NSTextField(labelWithString:"\(value.unassigned.count) 轮太短或有歧义，认不出是谁；不处理也不影响纪要");note.font = .systemFont(ofSize:12);note.textColor=MeetingVisualStyle.muted
+        note.lineBreakMode = .byTruncatingTail;note.setContentCompressionResistancePriority(.defaultLow,for:.horizontal)
+        let head=NSStackView(views:[title,note]);head.orientation = .horizontal;head.spacing=8;head.alignment = .firstBaseline
+        column.addArrangedSubview(head)
+        let shown=value.unassigned.sorted{($0.end-$0.start)>($1.end-$1.start)}.prefix(3)
+        for entry in shown {
+            let row=SpeakerCardBox(fill:true,tight:true)
+            let at=NSTextField(labelWithString:TranscriptTimeline.timestamp(entry.start));at.font = .monospacedDigitSystemFont(ofSize:12,weight:.regular);at.textColor=MeetingVisualStyle.muted
+            let text=NSTextField(labelWithString:"“"+entryText(entry)+"”");text.font = .systemFont(ofSize:14);text.textColor=MeetingVisualStyle.ink;text.lineBreakMode = .byTruncatingTail
+            text.setContentCompressionResistancePriority(.defaultLow,for:.horizontal)
+            let assign=SpeakerPillButton(title:"归给…",primary:false,small:true){}
+            assign.handler={[weak self,weak assign] in guard let self,let assign else{return};self.showAssignMenu(entry,people:value.people,from:assign)}
+            assign.isEnabled = !value.people.isEmpty
+            let line=NSStackView(views:[playButton("loose|"+entry.id,size:26){[weak self] in self?.play(entry,id:"loose|"+entry.id)},at,text,NSView(),assign]);line.orientation = .horizontal;line.spacing=10;line.alignment = .centerY
+            row.stack.addArrangedSubview(line)
+            column.addArrangedSubview(row);row.widthAnchor.constraint(equalTo:column.widthAnchor).isActive=true
+        }
+        let rest=value.unassigned.count-shown.count
+        var extra:[String]=[]
+        if rest>0 {extra.append("再看 \(rest) 轮")}
+        if !value.simultaneous.isEmpty {extra.append("多人同时说话 \(value.simultaneous.count) 段")}
+        if !extra.isEmpty {column.addArrangedSubview(SpeakerLinkButton(title:extra.joined(separator:" · "),target:self,action:#selector(openLooseDetail)))}
+        return column
+    }
+
+    // MARK: Card actions (each reuses the detailed editor's path)
+
+    /// Puts the editor on the same state a manual click would: the person (or the
+    /// loose list) chosen, and the given turn's text selected.
+    private func focus(_ choice:SpeakerReviewChoice,entry:SpeakerReviewEntry?) {
+        guard let index=choices.firstIndex(where:{choiceIdentity($0)==choiceIdentity(choice)}) else{return}
+        if filter.indexOfSelectedItem != index {filter.selectItem(at:index)}
+        stopPreview();nameDraftChanged=false;displayCurrentChoice();updateControls()
+        guard let entry else{return}
+        let ids=Set(entry.partIDs)
+        let ranges=mappedParts.filter{ids.contains($0.id)}.map(\.range)
+        guard let first=ranges.map(\.location).min(),let last=ranges.map(NSMaxRange).max() else{return}
+        textView.setSelectedRange(NSRange(location:first,length:last-first));updateSelection()
+    }
+    private func play(_ entry:SpeakerReviewEntry,id:String) {
+        if cardPlaying==id {stopPreview();cardPlaying=nil;updateControls();rebuildCards();return}
+        let choice:SpeakerReviewChoice=entry.personKey.flatMap{key in index?.people.first{$0.keys.contains(key) || $0.key==key}.map{.person($0.key)}} ?? .unassigned
+        focus(choice,entry:entry)
+        guard !selectedPartIDs.isEmpty else {cardsStatus.stringValue="这一段的原音无法单独试听。";return}
+        cardPlaying=id;cardsStatus.stringValue="";listenSelection();rebuildCards()
+    }
+    private func confirm(_ person:SpeakerReviewPerson,name raw:String) {
+        let name=raw.trimmingCharacters(in:.whitespacesAndNewlines)
+        guard !name.isEmpty else {cardsStatus.stringValue="先填一个名字。";return}
+        focus(.person(person.key),entry:nil)
+        nameField.stringValue=name;nameDraftChanged=true;updateControls()
+        cardDrafts.removeValue(forKey:personID(person.key));cardNamingOpen.remove(personID(person.key))
+        renameSelectedPerson()
+        if !persistenceInFlight && cardsStatus.stringValue.isEmpty {cardsStatus.stringValue=scopeLabel.stringValue}
+    }
+    private func rejectSuggestion(_ person:SpeakerReviewPerson) {
+        focus(.person(person.key),entry:nil)
+        cardNamingOpen.insert(personID(person.key))
+        rejectVoice()
+        rebuildCards()
+    }
+    private func showMergeMenu(_ person:SpeakerReviewPerson,others:[SpeakerReviewPerson],from view:NSView) {
+        let menu=NSMenu()
+        for other in others {
+            let title=(owner?.naming.displayName(speaker:other.key)?.value ?? owner?.naming.displayLabel(speaker:other.key) ?? "发言人")+" · \(other.entries.count) 轮"
+            let item=NSMenuItem(title:title,action:#selector(mergeFromMenu(_:)),keyEquivalent:"");item.target=self
+            item.representedObject=[personID(person.key),personID(other.key)];menu.addItem(item)
+        }
+        menu.popUp(positioning:nil,at:NSPoint(x:0,y:view.bounds.height+4),in:view)
+    }
+    @objc private func mergeFromMenu(_ sender:NSMenuItem) {
+        guard let ids=sender.representedObject as? [String],ids.count==2,let value=index,
+              let source=value.people.first(where:{personID($0.key)==ids[0]}),let target=value.people.first(where:{personID($0.key)==ids[1]}) else{return}
+        focus(.person(source.key),entry:nil);mergePersonGroup(to:target.key)
+    }
+    private func showAssignMenu(_ entry:SpeakerReviewEntry,people:[SpeakerReviewPerson],from view:NSView) {
+        let menu=NSMenu()
+        for person in people {
+            guard let name=owner?.naming.displayName(speaker:person.key)?.value else{continue}
+            let item=NSMenuItem(title:name,action:#selector(assignFromMenu(_:)),keyEquivalent:"");item.target=self
+            item.representedObject=[entry.id,name];menu.addItem(item)
+        }
+        if menu.items.isEmpty {
+            let item=NSMenuItem(title:"先给上面的人确认名字",action:nil,keyEquivalent:"");item.isEnabled=false;menu.addItem(item)
+        }
+        menu.popUp(positioning:nil,at:NSPoint(x:0,y:view.bounds.height+4),in:view)
+    }
+    @objc private func assignFromMenu(_ sender:NSMenuItem) {
+        guard let values=sender.representedObject as? [String],values.count==2,let entry=index?.unassigned.first(where:{$0.id==values[0]}) else{return}
+        focus(.unassigned,entry:entry)
+        guard !selectedPartIDs.isEmpty else {cardsStatus.stringValue="这一轮含有已归属的部分，请在原文里逐段更正。";return}
+        nameField.stringValue=values[1];nameDraftChanged=true;updateControls()
+        renameSelectedPerson()
+    }
+    @objc private func openRenameFromRow(_ sender:NSButton) {
+        guard let id=sender.identifier?.rawValue else{return}
+        if cardNamingOpen.contains(id) {cardNamingOpen.remove(id)} else {cardNamingOpen.insert(id)}
+        rebuildCards()
+    }
+    @objc private func openDetailFromCard(_ sender:NSButton) {
+        guard let id=sender.identifier?.rawValue,let person=index?.people.first(where:{personID($0.key)==id}) else{return}
+        focus(.person(person.key),entry:nil);showDetail()
+    }
+    @objc private func openLooseDetail() {focus(.unassigned,entry:nil);showDetail()}
+    private func showDetail() {
+        stopPreview();cardPlaying=nil;showingDetail=true
+        detailColumn?.isHidden=false;cardsScroll?.superview?.isHidden=true
+        window?.contentView?.layoutSubtreeIfNeeded();updateTextGeometry()
+    }
+    @objc private func showCards() {
+        stopPreview();cardPlaying=nil;showingDetail=false
+        detailColumn?.isHidden=true;cardsScroll?.superview?.isHidden=false;rebuildCards()
     }
 
     func windowWillClose(_ notification:Notification) {
@@ -964,6 +1306,16 @@ private final class MinimalSpeakerReviewController:NSObject,NSWindowDelegate,NST
         guard selectedChoiceKey==owner.naming.canonical(destination.key) else{throw Failure(code:"speaker_review_preferred_person_switch_skipped")}
         refresh(preferred:source.key)
         guard selectedChoiceKey==owner.naming.canonical(source.key) else{throw Failure(code:"speaker_review_preferred_person_restore_skipped")}
+        // The card overview is the default view; the detailed editor sits behind it.
+        window.setFrame(NSRect(x:20,y:20,width:760,height:820),display:true)
+        rebuildCards();window.contentView?.layoutSubtreeIfNeeded();window.displayIfNeeded()
+        guard !showingDetail,detailColumn?.isHidden==true,cardsStack.arrangedSubviews.count>=2,
+              cardsTitle.stringValue=="本场 \(review.people.count) 位发言人" else {throw Failure(code:"speaker_cards_default_overview_missing")}
+        try saveWindow(window,to:directory.appendingPathComponent("speaker-cards.png"))
+        window.setFrame(NSRect(x:20,y:20,width:640,height:620),display:true);window.contentView?.layoutSubtreeIfNeeded();window.displayIfNeeded()
+        try saveWindow(window,to:directory.appendingPathComponent("speaker-cards-narrow.png"))
+        focus(.person(source.key),entry:nil);showDetail()
+        guard showingDetail,detailColumn?.isHidden==false else {throw Failure(code:"speaker_cards_detail_not_reachable")}
         window.setFrame(NSRect(x:20,y:20,width:640,height:600),display:true)
         window.contentView?.layoutSubtreeIfNeeded();window.displayIfNeeded()
         updateTextGeometry()
@@ -976,9 +1328,13 @@ private final class MinimalSpeakerReviewController:NSObject,NSWindowDelegate,NST
         guard visibleTranscriptText() else {throw Failure(code:"speaker_review_fixture_editor_body_not_visible")}
         try saveWindow(window,to:directory.appendingPathComponent("speaker-review-editor.png"))
 
-        nameField.stringValue="复核人物"
-        renameSelectedPerson()
+        // Confirm through the card path; it must land exactly like the editor's rename.
+        confirm(source,name:"复核人物")
         guard owner.naming.name(speaker:source.key)=="复核人物" else {throw Failure(code:"speaker_review_group_rename_failed")}
+        showCards();window.setFrame(NSRect(x:20,y:20,width:760,height:820),display:true);window.contentView?.layoutSubtreeIfNeeded();window.displayIfNeeded()
+        guard cardsTitle.stringValue.hasPrefix("本场"),cardsCounts.arrangedSubviews.count==2 else {throw Failure(code:"speaker_cards_confirmed_row_missing")}
+        try saveWindow(window,to:directory.appendingPathComponent("speaker-cards-confirmed.png"))
+        showDetail();window.setFrame(NSRect(x:20,y:20,width:640,height:600),display:true);window.contentView?.layoutSubtreeIfNeeded()
         let deadline=Date().addingTimeInterval(1)
         while (!owner.output.string.contains("复核人物") || owner.fullTranscriptRefreshPending || owner.fullRefreshBuildInFlight || owner.dirtyTranscriptQueueIndex<owner.dirtyTranscriptQueue.count || persistenceInFlight) && Date()<deadline {
             try await Task.sleep(nanoseconds:10_000_000)
@@ -1166,7 +1522,7 @@ private final class MinimalSpeakerReviewController:NSObject,NSWindowDelegate,NST
         let current=owner.segments
         let currentTexts=owner.timeline.orderedIDs.compactMap{current[$0]?["text"] as? String}.joined()
         guard Set(current.keys)==originalIDs,currentTexts==originalTexts else {throw Failure(code:"speaker_review_changed_original_transcript")}
-        let pngNames=["speaker-review-default.png","speaker-review-editor.png"]
+        let pngNames=["speaker-cards.png","speaker-cards-narrow.png","speaker-cards-confirmed.png","speaker-review-default.png","speaker-review-editor.png"]
         return ["type":"minimal_speaker_ui_checks","passed":25,"people":review.people.count,
                 "original_records_preserved":true,"default_editor_hidden":true,"selection_reassign":true,
                 "default_name_visible":true,"automatic_projection_without_audio":true,"repeat_rename_and_undo":true,"saved_reopen_matches_export":true,"history_switch_scope_preserved":true,
@@ -1351,4 +1707,123 @@ extension Delegate {
     let result=try await MinimalSpeakerReviewController(owner:owner).runFixtureChecks(owner:owner,directory:directory,checkBridge:true)
     owner.window.orderOut(nil)
     return result
+}
+
+// MARK: Card views
+
+private final class SpeakerCardsDocument:NSView {override var isFlipped:Bool {true}}
+
+/// White rounded card (or a quiet filled block inside one).
+private final class SpeakerCardBox:NSView {
+    let stack=NSStackView()
+    private let fill:Bool
+    init(compact:Bool=false,fill:Bool=false,tight:Bool=false) {
+        self.fill=fill
+        super.init(frame:.zero);wantsLayer=true;translatesAutoresizingMaskIntoConstraints=false
+        stack.orientation = .vertical;stack.alignment = .leading;stack.spacing=compact ? 10:12;stack.translatesAutoresizingMaskIntoConstraints=false;addSubview(stack)
+        let x:CGFloat=fill ? (tight ? 12:14):(compact ? 18:20),y:CGFloat=fill ? (tight ? 8:12):(compact ? 12:18)
+        NSLayoutConstraint.activate([stack.leadingAnchor.constraint(equalTo:leadingAnchor,constant:x),stack.trailingAnchor.constraint(equalTo:trailingAnchor,constant:-x),
+                                     stack.topAnchor.constraint(equalTo:topAnchor,constant:y),stack.bottomAnchor.constraint(equalTo:bottomAnchor,constant:-y)])
+    }
+    required init?(coder:NSCoder) {fatalError("init(coder:) has not been implemented")}
+    override var wantsUpdateLayer:Bool {true}
+    override func updateLayer() {
+        layer?.cornerRadius=fill ? 12:16
+        layer?.backgroundColor=(fill ? MeetingVisualStyle.quietFill:NSColor.textBackgroundColor).cgColor
+        layer?.borderWidth=fill ? 0:1;layer?.borderColor=MeetingVisualStyle.border.cgColor
+    }
+    private var spanned=Set<ObjectIdentifier>()
+    override func layout() {
+        // Rows inside a card span its width so trailing controls stay aligned; once per row.
+        for view in stack.arrangedSubviews where spanned.insert(ObjectIdentifier(view)).inserted {
+            view.widthAnchor.constraint(equalTo:stack.widthAnchor).isActive=true
+        }
+        super.layout()
+    }
+}
+
+private final class SpeakerChip:NSView {
+    enum Tone {case attention,quiet}
+    private let tone:Tone
+    init(text:String,tone:Tone) {
+        self.tone=tone;super.init(frame:.zero);wantsLayer=true;translatesAutoresizingMaskIntoConstraints=false
+        let label=NSTextField(labelWithString:text);label.font = .systemFont(ofSize:11,weight:tone == .attention ? .semibold:.regular)
+        label.textColor=tone == .attention ? MeetingVisualStyle.accentText:MeetingVisualStyle.muted;label.translatesAutoresizingMaskIntoConstraints=false;addSubview(label)
+        NSLayoutConstraint.activate([label.leadingAnchor.constraint(equalTo:leadingAnchor,constant:9),label.trailingAnchor.constraint(equalTo:trailingAnchor,constant:-9),
+                                     label.centerYAnchor.constraint(equalTo:centerYAnchor),heightAnchor.constraint(equalToConstant:20)])
+        setAccessibilityElement(true);setAccessibilityRole(.staticText);setAccessibilityLabel(text)
+    }
+    required init?(coder:NSCoder) {fatalError("init(coder:) has not been implemented")}
+    override var wantsUpdateLayer:Bool {true}
+    override func updateLayer() {layer?.cornerRadius=10;layer?.backgroundColor=(tone == .attention ? MeetingVisualStyle.accentTint:MeetingVisualStyle.quietFill).cgColor}
+}
+
+/// Rounded action: charcoal when primary, outlined otherwise.
+private final class SpeakerPillButton:NSButton {
+    var handler:()->Void
+    private let primary:Bool,small:Bool
+    init(title:String,primary:Bool,small:Bool=false,handler:@escaping ()->Void) {
+        self.handler=handler;self.primary=primary;self.small=small
+        super.init(frame:.zero);self.title=title;isBordered=false;bezelStyle = .regularSquare;wantsLayer=true;target=self;action=#selector(fire)
+        setAccessibilityLabel(title);translatesAutoresizingMaskIntoConstraints=false
+        heightAnchor.constraint(equalToConstant:small ? 26:34).isActive=true;refresh()
+    }
+    required init?(coder:NSCoder) {fatalError("init(coder:) has not been implemented")}
+    @objc private func fire() {handler()}
+    override var isEnabled:Bool {didSet {refresh()}}
+    private func refresh() {
+        let color:NSColor=primary ? .white:MeetingVisualStyle.ink
+        attributedTitle=NSAttributedString(string:title,attributes:[.font:NSFont.systemFont(ofSize:small ? 12:14,weight:primary ? .semibold:.regular),.foregroundColor:isEnabled ? color:MeetingVisualStyle.faint])
+        needsDisplay=true
+    }
+    override var intrinsicContentSize:NSSize {let size=attributedTitle.size();return NSSize(width:ceil(size.width)+(small ? 20:32),height:small ? 26:34)}
+    override var wantsUpdateLayer:Bool {true}
+    override func updateLayer() {
+        layer?.cornerRadius=bounds.height/2
+        layer?.backgroundColor=(primary ? MeetingVisualStyle.charcoal:NSColor.textBackgroundColor).cgColor
+        layer?.borderWidth=primary ? 0:1;layer?.borderColor=MeetingVisualStyle.border.cgColor
+        layer?.opacity=isEnabled ? 1:0.55
+    }
+}
+
+private final class SpeakerPlayButton:NSButton {
+    private let handler:()->Void
+    init(diameter:CGFloat,playing:Bool,handler:@escaping ()->Void) {
+        self.handler=handler;super.init(frame:.zero)
+        isBordered=false;bezelStyle = .regularSquare;imagePosition = .imageOnly;title="";wantsLayer=true;target=self;action=#selector(fire)
+        image=NSImage(systemSymbolName:playing ? "stop.fill":"play.fill",accessibilityDescription:playing ? "停止试听":"试听")?
+            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize:diameter*0.36,weight:.bold))
+        contentTintColor = .white;setAccessibilityLabel(playing ? "停止试听":"试听这一段")
+        translatesAutoresizingMaskIntoConstraints=false
+        NSLayoutConstraint.activate([widthAnchor.constraint(equalToConstant:diameter),heightAnchor.constraint(equalToConstant:diameter)])
+    }
+    required init?(coder:NSCoder) {fatalError("init(coder:) has not been implemented")}
+    @objc private func fire() {handler()}
+    override var wantsUpdateLayer:Bool {true}
+    override func updateLayer() {layer?.cornerRadius=bounds.height/2;layer?.backgroundColor=MeetingVisualStyle.charcoal.cgColor;layer?.opacity=isEnabled ? 1:0.4}
+}
+
+private final class SpeakerLinkButton:NSButton {
+    init(title:String,target:AnyObject?,action:Selector?) {
+        super.init(frame:.zero);self.title=title;isBordered=false;bezelStyle = .inline;self.target=target;self.action=action
+        attributedTitle=NSAttributedString(string:title,attributes:[.font:NSFont.systemFont(ofSize:12),.foregroundColor:MeetingVisualStyle.accentText])
+        setAccessibilityLabel(title)
+    }
+    required init?(coder:NSCoder) {fatalError("init(coder:) has not been implemented")}
+}
+
+private final class SpeakerNameField:NSTextField,NSTextFieldDelegate {
+    var onChange:((String)->Void)?
+    var onSubmit:(()->Void)?
+    init(string:String) {
+        super.init(frame:.zero);stringValue=string;font = .systemFont(ofSize:14);bezelStyle = .roundedBezel;delegate=self
+        translatesAutoresizingMaskIntoConstraints=false;heightAnchor.constraint(equalToConstant:30).isActive=true
+    }
+    required init?(coder:NSCoder) {fatalError("init(coder:) has not been implemented")}
+    func controlTextDidChange(_ notification:Notification) {onChange?(stringValue)}
+    func control(_ control:NSControl,textView:NSTextView,doCommandBy commandSelector:Selector)->Bool {
+        // Return submits, but never while an input method is still composing.
+        guard commandSelector == #selector(NSResponder.insertNewline(_:)),!textView.hasMarkedText() else{return false}
+        onSubmit?();return true
+    }
 }

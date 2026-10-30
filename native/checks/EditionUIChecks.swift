@@ -22,14 +22,53 @@ import AppKit
         owner.updateUI()
         try check(owner.diagnostic.stringValue=="去设置里填写百炼密钥" && !owner.diagnostic.isHidden && owner.empty.stringValue=="去设置里填写百炼密钥" && owner.sheet.sheetParent==nil,"first_launch_has_one_visible_next_step_after_repaint")
     }
+    try FileManager.default.createDirectory(at:directory,withIntermediateDirectories:true)
+    func settingsSnapshot(_ name:String)throws {
+        owner.sheet.appearance=NSAppearance(named:.aqua);owner.sheet.layoutIfNeeded()
+        try check(owner.savedLabel.isHidden != owner.keyLabel.isHidden,"settings_labels_mutually_exclusive_"+name)
+        try check(owner.keyLabel.isHidden==owner.key.isHidden,"settings_key_caption_and_field_share_visibility_"+name)
+        let target=owner.sheet.contentView!
+        let enteringKey = !owner.key.isHidden
+        try check(target.bounds.height==(enteringKey ? 360:300),"settings_height_tracks_visible_input_"+name)
+        guard let privacy=target.subviews.first(where:{$0.identifier==NSUserInterfaceItemIdentifier("settings-privacy")}) else {throw Failure(code:"settings_privacy_missing")}
+        let credential=enteringKey ? owner.key!:owner.savedLabel!
+        let gap=credential.frame.minY-privacy.frame.maxY
+        try check(gap>=8 && gap<=14,"settings_privacy_follows_visible_credential_without_hole_"+name)
+        let visible=owner.settingsLayoutFrames.map{$0.0}.filter{!$0.isHidden}
+        // Keep the exact visible ordering and native frames in the QA receipt,
+        // even if a following overlap assertion fails before the PNG is written.
+        let layout=visible.enumerated().map {index,view -> [String:Any] in
+            let text:String
+            if view is NSSecureTextField {text="[secure input]"}
+            else if let field=view as? NSTextField {text=field.stringValue}
+            else if let button=view as? NSButton {text=button.title}
+            else {text=""}
+            return ["index":index,"type":String(describing:type(of:view)),"id":view.identifier?.rawValue ?? "","text":text,
+                    "frame":[Double(view.frame.minX),Double(view.frame.minY),Double(view.frame.width),Double(view.frame.height)]]
+        }
+        try JSONSerialization.data(withJSONObject:layout,options:[.prettyPrinted,.sortedKeys]).write(to:directory.appendingPathComponent(name+"-layout.json"))
+        let moreButtons=visible.filter{["settings-people","settings-balance"].contains($0.identifier?.rawValue ?? "")}
+        try check(owner.setupMessage.frame.height>=ceil(owner.setupMessage.font!.ascender-owner.setupMessage.font!.descender+owner.setupMessage.font!.leading),"settings_message_has_full_line_height_"+name)
+        for button in moreButtons {try check(owner.setupMessage.frame.minY-button.frame.maxY>=2,"settings_message_clear_of_more_settings_"+name+"_"+button.identifier!.rawValue)}
+        for (index,view) in visible.enumerated() {
+            try check(target.bounds.contains(view.frame),"settings_content_inside_sheet_"+name+"_\(index)")
+            for other in visible.dropFirst(index+1) {try check(!view.frame.intersects(other.frame),"settings_no_visible_overlap_"+name+"_\(index)_\(visible.firstIndex(where:{$0 === other})!)")}
+        }
+        let bitmap=target.bitmapImageRepForCachingDisplay(in:target.bounds)!
+        target.effectiveAppearance.performAsCurrentDrawingAppearance{target.cacheDisplay(in:target.bounds,to:bitmap)}
+        try bitmap.representation(using:.png,properties:[:])!.write(to:directory.appendingPathComponent(name+".png"))
+    }
     owner.showSettings()
+    try settingsSnapshot("settings-no-key")
     try check(!owner.key.isHidden && owner.editing && owner.save.title=="保存密钥","settings_accepts_key_even_for_trial_build")
     owner.key.stringValue="fake_new_key";owner.saveKey()
     try check(owner.vault.load()=="fake_new_key" && !owner.change.isHidden && owner.key.stringValue.isEmpty,"settings_saves_and_clears_field")
-    owner.changeKey();owner.key.stringValue="fake_replacement_key";owner.saveKey()
+    try settingsSnapshot("settings-saved")
+    owner.changeKey();try settingsSnapshot("settings-replacing");owner.key.stringValue="fake_replacement_key";owner.saveKey()
     try check(owner.vault.load()=="fake_replacement_key","settings_replaces_key")
     owner.changeKey();owner.vault.failNext=true;owner.key.stringValue="fake_failed_key";owner.saveKey()
     try check(owner.vault.load()=="fake_replacement_key","failed_replacement_preserves_previous")
+    owner.changeKey();owner.key.stringValue="fake_offline_preview";try settingsSnapshot("settings-mock")
     owner.dismissSettings()
     owner.currentCacheID=UUID().uuidString;owner.activeSession=UUID().uuidString
     owner.phase.phase = .stopped;owner.cachedTranscriptionComplete=true

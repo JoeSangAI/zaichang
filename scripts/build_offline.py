@@ -1,8 +1,10 @@
 """Build an isolated development QA app from project-owned sources; never launch or use a network API."""
 from pathlib import Path
-import argparse,os,shutil,subprocess,plistlib,json,hashlib,atexit
+import argparse,os,shutil,subprocess,plistlib,json,hashlib,atexit,sys
 from build_guard import acquire_desktop_idle_lease
 root=Path(__file__).resolve().parents[1]
+sys.path.insert(0,str(root))
+import app_version
 native=root/'native'
 work=root/'.runtime/build'
 parser=argparse.ArgumentParser()
@@ -125,7 +127,9 @@ helper_info={
  'CFBundleName':'会议采集离线QA',
  'CFBundleDisplayName':'会议采集离线QA',
  'CFBundlePackageType':'APPL',
- 'CFBundleShortVersionString':'0.1',
+ 'CFBundleDevelopmentRegion':'zh_CN',
+ 'CFBundleLocalizations':['zh-Hans'],
+ 'CFBundleShortVersionString':app_version.VERSION,
  'CFBundleVersion':'1',
  'CFBundleIconFile':'MeetingAssistant.icns',
  'LSMinimumSystemVersion':'15.0',
@@ -156,7 +160,9 @@ info={
  'CFBundleName':'在场开发QA',
  'CFBundleDisplayName':'在场开发QA',
  'CFBundlePackageType':'APPL',
- 'CFBundleShortVersionString':'0.1',
+ 'CFBundleDevelopmentRegion':'zh_CN',
+ 'CFBundleLocalizations':['zh-Hans'],
+ 'CFBundleShortVersionString':app_version.VERSION,
  'CFBundleVersion':'1',
  'CFBundleIconFile':'MeetingAssistantIcon.icns',
  'LSMinimumSystemVersion':'15.0',

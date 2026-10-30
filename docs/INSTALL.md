@@ -45,7 +45,7 @@ python3 scripts/bootstrap_dependencies.py
 python3 scripts/install_standalone.py
 ```
 
-安装器更新 `~/Applications/在场.app`，并保留 `ZaichangStandalone` 数据目录。若当前在场仍在运行，请先退出应用再更新。
+安装器更新你已有的那份在场（`~/Applications` 或 `/Applications`，没有时装到 `~/Applications`），并保留 `ZaichangStandalone` 数据目录。若当前在场仍在运行，请先退出应用再更新。
 
 ## 依赖下载失败
 

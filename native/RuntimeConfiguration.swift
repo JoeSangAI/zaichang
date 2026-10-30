@@ -66,3 +66,33 @@ enum RuntimeConfiguration {
         return env
     }
 }
+
+/// What the user calls the assistant. One small file in the edition's data
+/// directory, read by the UI and by the Python runtime; later persona fields
+/// (such as tone) belong in the same file.
+enum AssistantProfile {
+    static let defaultName="小满"
+    static let maxNameLength=12
+    static let changed=Notification.Name("ZaichangAssistantProfileChanged")
+    static var url:URL {RuntimeConfiguration.dataRoot().appendingPathComponent("assistant-profile.json")}
+    private(set) static var name:String=load()
+    static func validated(_ raw:String)->String? {
+        let value=raw.trimmingCharacters(in:.whitespacesAndNewlines)
+        guard !value.isEmpty,value.count<=maxNameLength,!value.unicodeScalars.contains(where:{CharacterSet.controlCharacters.contains($0)}) else{return nil}
+        return value
+    }
+    static func load()->String {
+        guard let size=(try? url.resourceValues(forKeys:[.fileSizeKey]))?.fileSize,size<=4096,
+              let data=try? Data(contentsOf:url),let value=(try? JSONSerialization.jsonObject(with:data)) as? [String:Any],
+              let schema=value["schema"] as? NSNumber,schema.intValue==1,let stored=value["name"] as? String else{return defaultName}
+        return validated(stored) ?? defaultName
+    }
+    /// Saves the name (an invalid or empty one restores the default) and tells open windows.
+    static func save(name raw:String) throws {
+        let value=validated(raw) ?? defaultName
+        try FileManager.default.createDirectory(at:url.deletingLastPathComponent(),withIntermediateDirectories:true)
+        let data=try JSONSerialization.data(withJSONObject:["schema":1,"name":value],options:[.sortedKeys])
+        try data.write(to:url,options:.atomic)
+        name=value;NotificationCenter.default.post(name:changed,object:nil)
+    }
+}

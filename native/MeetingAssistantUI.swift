@@ -79,7 +79,7 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
     let autoTitle=MeetingAutoTitle();var titleProvider:MeetingTitleProvider?;var titleTextAllowed=false;var titleTask:Task<Void,Never>?;var titleRevision=0
     var finalTitleTasks:[String:Task<Void,Never>]=[:]
     var isHistoryReader=false;weak var workspaceOwner:Delegate?;var historyReader:Delegate?;var historyReaderShell:NSWindow?
-    var window:NSWindow!;var sheet:NSPanel!;var key:NSSecureTextField!;var keyLabel:NSTextField!;var setupMessage:NSTextField!;var savedLabel:NSTextField!;var save:NSButton!;var change:NSButton!
+    var recordingLiveDot:RecordingLiveDot?;var recordingModeChip:RecordingModeChip?;var readingAlignedRows:[NSStackView]=[];var settingsLayoutFrames:[(NSView,NSRect)]=[];var notesTransportStack:NSStackView?;var meetingEyebrow:NSTextField?;var emptyFilesButton:NSButton?;var emptyTranscribeButton:NSButton?;var window:NSWindow!;var sheet:NSPanel!;var key:NSSecureTextField!;var keyLabel:NSTextField!;var setupMessage:NSTextField!;var savedLabel:NSTextField!;var save:NSButton!;var change:NSButton!
     var historyButton:NSButton?;var newButton:NSButton?;var archiveButton:NSButton?;var heading:NSTextField!;var source:NSTextField!;var meter:NSTextField!;var action:NSButton!;var output:NSTextView!;var scroll:NSScrollView!;var empty:NSTextField!;var latest:NSButton!;var footerDetails:NSButton!;var settingsCancel:NSButton!;var diagnostic:NSTextField!
     var phase=UIState();var child:Process?;var quitting=false;var mock=false;var timer:Timer?;var mockTick=0;let vault=MockVault()
     var terminationJobsPending=0;var terminationReplyPending=false;var terminationWriteBarrierStarted=false
@@ -212,8 +212,13 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
         guard let scroll=scroll,let output=output else{return}
         let width=max(1,scroll.contentSize.width)
         empty?.preferredMaxLayoutWidth=max(1,width-24)
+        // One centred reading column: wider windows add margin, never line length.
+        let margin=floor(max(0,(width-MeetingVisualStyle.readingWidth)/2))
+        if abs(output.textContainerInset.width-margin)>0.5 {output.textContainerInset=NSSize(width:margin,height:output.textContainerInset.height)}
+        for row in readingAlignedRows where abs(row.edgeInsets.left-margin)>0.5 {row.edgeInsets=NSEdgeInsets(top:row.edgeInsets.top,left:margin,bottom:row.edgeInsets.bottom,right:margin)}
         if abs(output.frame.width-width)>0.5 {output.setFrameSize(NSSize(width:width,height:output.frame.height))}
-        if let container=output.textContainer,abs(container.containerSize.width-width)>0.5 {container.containerSize=NSSize(width:width,height:CGFloat.greatestFiniteMagnitude)}
+        let textWidth=max(1,width-2*margin)
+        if let container=output.textContainer,abs(container.containerSize.width-textWidth)>0.5 {container.containerSize=NSSize(width:textWidth,height:CGFloat.greatestFiniteMagnitude)}
     }
     func buildSettings() {
         sheet=FocusPanel(contentRect:NSRect(x:0,y:0,width:520,height:360),styleMask:[.titled,.closable],backing:.buffered,defer:false);sheet.title="设置";sheet.delegate=self;sheet.autorecalculatesKeyViewLoop=false
@@ -224,19 +229,22 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
         place(label("麦克风和电脑声音同时收录，无需切换应用。",size:13),24,271,472,32)
         let captureHint=label("包括会议软件、浏览器、播放器，以及会议中共享的声音。",size:12);captureHint.textColor = .secondaryLabelColor;place(captureHint,24,242,472,28)
         let separator=NSBox();separator.boxType = .separator;place(separator,24,233,472,1)
-        savedLabel=label("密钥已保存在这台Mac",size:13);place(savedLabel,24,191,360,24)
+        savedLabel=label("密钥已保存在这台Mac",size:13);place(savedLabel,24,195,472,24)
         keyLabel=label("百炼密钥",size:13,weight:.medium);place(keyLabel,24,195,472,24)
         key=NSSecureTextField();key.delegate=self;key.placeholderString=mock ? "仅输入假密钥" : "粘贴API密钥";key.bezelStyle = .roundedBezel;place(key,24,157,472,30)
-        let privacy=label(mock ? "离线预览：请勿输入真实密钥。" : "云端识别由阿里云百炼提供，录音保存在本机。",size:12);privacy.textColor = .secondaryLabelColor;place(privacy,24,126,472,22)
-        setupMessage=label("",size:12);setupMessage.textColor = .secondaryLabelColor;place(setupMessage,24,103,472,20)
+        let privacy=label(mock ? "离线预览：请勿输入真实密钥。" : "云端识别由阿里云百炼提供，录音保存在本机。",size:12);privacy.identifier=NSUserInterfaceItemIdentifier("settings-privacy");privacy.textColor = .secondaryLabelColor;place(privacy,24,126,472,22)
+        // One 12pt line fits in 17pt. Keep its upper edge at 123 and leave
+        // 2pt below it before the more-settings buttons end at y=104.
+        setupMessage=label("",size:12);setupMessage.identifier=NSUserInterfaceItemIdentifier("settings-message");setupMessage.textColor = .secondaryLabelColor;place(setupMessage,24,106,472,17)
         if mock || humanIdentityAuthorized || !trialCandidate {place(label("更多设置",size:12,weight:.medium),24,78,76,24)}
-        let peopleButton=ImmediateButton(title:"人物资料…",target:self,action:#selector(manageConsent));peopleButton.bezelStyle = .rounded;peopleButton.isHidden = !mock && !humanIdentityAuthorized;place(peopleButton,112,76,88,28)
-        let balanceButton=ImmediateButton(title:"余额…",target:self,action:#selector(configureBalance));balanceButton.bezelStyle = .rounded;place(balanceButton,208,76,88,28);balanceButton.isHidden=trialCandidate
+        let peopleButton=ImmediateButton(title:"人物资料…",target:self,action:#selector(manageConsent));peopleButton.identifier=NSUserInterfaceItemIdentifier("settings-people");peopleButton.bezelStyle = .rounded;peopleButton.isHidden = !mock && !humanIdentityAuthorized;place(peopleButton,112,76,88,28)
+        let balanceButton=ImmediateButton(title:"余额…",target:self,action:#selector(configureBalance));balanceButton.identifier=NSUserInterfaceItemIdentifier("settings-balance");balanceButton.bezelStyle = .rounded;place(balanceButton,208,76,88,28);balanceButton.isHidden=trialCandidate
         change=ImmediateButton(title:"更换密钥",target:self,action:#selector(changeKey));change.bezelStyle = .rounded;place(change,24,20,108,28)
         let cancel=ImmediateButton(title:"取消",target:self,action:#selector(dismissSettings));settingsCancel=cancel;cancel.bezelStyle = .rounded;cancel.keyEquivalent="\u{1b}";place(cancel,296,20,84,28)
         save=ImmediateButton(title:"保存密钥",target:self,action:#selector(saveKey));save.bezelStyle = .rounded;save.keyEquivalent="\r";place(save,388,20,108,28)
         fixture=FocusPopup();fixture.addItems(withTitles:["4字符","16字符","32字符","64字符","128字符","首尾空白","特殊字符","内部换行"])
         key.nextKeyView=cancel;cancel.nextKeyView=save;save.nextKeyView=key
+        settingsLayoutFrames=content.subviews.map{($0,$0.frame)}
     }
     // New recordings always use both capture lanes. Historical sessions keep their
     // original scope while being reviewed or resumed; reset only when starting anew.
@@ -256,7 +264,19 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
         editing = !stored;replacing=false;key.stringValue="";refreshSettings();window.beginSheet(sheet);sheet.makeFirstResponder(editing ? key : save)
     }
     func refreshSettings() {
-        savedLabel.isHidden=editing || !stored;keyLabel.isHidden = !editing;key.isHidden = !editing;change.isHidden = !stored || editing
+        let enteringKey=editing || !stored
+        savedLabel.isHidden=enteringKey;keyLabel.isHidden = !enteringKey;key.isHidden = !enteringKey;change.isHidden = !stored || enteringKey
+        // Collapse the absent input row and shorten the sheet. Always derive
+        // frames from the editing layout, so repeated replacements never drift.
+        let reduction:CGFloat=enteringKey ? 0:60
+        sheet.setContentSize(NSSize(width:520,height:360-reduction))
+        for (view,baseline) in settingsLayoutFrames {
+            var frame=baseline
+            if baseline.minY>=157 {frame.origin.y-=reduction}
+            else if baseline.minY>=76 {frame.origin.y-=enteringKey ? 0:22}
+            view.frame=frame
+        }
+        savedLabel.needsDisplay=true;keyLabel.needsDisplay=true;sheet.contentView?.needsDisplay=true
         save.title=editing ? "保存密钥" : "完成";save.isEnabled = !editing || CredentialInput(raw:key.stringValue).issue==nil
         setupMessage.stringValue=editing ? "" : "已保存";sheet.layoutIfNeeded()
     }
@@ -293,7 +313,7 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
         if processingAudio,let child=child {child.interrupt();diagnostic.stringValue="正在取消整理，已转写文字保留";return}
         if phase.phase == .recording {return}
         if phase.phase == .paused {sendRecordingControl("resume");return}
-        if currentCacheID != nil {diagnostic.stringValue="本场已保存；请点“新对话”开始另一场";return}
+        if currentCacheID != nil {diagnostic.stringValue="本场已保存；请点“新会议”开始另一场";return}
         guard [.idle,.stopped,.failed].contains(phase.phase) else {return}
         prepareAutomaticCapture()
         if Bundle.main.object(forInfoDictionaryKey:"LocalRecordingAllowed") as? Bool==true && (!mock || (Credential.offline && previewRenderOnly && startupWorkerFixture != nil)) {beginRecordingModeFlow();return}
@@ -1370,12 +1390,14 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
         // Keep the reading surface quiet. Evidence and per-fragment correction
         // remain available on the header/underlined text and in original export.
         let unresolved=["待确认","多人重叠","多人同时发言","句内说话人变化"].contains(originalLabel)
-        let speaker=unresolved ? (originalLabel=="待确认" ? "待确认":"多人发言"):originalLabel
+        let speaker=unresolved ? (originalLabel=="待确认" ? "未识别 · 是谁？":originalLabel):originalLabel
         let hint=unresolved ? "":voiceprintHint(turn)
         let text=NSMutableAttributedString(string:"");var partRanges:[String:NSRange]=[:]
         let final=item["final"] as? Bool ?? false
         let review=(item["quality_flags"] as? [String])?.isEmpty==false
         let state=final ? "" : item["stream_closed"] as? Bool==true || ![.connecting,.recording,.stopping].contains(phase.phase) ? " · 未完成" : " · 正在转写"
+        // The newest unfinished turn while recording: marked as speaking, its last words still settling.
+        let speaking=state==" · 正在转写" && phase.phase == .recording
         // Header: avatar, name and one time. The source and the relative time
         // stay in the tooltip; consecutive turns of one speaker collapse it.
         let start=TranscriptTimeline.start(item)
@@ -1383,32 +1405,44 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
         let absolute=absoluteTime?.display(start)
         let colorKey=unresolved ? nil:originalLabel
         let tint=MeetingVisualStyle.speakerColor(colorKey)
-        let header=NSMutableParagraphStyle();header.paragraphSpacingBefore=14;header.paragraphSpacing=3;header.lineBreakMode = .byCharWrapping
-        header.minimumLineHeight=22
+        let header=NSMutableParagraphStyle();header.paragraphSpacingBefore=20;header.paragraphSpacing=4;header.lineBreakMode = .byCharWrapping
+        header.minimumLineHeight=26
         let tooltip=readingTurnLabel(turn)+(turn.uncertain ? " · 部分发言归属未定":"")+" · "+audioSourceLabel(item)+" · "+relative+(absolute.map{" · "+$0} ?? "")
         let headerStart=text.length
         let avatar=NSTextAttachment();avatar.image=MeetingVisualStyle.speakerAvatar(unresolved ? "?":MeetingVisualStyle.speakerInitial(speaker),color:tint)
-        avatar.bounds=NSRect(x:0,y:-4,width:18,height:18)
+        avatar.bounds=NSRect(x:0,y:-6,width:24,height:24)
         text.append(NSAttributedString(attachment:avatar))
         let base:[NSAttributedString.Key:Any]=[.paragraphStyle:header,.toolTip:tooltip]
-        text.append(NSAttributedString(string:"  "+speaker,attributes:base.merging([.font:NSFont.systemFont(ofSize:12.5,weight:.medium),.foregroundColor:unresolved ? MeetingVisualStyle.muted:MeetingVisualStyle.ink]){$1}))
+        text.append(NSAttributedString(string:"  "+speaker,attributes:base.merging([.font:MeetingVisualStyle.nameFont,.foregroundColor:unresolved ? MeetingVisualStyle.muted:MeetingVisualStyle.ink]){$1}))
+        if originalLabel=="待确认",let id=turn.parts.first?.0 {
+            let who=(text.string as NSString).range(of:"是谁？",options:.backwards)
+            if who.location != NSNotFound {text.addAttributes([.link:id,.toolTip:"确认这句话的发言人"],range:who)}
+        }
         if !hint.isEmpty {text.append(NSAttributedString(string:hint,attributes:base.merging([.font:NSFont.systemFont(ofSize:12),.foregroundColor:MeetingVisualStyle.muted]){$1}))}
-        text.append(NSAttributedString(string:"   "+(absolute ?? relative)+state+"\n",attributes:base.merging([.font:NSFont.monospacedDigitSystemFont(ofSize:12,weight:.regular),.foregroundColor:MeetingVisualStyle.faint]){$1}))
+        text.append(NSAttributedString(string:"   "+(absolute ?? relative)+(speaking ? "":state),attributes:base.merging([.font:NSFont.monospacedDigitSystemFont(ofSize:12,weight:.regular),.foregroundColor:MeetingVisualStyle.muted]){$1}))
+        if speaking {text.append(NSAttributedString(string:"   ● 正在说",attributes:base.merging([.font:NSFont.systemFont(ofSize:12,weight:.medium),.foregroundColor:MeetingVisualStyle.accent]){$1}))}
+        text.append(NSAttributedString(string:"\n",attributes:base))
         text.addAttribute(.paragraphStyle,value:header,range:NSRange(location:headerStart,length:text.length-headerStart))
         let continuation=unresolved || turn.uncertain || review ? nil:speaker+"\u{1F}"+audioSourceLabel(item)
         text.addAttribute(.zaichangTurnHeader,value:TranscriptTurnHeader(continuationKey:continuation,start:start,end:(item["end"] as? Double).flatMap{$0.isFinite ? $0:nil} ?? start),range:NSRange(location:headerStart,length:text.length-headerStart))
-        let para=NSMutableParagraphStyle();para.lineSpacing=5;para.paragraphSpacing=6;para.lineBreakMode = .byWordWrapping
-        para.firstLineHeadIndent=30;para.headIndent=30
+        let para=NSMutableParagraphStyle();para.lineSpacing=7;para.paragraphSpacing=6;para.lineBreakMode = .byWordWrapping
+        para.firstLineHeadIndent=34;para.headIndent=34
         var identities=Set<String>()
         for (partID,part) in turn.parts {
             let offset=text.length,body=part["text"] as? String ?? ""
             let identity=readingIdentity(partID,part);if let identity=identity {identities.insert(identity)}
-            var attributes:[NSAttributedString.Key:Any]=[.font:NSFont.systemFont(ofSize:14.5),.foregroundColor:MeetingVisualStyle.ink,.paragraphStyle:para]
+            var attributes:[NSAttributedString.Key:Any]=[.font:MeetingVisualStyle.bodyFont,.foregroundColor:MeetingVisualStyle.ink,.paragraphStyle:para]
             if identity==nil && turn.uncertain {
                 attributes[.link]=partID;attributes[.underlineStyle]=NSUnderlineStyle.single.rawValue|NSUnderlineStyle.patternDot.rawValue
                 attributes[.toolTip]=(part["speaker"] as? [String:Any])?["reason"] as? String=="overlap" ? "这部分有重叠发言；点击修改发言人":"这部分的发言人待确认；点击修改"
             }
             text.append(NSAttributedString(string:body,attributes:attributes));partRanges[partID]=NSRange(location:offset,length:text.length-offset)
+        }
+        if speaking,let last=turn.parts.last.flatMap({partRanges[$0.0]}),last.length>0 {
+            // Fade the newest words only; the text itself is unchanged.
+            let faint=min(2,last.length),settling=min(4,last.length-faint)
+            if settling>0 {text.addAttribute(.foregroundColor,value:MeetingVisualStyle.ink.withAlphaComponent(0.7),range:NSRange(location:last.location+last.length-faint-settling,length:settling))}
+            text.addAttribute(.foregroundColor,value:MeetingVisualStyle.ink.withAlphaComponent(0.4),range:NSRange(location:last.location+last.length-faint,length:faint))
         }
         let translated=turn.parts.compactMap { partID, part -> String? in
             guard MeetingTranslationPolicy.eligible(turn.item),MeetingTranslationPolicy.eligible(part) else {return nil}
@@ -1417,7 +1451,7 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
         if !translated.isEmpty {
             let style=para.mutableCopy() as! NSMutableParagraphStyle
             style.paragraphSpacingBefore=4;style.lineSpacing=4
-            text.append(NSAttributedString(string:"\n"+translated,attributes:[.font:NSFont.systemFont(ofSize:12.5),.foregroundColor:MeetingVisualStyle.muted,.paragraphStyle:style]))
+            text.append(NSAttributedString(string:"\n"+translated,attributes:[.font:NSFont.systemFont(ofSize:13.5),.foregroundColor:MeetingVisualStyle.muted,.paragraphStyle:style]))
         }
         text.append(NSAttributedString(string:"\n",attributes:[.font:NSFont.systemFont(ofSize:14.5),.paragraphStyle:para]))
         if showsSpeakerRanges {
@@ -2352,6 +2386,9 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
         if CommandLine.arguments.count==4,CommandLine.arguments[1]=="--group-voice-replay",Credential.offline {
             do {let result=try voiceprintGroupFrozenReplay(archiveURL:URL(fileURLWithPath:CommandLine.arguments[2]),featureDirectory:URL(fileURLWithPath:CommandLine.arguments[3]));print(String(data:try JSONSerialization.data(withJSONObject:result,options:.sortedKeys),encoding:.utf8)!)}catch{print("group-voice-replay-failed: \(error)");exit(1)};return
         }
+        if CommandLine.arguments.count==6,CommandLine.arguments[1]=="--saved-voice-naming-replay",Credential.offline {
+            do {let result=try savedVoiceNamingReplay(cacheID:CommandLine.arguments[2],cacheRoot:URL(fileURLWithPath:CommandLine.arguments[3]),featuresURL:URL(fileURLWithPath:CommandLine.arguments[4]),archiveURL:URL(fileURLWithPath:CommandLine.arguments[5]));print(String(data:try JSONSerialization.data(withJSONObject:result,options:.sortedKeys),encoding:.utf8)!)}catch{print("saved-voice-naming-replay-failed: \(error)");exit(1)};return
+        }
         if CommandLine.arguments.count==4,CommandLine.arguments[1]=="--saved-voice-review",Credential.offline {
             do {let result=try savedVoiceRecognitionReview(resultURL:URL(fileURLWithPath:CommandLine.arguments[2]),archiveURL:URL(fileURLWithPath:CommandLine.arguments[3]));print(String(data:try JSONSerialization.data(withJSONObject:result,options:.sortedKeys),encoding:.utf8)!)}catch{print("saved-voice-review-failed: \(error)");exit(1)};return
         }
@@ -2499,7 +2536,7 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
             precondition(NSApp.mainMenu?.items.contains{$0.submenu?.title=="验证"}==true);checks+=1
             for tag in [1,11,12,13] {let item=NSMenuItem();item.tag=tag;view.validationScenario(item);precondition(view.phase.phase == .recording && view.action.title=="暂停录音" && view.action.isEnabled==true && !view.action.isHiddenOrHasHiddenAncestor && view.newButton?.isEnabled==false && view.historyButton?.isEnabled==true);checks+=1}
             view.phase.phase = .stopped;view.updateUI();precondition(view.newButton?.isEnabled==true && view.historyButton?.isEnabled==true);checks+=1
-            view.receive(["type":"segment","session":view.activeSession ?? "experience-fixture","segment_id":"a","track":"mic","text":"虚构内容，仅检查界面","final":true,"speaker":["basis":"unknown"]]);precondition(view.output.string.contains("待确认") && view.speakerLabel("a",view.segments["a"]!)=="待确认");checks+=1
+            view.receive(["type":"segment","session":view.activeSession ?? "experience-fixture","segment_id":"a","track":"mic","text":"虚构内容，仅检查界面","final":true,"speaker":["basis":"unknown"]]);precondition(view.output.string.contains("未识别 · 是谁？") && view.speakerLabel("a",view.segments["a"]!)=="待确认");checks+=1
             let dir=URL(fileURLWithPath:CommandLine.arguments[2]);try! FileManager.default.createDirectory(at:dir,withIntermediateDirectories:true)
             for (name,width,height,appearance) in [("standard",800,620,NSAppearance.Name.aqua),("compact",640,480,NSAppearance.Name.aqua),("dark",800,620,NSAppearance.Name.darkAqua)] {
                 view.window.setContentSize(NSSize(width:width,height:height));view.window.appearance=NSAppearance(named:appearance);view.window.contentView!.layoutSubtreeIfNeeded();let target=view.window.contentView!;let bitmap=target.bitmapImageRepForCachingDisplay(in:target.bounds)!;target.effectiveAppearance.performAsCurrentDrawingAppearance {target.cacheDisplay(in:target.bounds,to:bitmap)};let image=NSImage(size:target.bounds.size);image.lockFocus();target.effectiveAppearance.performAsCurrentDrawingAppearance {NSColor.windowBackgroundColor.setFill();NSBezierPath(rect:NSRect(origin:.zero,size:target.bounds.size)).fill();bitmap.draw(in:NSRect(origin:.zero,size:target.bounds.size))};image.unlockFocus();let opaque=NSBitmapImageRep(data:image.tiffRepresentation!)!;try! opaque.representation(using:.png,properties:[:])!.write(to:dir.appendingPathComponent(name+".png"))

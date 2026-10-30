@@ -131,6 +131,7 @@ final class MeetingLibraryManagement:NSObject {
     }
     func refresh(force:Bool=false) {
         guard let owner else{return}
+        defer {owner.displayedDocument.refreshEmptyMeetingActions()}
         let selected=contextMenuOpen ? owner.libraryMenuTarget:owner.selectedLibraryManagementItem
         if force {files=nil;loadedID=nil}
         if item?.id != selected?.id {item=selected;files=nil;loadedID=nil;status.stringValue="";readingID=nil;readJob.cancel()}else{item=selected}
@@ -210,7 +211,7 @@ final class MeetingLibraryManagement:NSObject {
                         else {owner.libraryTable.deselectAll(nil)}
                         owner.librarySelectionChanging=previousSelectionGate
                         owner.updateLibraryManagement()
-                    };self.message("「"+name+"」已保存")
+                    };self.status.stringValue=""
                 case .failure:self.message("名称保存失败，原名称保留，请重试")
                 };self.refresh();completion?(result)
             }
@@ -269,7 +270,7 @@ extension Delegate {
     var selectedLibraryManagementItem:CachedMeeting? {guard let table=libraryTable,libraryVisible.indices.contains(table.selectedRow) else{return nil};return libraryVisible[table.selectedRow]}
     var libraryManagementController:MeetingLibraryManagement {if let libraryManagement{return libraryManagement};let controller=MeetingLibraryManagement(owner:self);libraryManagement=controller;return controller}
     func makeLibraryManagementView()->NSView {libraryManagementController.view}
-    func makeLibraryRecycleButton()->NSButton {let button=NSButton(title:"回收站",target:self,action:#selector(showDeletedMeetings));button.toolTip="查看并恢复已删除会议";button.setAccessibilityLabel("查看并恢复已删除会议");button.bezelStyle = .inline;button.image=NSImage(systemSymbolName:"tray",accessibilityDescription:nil);button.imagePosition = .imageLeading;button.font = .systemFont(ofSize:11);return button}
+    func makeLibraryRecycleButton()->NSButton {let button=NSButton(title:"回收站",target:self,action:#selector(showDeletedMeetings));button.toolTip="查看并恢复已删除会议";button.setAccessibilityLabel("查看并恢复已删除会议");button.bezelStyle = .inline;button.image=NSImage(systemSymbolName:"tray",accessibilityDescription:nil);button.imagePosition = .imageLeading;button.font = .systemFont(ofSize:12);button.contentTintColor=MeetingVisualStyle.ink;return button}
     func updateLibraryManagement(){libraryManagement?.refresh()}
     func saveLibraryMeetingTitle(_ item:CachedMeeting,title:String,completion:((Result<Void,Error>)->Void)?=nil) {libraryManagementController.rename(item,to:title,completion:completion)}
     @objc func renameSelectedLibraryMeeting(){guard let item=selectedLibraryManagementItem else{return};libraryManagementController.requestRename(item)}

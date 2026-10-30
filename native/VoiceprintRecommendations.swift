@@ -41,7 +41,7 @@ struct VoiceprintArchive:Codable {
     func humanOnlyScores(_ vector:[Double],excludingSession:String?=nil)->[(String,Double)] {
         scores(vector,excludingSession:excludingSession,includingAutomatic:false)
     }
-    private func matchingHumanSamples(_ person:VoiceprintPerson,excludingSession:String?)->[VoiceprintSample] {
+    fileprivate func matchingHumanSamples(_ person:VoiceprintPerson,excludingSession:String?)->[VoiceprintSample] {
         guard let ledger=learning else{return person.samples.filter{$0.session != excludingSession}}
         let original=(ledger.baseline.first{$0.id==person.id}?.samples ?? []).filter{$0.session != excludingSession}
         let manual=ledger.contributions.filter {
@@ -57,18 +57,63 @@ struct VoiceprintArchive:Codable {
         }
     }
     func scores(_ vector:[Double],excludingSession:String?,includingAutomatic:Bool)->[(String,Double)] {
+        VoiceprintReferenceTable(archive:self,excludingSession:excludingSession,includingAutomatic:includingAutomatic).scores(vector)
+    }
+}
+
+// Each person's references for one archive state with one meeting excluded.
+// Selecting them re-runs the ledger eligibility grouping for every person, so
+// a caller that scores many spans builds the table once. Scores are the same
+// as rebuilding it for every span (2026-10-30: per-span rebuilding made one
+// saved meeting take 1-3 minutes and backed up the serial voice queue).
+struct VoiceprintReferenceTable {
+    private let rows:[(id:String,vectors:[[Double]])]
+    init(archive:VoiceprintArchive,excludingSession:String?,includingAutomatic:Bool) {
         // Disabled voices remain negative comparisons, so opting one out
         // cannot make a similar enabled person win by default.
-        people.compactMap {p in
+        rows=archive.people.map {p in
             // The validated ledger bounds human evidence. Automatic evidence
             // retains its separate cap and can never evict human references.
-            let automatic=includingAutomatic ? Array(activeAutomaticVoiceSamples(archive:self,personID:p.id).prefix(voiceprintMaximumAutomaticSamplesPerPerson)) : []
-            let references=uniqueVoiceSamples(matchingHumanSamples(p,excludingSession:excludingSession) + automatic)
-            let scores=references.filter{$0.session != excludingSession}.map{s in zip(vector,s.vector).reduce(0){$0+$1.0*$1.1}}.sorted(by:>)
+            let automatic=includingAutomatic ? Array(activeAutomaticVoiceSamples(archive:archive,personID:p.id).prefix(voiceprintMaximumAutomaticSamplesPerPerson)) : []
+            let references=uniqueVoiceSamples(archive.matchingHumanSamples(p,excludingSession:excludingSession) + automatic)
+            return (p.id,references.filter{$0.session != excludingSession}.map(\.vector))
+        }
+    }
+    func scores(_ vector:[Double])->[(String,Double)] {
+        rows.compactMap {row in
+            let scores=row.vectors.map{voiceprintDot(vector,$0)}.sorted(by:>)
             guard scores.count>=3 else{return nil}
             // Two examples must agree; one exceptionally similar sample cannot win alone.
-            return (p.id,(scores[0]+scores[1])/2)
+            return (row.id,(scores[0]+scores[1])/2)
         }.sorted{$0.1>$1.1}
+    }
+}
+// The same left-to-right sum as zip/reduce, without per-element iterators.
+func voiceprintDot(_ a:[Double],_ b:[Double])->Double {
+    a.withUnsafeBufferPointer {x in b.withUnsafeBufferPointer {y in
+        // Release builds are unoptimized; a range iterator here dominated matching.
+        var total=0.0,i=0
+        let n=min(x.count,y.count)
+        while i<n {total+=x[i]*y[i];i+=1}
+        return total
+    }}
+}
+func voiceprintArchiveFingerprint(_ archive:VoiceprintArchive)->String {
+    let ledger=archive.learning
+    return "\(archive.revision)|\(archive.partition)|\(ledger?.contributions.count ?? -1)|\(ledger?.revokedConfirmationIDs.count ?? -1)|"+(ledger?.contributions.map(\.confirmationID).joined(separator:",") ?? "")+"|"+archive.people.map{"\($0.id):\($0.enabled):\($0.samples.count)"}.joined(separator:",")
+}
+// Matchers on the voice queue share one table per archive state and meeting.
+final class VoiceprintReferenceCache {
+    private let lock=NSLock()
+    private var key:String?
+    private var table:VoiceprintReferenceTable?
+    func table(for archive:VoiceprintArchive,excludingSession session:String)->VoiceprintReferenceTable {
+        let fingerprint=voiceprintArchiveFingerprint(archive)+"|"+session
+        lock.lock();defer{lock.unlock()}
+        if key==fingerprint,let table {return table}
+        let next=VoiceprintReferenceTable(archive:archive,excludingSession:session,includingAutomatic:true)
+        key=fingerprint;table=next
+        return next
     }
 }
 
@@ -136,8 +181,7 @@ final class VoiceprintCentroidCache {
     private var key:String?
     private var table:VoiceprintCentroidTable?
     func table(for archive:VoiceprintArchive)->VoiceprintCentroidTable {
-        let ledger=archive.learning
-        let fingerprint="\(archive.revision)|\(archive.partition)|\(ledger?.contributions.count ?? -1)|\(ledger?.revokedConfirmationIDs.count ?? -1)|"+archive.people.map{"\($0.id):\($0.enabled):\($0.samples.count)"}.joined(separator:",")
+        let fingerprint=voiceprintArchiveFingerprint(archive)
         lock.lock();defer{lock.unlock()}
         if key==fingerprint,let table {return table}
         let next=VoiceprintCentroidTable(archive:archive)
@@ -236,6 +280,10 @@ struct VoiceprintMatcher {
     var archive:VoiceprintArchive?
     init(archive:VoiceprintArchive?=nil) {self.archive=archive}
     private let centroids=VoiceprintCentroidCache()
+    private let references=VoiceprintReferenceCache()
+    private func referenceScores(_ vector:[Double],_ archive:VoiceprintArchive,excluding session:String)->[(String,Double)] {
+        references.table(for:archive,excludingSession:session).scores(vector)
+    }
     private var evidence:[SessionSpeakerKey:[VoiceprintEvidence]]=[:]
     private var byID:[String:SessionSpeakerKey]=[:]
     private var byParent:[String:Set<String>]=[:]
@@ -286,7 +334,7 @@ struct VoiceprintMatcher {
         }}
         var predictions:[String]=[];var support:[VoiceprintEvidenceRef]=[]
         for row in rows {
-            let scores=archive.scores(row.vector,excludingSession:key.session)
+            let scores=referenceScores(row.vector,archive,excluding:key.session)
             guard let best=scores.first,best.1>=0.60,best.1-(scores.dropFirst().first?.1 ?? 0)>=0.14 else{continue}
             predictions.append(best.0);support.append(VoiceprintEvidenceRef(id:row.id,revision:row.revision))
         }
@@ -298,7 +346,7 @@ struct VoiceprintMatcher {
     func conflictingEvidence(_ key:SessionSpeakerKey)->Bool {
         guard let archive,let rows=evidence[key] else{return false}
         let predictions=rows.compactMap {row -> String? in
-            let scores=archive.scores(row.vector,excludingSession:key.session)
+            let scores=referenceScores(row.vector,archive,excluding:key.session)
             guard let best=scores.first,best.1>=0.60,best.1-(scores.dropFirst().first?.1 ?? 0)>=0.14 else{return nil}
             return best.0
         }
@@ -324,7 +372,7 @@ struct VoiceprintMatcher {
               let person=archive.people.first(where:{$0.id==best.id && $0.enabled}) else{return nil}
         // Any span that alone clearly matches someone else marks a mixed group.
         for row in rows {
-            let single=archive.scores(row.vector,excludingSession:key.session)
+            let single=referenceScores(row.vector,archive,excluding:key.session)
             if let top=single.first,top.0 != person.id,top.1>=0.60,top.1-(single.dropFirst().first?.1 ?? 0)>=0.14 {return nil}
         }
         let refs=kept.map{VoiceprintEvidenceRef(id:$0.id,revision:$0.revision)}
@@ -342,7 +390,7 @@ struct VoiceprintMatcher {
         if groupCentroid,let group=groupCentroidRecommendation(key) {return group}
         guard key.session==session,!ignored.contains(key),let archive,let rows=evidence[key],!conflictingEvidence(key) else{return nil}
         let supported=rows.compactMap {row -> (VoiceprintEvidence,String)? in
-            let scores=archive.scores(row.vector,excludingSession:key.session)
+            let scores=referenceScores(row.vector,archive,excluding:key.session)
             guard let best=scores.first,best.1>=0.60,best.1-(scores.dropFirst().first?.1 ?? 0)>=0.14 else{return nil}
             return (row,best.0)
         }
@@ -424,9 +472,10 @@ func archiveRememberingManualVoice(_ old:VoiceprintArchive?,name:String,key:Sess
     guard matches.count<=1 else{return nil}
     let index=matches.first
     if let index,!archive.people[index].enabled {return nil} // Explicit opt-out persists.
+    let references=VoiceprintReferenceTable(archive:archive,excludingSession:nil,includingAutomatic:false)
     for sample in samples {
         guard VoiceprintArchive.validVector(sample.vector) else{return nil}
-        let scores=archive.humanOnlyScores(sample.vector)
+        let scores=references.scores(sample.vector)
         if let best=scores.first,best.1>=0.60,best.1-(scores.dropFirst().first?.1 ?? 0)>=0.14,
            best.0 != index.map({archive.people[$0].id}) {return nil}
         // An explicit human confirmation may add a new microphone condition
@@ -631,8 +680,9 @@ func archiveAddingVoiceConfirmation(_ old:VoiceprintArchive?,contribution:Voicep
               !ledger.baseline.contains(where:{$0.id != contribution.personID && $0.sharedPerson?.id==shared.id}),
               !ledger.contributions.contains(where:{$0.personID != contribution.personID && $0.sharedPerson?.id==shared.id && !ledger.revokedConfirmationIDs.contains($0.confirmationID)}) else{throw VoiceprintLearningError.conflictingIdentity}
     }
+    let references=old.map{VoiceprintReferenceTable(archive:$0,excludingSession:nil,includingAutomatic:false)}
     for sample in contribution.samples {
-        let scores=old?.humanOnlyScores(sample.vector) ?? []
+        let scores=references?.scores(sample.vector) ?? []
         if let best=scores.first,best.0 != contribution.personID,best.1>=0.60,best.1-(scores.dropFirst().first?.1 ?? 0)>=0.14 {throw VoiceprintLearningError.conflictingVoice}
     }
     if let index=ledger.contributions.firstIndex(where:{$0.confirmationID==contribution.confirmationID}) {

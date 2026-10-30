@@ -44,11 +44,13 @@ final class MeetingAgentPanel: NSView {
     private let activityLabel = NSTextField(labelWithString: "正在思考…")
     private let transcriptScroll = NSScrollView()
     private let proactiveSwitch = MeetingTintedSwitch()
-    private let proactiveLabel = NSTextField(labelWithString: "旁听")
+    private let proactiveLabel = NSTextField(labelWithString: "旁听已关闭")
+    private let presenceCard = MeetingListeningCard()
+    private var workCards: [String: MeetingWorkCard] = [:]
     private let resizeHandle = MeetingAgentResizeHandle()
-    private let composer = NSTextView()
+    private let composer = MeetingComposerTextView()
     private let composerScroll = NSScrollView()
-    private let composerPlaceholder = NSTextField(labelWithString: "有什么想问的？")
+    private let composerPlaceholder = NSTextField(labelWithString: "问小满，或直接在会上交办")
     private let sendButton = AgentSendButton(title: "发送", target: nil, action: nil)
     private let overviewTextView = NSTextView()
     private let greeting = NSTextField(wrappingLabelWithString: "嗨，今天开什么会？\n可以先告诉我项目和目标，或让我查找相关资料。")
@@ -92,6 +94,11 @@ final class MeetingAgentPanel: NSView {
         proactiveSwitch.state = enabled ? .on : .off
         proactiveSwitch.needsDisplay = true
         suppressSwitchAction = false
+        let working = (snapshot["work"] as? [[String: Any]] ?? []).count
+        let name = AssistantProfile.name
+        composerPlaceholder.stringValue = "问\(name)，或直接在会上交办"
+        presenceCard.show(on: enabled, title: enabled ? "\(name)正在旁听" : "旁听已关闭",
+                          detail: enabled ? "会上交办的事会自动接手" + (working > 0 ? " · 正在做 \(working) 件" : "") : "开启后，会上交办的事会自动开始")
     }
 
     /// Test seam: submits text through the same composer/send path as the UI.
@@ -101,6 +108,14 @@ final class MeetingAgentPanel: NSView {
         sendMessage()
     }
 
+    /// Test seam: composes uncommitted input-method text and reports whether the hint was hidden meanwhile.
+    func composeMarkedTextForChecks(_ text: String) -> Bool {
+        composer.string = ""; composerPlaceholder.isHidden = false
+        composer.setMarkedText(text, selectedRange: NSRange(location: (text as NSString).length, length: 0), replacementRange: NSRange(location: NSNotFound, length: 0))
+        let hidden = composerPlaceholder.isHidden
+        composer.unmarkText(); composer.string = ""; composerPlaceholder.isHidden = false
+        return hidden
+    }
     /// Test seam: switches tabs through the same state update as the segmented control.
     func chooseTab(_ title: String) {
         guard let tab = Tab.allCases.first(where: { $0.title == title }) else { return }
@@ -187,13 +202,14 @@ final class MeetingAgentPanel: NSView {
         assistantPage.addSubview(statusLabel)
         statusHeight = statusLabel.heightAnchor.constraint(equalToConstant: 0)
 
-        proactiveLabel.font = .systemFont(ofSize: 11, weight: .regular)
-        proactiveLabel.textColor = MeetingVisualStyle.muted
-        proactiveLabel.translatesAutoresizingMaskIntoConstraints = false
-        proactiveSwitch.translatesAutoresizingMaskIntoConstraints = false
+        // Listening is a presence, not a settings row: one card with its own switch.
+        proactiveLabel.font = .systemFont(ofSize: 14, weight: .semibold)
+        proactiveLabel.textColor = MeetingVisualStyle.ink
         proactiveSwitch.target = self; proactiveSwitch.action = #selector(toggleProactive(_:))
         proactiveSwitch.setAccessibilityLabel("旁听")
-        assistantPage.addSubview(proactiveLabel); assistantPage.addSubview(proactiveSwitch)
+        presenceCard.install(title: proactiveLabel, toggle: proactiveSwitch)
+        presenceCard.translatesAutoresizingMaskIntoConstraints = false
+        assistantPage.addSubview(presenceCard)
 
         transcript.orientation = .vertical; transcript.alignment = .leading
         activitySpinner.style = .spinning; activitySpinner.controlSize = .small
@@ -245,11 +261,16 @@ final class MeetingAgentPanel: NSView {
         composer.textContainer?.widthTracksTextView = true
         composer.textContainer?.containerSize = NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude)
         composer.delegate = self
+        // Input-method composition sends no textDidChange; hide the hint as soon as it starts.
+        composer.onMarkedTextChange = { [weak self] in
+            guard let self else { return }
+            self.composerPlaceholder.isHidden = !self.composer.string.isEmpty || self.composer.hasMarkedText()
+        }
         composerScroll.documentView = composer; composerScroll.hasVerticalScroller = true
         composerScroll.autohidesScrollers = true; composerScroll.drawsBackground = false
         composerScroll.borderType = .noBorder; composerScroll.translatesAutoresizingMaskIntoConstraints = false
-        composerPlaceholder.stringValue = "有什么想问的？"
-        composerPlaceholder.font = .systemFont(ofSize: 14); composerPlaceholder.textColor = MeetingVisualStyle.faint
+        composerPlaceholder.stringValue = "问\(AssistantProfile.name)，或直接在会上交办"
+        composerPlaceholder.font = .systemFont(ofSize: 14); composerPlaceholder.textColor = MeetingVisualStyle.muted
         composerPlaceholder.translatesAutoresizingMaskIntoConstraints = false
 
         let composerBox = NSView(); composerBox.translatesAutoresizingMaskIntoConstraints = false
@@ -259,7 +280,7 @@ final class MeetingAgentPanel: NSView {
         sendButton.title = ""; sendButton.bezelStyle = .regularSquare; sendButton.isBordered = false
         sendButton.image = NSImage(systemSymbolName: "arrow.up", accessibilityDescription: "发送")?.withSymbolConfiguration(.init(pointSize: 16, weight: .medium))
         sendButton.contentTintColor = .white; sendButton.wantsLayer = true
-        sendButton.layer?.backgroundColor = MeetingVisualStyle.ink.cgColor; sendButton.layer?.cornerRadius = 15
+        sendButton.layer?.backgroundColor = MeetingVisualStyle.charcoal.cgColor; sendButton.layer?.cornerRadius = 15
         sendButton.target = self; sendButton.action = #selector(sendMessage)
         sendButton.toolTip = "发送 · 回车发送，Shift＋回车换行"; sendButton.setAccessibilityLabel("发送")
         sendButton.translatesAutoresizingMaskIntoConstraints = false; composerBox.addSubview(sendButton)
@@ -270,15 +291,12 @@ final class MeetingAgentPanel: NSView {
             statusLabel.leadingAnchor.constraint(equalTo: assistantPage.leadingAnchor, constant: 22),
             statusLabel.trailingAnchor.constraint(equalTo: assistantPage.trailingAnchor, constant: -22),
             statusLabel.topAnchor.constraint(equalTo: assistantPage.topAnchor, constant: 2), statusHeight,
-            proactiveLabel.leadingAnchor.constraint(equalTo: assistantPage.leadingAnchor, constant: 22),
-            proactiveLabel.centerYAnchor.constraint(equalTo: proactiveSwitch.centerYAnchor),
-            proactiveSwitch.trailingAnchor.constraint(equalTo: assistantPage.trailingAnchor, constant: -20),
-            proactiveSwitch.topAnchor.constraint(equalTo: statusLabel.bottomAnchor, constant: 4),
-            proactiveSwitch.widthAnchor.constraint(equalToConstant: 38),
-            proactiveSwitch.heightAnchor.constraint(equalToConstant: 22),
+            presenceCard.leadingAnchor.constraint(equalTo: assistantPage.leadingAnchor, constant: 16),
+            presenceCard.trailingAnchor.constraint(equalTo: assistantPage.trailingAnchor, constant: -16),
+            presenceCard.topAnchor.constraint(equalTo: statusLabel.bottomAnchor, constant: 4),
             transcriptScroll.leadingAnchor.constraint(equalTo: assistantPage.leadingAnchor),
             transcriptScroll.trailingAnchor.constraint(equalTo: assistantPage.trailingAnchor),
-            transcriptScroll.topAnchor.constraint(equalTo: proactiveSwitch.bottomAnchor),
+            transcriptScroll.topAnchor.constraint(equalTo: presenceCard.bottomAnchor, constant: 4),
             transcriptScroll.bottomAnchor.constraint(equalTo: activityContainer.topAnchor, constant: -8),
             activityContainer.leadingAnchor.constraint(equalTo: assistantPage.leadingAnchor, constant: 22),
             activityContainer.trailingAnchor.constraint(equalTo: assistantPage.trailingAnchor, constant: -22),
@@ -320,6 +338,7 @@ final class MeetingAgentPanel: NSView {
             let item = NSMenuItem(title: title, action: action, keyEquivalent: ""); item.target = self; menu.addItem(item); return item
         }
         let stop = item("停止回答", #selector(cancelCurrentTask)); stop.isEnabled = state["conversation_status"] as? String == "running"
+        _ = item("助理名字…", #selector(renameAssistant))
         let recent = NSMenu(); for workspace in state["workspaces"] as? [[String:Any]] ?? [] {
             guard let id = workspace["id"] as? String else { continue }
             let item = NSMenuItem(title: workspace["title"] as? String ?? "会前对话", action: #selector(openRecentMenu(_:)), keyEquivalent: "")
@@ -328,6 +347,24 @@ final class MeetingAgentPanel: NSView {
         if !recent.items.isEmpty { let history = NSMenuItem(title: "最近对话", action: nil, keyEquivalent: ""); history.submenu = recent; menu.addItem(history) }
         menu.addItem(.separator()); let status = NSMenuItem(title: statusLabel.stringValue, action: nil, keyEquivalent: ""); menu.addItem(status)
         menu.popUp(positioning: nil, at: NSPoint(x: 0, y: moreButton.bounds.minY), in: moreButton)
+    }
+    @objc private func renameAssistant() {
+        let alert = NSAlert(); alert.messageText = "给助理起个名字"
+        alert.informativeText = "界面里会这样称呼它，会上叫这个名字交办，它也知道是在叫自己。留空恢复默认「\(AssistantProfile.defaultName)」。"
+        let field = NSTextField(string: AssistantProfile.name); field.frame = NSRect(x: 0, y: 0, width: 240, height: 24)
+        field.placeholderString = AssistantProfile.defaultName; field.setAccessibilityLabel("助理名字")
+        alert.accessoryView = field; alert.addButton(withTitle: "保存"); alert.addButton(withTitle: "取消")
+        alert.window.initialFirstResponder = field
+        let apply: (NSApplication.ModalResponse) -> Void = { [weak self] response in
+            guard response == .alertFirstButtonReturn else { return }
+            let raw = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard raw.isEmpty || AssistantProfile.validated(raw) != nil else {
+                self?.statusLabel.stringValue = "名字最多 \(AssistantProfile.maxNameLength) 个字，且不能含换行"; return
+            }
+            do { try AssistantProfile.save(name: raw) } catch { self?.statusLabel.stringValue = "名字没能保存，请重试" }
+            if let self { self.apply(self.state) }
+        }
+        if let window { alert.beginSheetModal(for: window, completionHandler: apply) } else { apply(alert.runModal()) }
     }
     @objc private func openRecentMenu(_ sender: NSMenuItem) { if let id = sender.representedObject as? String { onCommand?("open_workspace", ["workspace_id": id]) } }
 
@@ -521,7 +558,8 @@ final class MeetingAgentPanel: NSView {
         let interrupted = ["failed", "interrupted"].contains(snapshot["conversation_status"] as? String ?? "")
         if interrupted { statusLabel.stringValue = "助理已中断，发送消息或重新开启旁听可继续" }
         if snapshot["listening"] as? Bool == true { statusLabel.stringValue = "正在旁听" }
-        let needsAttention = ["unavailable", "auth_required"].contains(status) || interrupted || snapshot["listening"] as? Bool == true
+        // Listening shows in the presence card; this line is only for problems.
+        let needsAttention = ["unavailable", "auth_required"].contains(status) || interrupted
         statusLabel.isHidden = !needsAttention; statusHeight.constant = needsAttention ? 24 : 0
         moreButton.toolTip = statusLabel.stringValue
     }
@@ -584,6 +622,14 @@ final class MeetingAgentPanel: NSView {
             cell.apply(message)
             order.append(cell)
         }
+        let workItems = state["work"] as? [[String: Any]] ?? []
+        let workIDs = Set(workItems.compactMap { $0["id"] as? String })
+        for id in workCards.keys where !workIDs.contains(id) { workCards.removeValue(forKey: id) }
+        for item in workItems {
+            guard let id = item["id"] as? String else { continue }
+            let card = workCards[id] ?? MeetingWorkCard()
+            workCards[id] = card; card.apply(item); order.append(card)
+        }
         let requests = state["requests"] as? [[String: Any]] ?? []
         let requestIDs = Set(requests.compactMap { $0["id"] as? String })
         for id in requestViews.keys.filter({ !requestIDs.contains($0) }) { requestViews.removeValue(forKey: id) }
@@ -597,7 +643,8 @@ final class MeetingAgentPanel: NSView {
         let busy = state["awaiting_response"] as? Bool == true
         // Background work runs beside the conversation; the row names it when nothing else is pending.
         let work = (state["work"] as? [[String: Any]] ?? []).compactMap { $0["title"] as? String }.filter { !$0.isEmpty }
-        let shown = busy || !work.isEmpty
+        // Background work now has its own cards in the feed; this row is for the user's own requests.
+        let shown = busy
         activityContainer.isHidden = !shown; activityHeight.constant = shown ? 26 : 0
         if shown {
             activityLabel.stringValue = !requests.isEmpty ? "等待你确认" : busy ? (state["conversation_status"] as? String == "cancelling" ? "正在停止…" : (state["activity"] as? String ?? "正在思考…"))
@@ -626,6 +673,7 @@ final class MeetingAgentPanel: NSView {
             }
             if stack === transcript, let cell = view as? MessageCell { cell.constrainWidth(to: transcript) }
             if stack === transcript, let request = view as? MeetingAgentRequestView { request.constrainWidth(to: transcript) }
+            if stack === transcript, let card = view as? MeetingWorkCard { card.constrainWidth(to: transcript) }
         }
     }
 }
@@ -697,6 +745,15 @@ private final class MeetingAgentOptionButton: NSButton {
 
 /// Keeps the native switch's activation and accessibility behavior while
 /// drawing the requested green-on / neutral-gray-off treatment.
+/// Reports input-method composition, which AppKit does not announce through textDidChange.
+private final class MeetingComposerTextView: NSTextView {
+    var onMarkedTextChange: (() -> Void)?
+    override func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
+        super.setMarkedText(string, selectedRange: selectedRange, replacementRange: replacementRange); onMarkedTextChange?()
+    }
+    override func unmarkText() { super.unmarkText(); onMarkedTextChange?() }
+}
+
 private final class AgentSendButton: NSButton {
     override var alignmentRectInsets: NSEdgeInsets { NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 0) }
 }
@@ -704,33 +761,126 @@ private final class AgentSendButton: NSButton {
 private final class MeetingAgentTabs: NSControl {
     var selectedSegment = 0 { didSet { refresh() } }
     private var buttons: [NSButton] = []
+    private var marks: [NSView] = []
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
-        wantsLayer = true; layer?.cornerRadius = 9; layer?.backgroundColor = MeetingVisualStyle.faint.withAlphaComponent(0.10).cgColor
-        let row = NSStackView(); row.orientation = .horizontal; row.distribution = .fillEqually; row.spacing = 2
+        let row = NSStackView(); row.orientation = .horizontal; row.distribution = .fill; row.spacing = 22
         row.translatesAutoresizingMaskIntoConstraints = false; addSubview(row)
         for (i, title) in ["助理", "概览", "笔记"].enumerated() {
             let button = NSButton(title: title, target: self, action: #selector(selectTab(_:)))
             button.tag = i; button.bezelStyle = .regularSquare; button.isBordered = false
-            button.wantsLayer = true; button.layer?.cornerRadius = 7
             button.setAccessibilityLabel(title); row.addArrangedSubview(button); buttons.append(button)
             button.heightAnchor.constraint(equalTo: row.heightAnchor).isActive = true
+            let mark = NSView(); mark.wantsLayer = true; mark.layer?.cornerRadius = 1; mark.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(mark); marks.append(mark)
+            NSLayoutConstraint.activate([mark.centerXAnchor.constraint(equalTo: button.centerXAnchor), mark.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -1),
+                                         mark.widthAnchor.constraint(equalToConstant: 16), mark.heightAnchor.constraint(equalToConstant: 2)])
         }
-        NSLayoutConstraint.activate([row.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 2),row.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -2),row.topAnchor.constraint(equalTo: topAnchor, constant: 2),row.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -2)])
+        NSLayoutConstraint.activate([row.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6),row.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -2),row.topAnchor.constraint(equalTo: topAnchor, constant: 2),row.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -4)])
         refresh()
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     private func refresh() {
         for button in buttons {
             let selected = button.tag == selectedSegment
-            button.font = .systemFont(ofSize: 13, weight: selected ? .semibold : .regular)
-            button.contentTintColor = selected ? MeetingVisualStyle.ink : MeetingVisualStyle.muted
-            button.layer?.backgroundColor = selected ? NSColor.textBackgroundColor.cgColor : NSColor.clear.cgColor
-            button.layer?.borderColor = MeetingVisualStyle.border.cgColor; button.layer?.borderWidth = selected ? 0.5 : 0
+            button.attributedTitle = NSAttributedString(string: button.title, attributes: [.font: NSFont.systemFont(ofSize: 14, weight: selected ? .semibold : .regular),
+                                                                                          .foregroundColor: selected ? MeetingVisualStyle.ink : MeetingVisualStyle.muted])
+            if marks.indices.contains(button.tag) { marks[button.tag].layer?.backgroundColor = MeetingVisualStyle.accent.cgColor; marks[button.tag].isHidden = !selected }
             button.setAccessibilityValue(selected ? "已选择" : "未选择")
         }
     }
     @objc private func selectTab(_ sender: NSButton) { selectedSegment = sender.tag; sendAction(action, to: target) }
+}
+
+/// The listening presence: dark voice mark, state and its switch.
+private final class MeetingListeningCard: NSView {
+    private let mark = MeetingListeningMark()
+    private let detail = NSTextField(labelWithString: "")
+    private var on = false
+    private weak var titleField: NSTextField?
+    override init(frame frameRect: NSRect) { super.init(frame: frameRect); wantsLayer = true }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    override var wantsUpdateLayer: Bool { true }
+    override func updateLayer() {
+        layer?.cornerRadius = 14; layer?.borderWidth = 1
+        layer?.backgroundColor = (on ? MeetingVisualStyle.accentTint : MeetingVisualStyle.quietFill).cgColor
+        layer?.borderColor = (on ? MeetingVisualStyle.accentTintBorder : MeetingVisualStyle.border).cgColor
+    }
+    func install(title: NSTextField, toggle: NSSwitch) {
+        titleField = title; detail.font = .systemFont(ofSize: 12); detail.lineBreakMode = .byTruncatingTail
+        let words = NSStackView(views: [title, detail]); words.orientation = .vertical; words.alignment = .leading; words.spacing = 2
+        for view in [mark, words, toggle] as [NSView] { view.translatesAutoresizingMaskIntoConstraints = false; addSubview(view) }
+        words.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        NSLayoutConstraint.activate([heightAnchor.constraint(equalToConstant: 60),
+            mark.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14), mark.centerYAnchor.constraint(equalTo: centerYAnchor),
+            mark.widthAnchor.constraint(equalToConstant: 30), mark.heightAnchor.constraint(equalToConstant: 30),
+            words.leadingAnchor.constraint(equalTo: mark.trailingAnchor, constant: 12), words.centerYAnchor.constraint(equalTo: centerYAnchor),
+            words.trailingAnchor.constraint(lessThanOrEqualTo: toggle.leadingAnchor, constant: -10),
+            toggle.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14), toggle.centerYAnchor.constraint(equalTo: centerYAnchor),
+            toggle.widthAnchor.constraint(equalToConstant: 38), toggle.heightAnchor.constraint(equalToConstant: 22)])
+    }
+    func show(on: Bool, title: String, detail text: String) {
+        if titleField?.stringValue != title { titleField?.stringValue = title }
+        detail.stringValue = text; detail.textColor = on ? MeetingVisualStyle.accentText : MeetingVisualStyle.muted
+        if self.on != on { self.on = on; needsDisplay = true; mark.live = on }
+        setAccessibilityLabel(title + "，" + text)
+    }
+}
+
+private final class MeetingListeningMark: NSView {
+    var live = false { didSet { needsDisplay = true } }
+    override func draw(_ dirtyRect: NSRect) {
+        MeetingVisualStyle.charcoal.setFill(); NSBezierPath(roundedRect: bounds, xRadius: 9, yRadius: 9).fill()
+        MeetingVoiceGlyph.draw(in: bounds.insetBy(dx: 7, dy: 8), color: live ? MeetingVisualStyle.capsuleLive : MeetingVisualStyle.capsuleIdleDot)
+    }
+}
+
+/// One running background task: who started it, its title and what it is doing now.
+/// Only fields the runtime reports are shown; there is no invented progress.
+private final class MeetingWorkCard: NSView {
+    private let source = NSTextField(labelWithString: "")
+    private let state = NSTextField(labelWithString: "")
+    private let title = NSTextField(wrappingLabelWithString: "")
+    private let activity = NSTextField(wrappingLabelWithString: "")
+    private let spinner = NSProgressIndicator()
+    private var widthConstraint: NSLayoutConstraint?
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect); wantsLayer = true; translatesAutoresizingMaskIntoConstraints = false
+        source.font = .systemFont(ofSize: 12, weight: .semibold); source.textColor = MeetingVisualStyle.accentText
+        state.font = .systemFont(ofSize: 12, weight: .medium); state.textColor = MeetingVisualStyle.ink
+        title.font = MeetingVisualStyle.taskTitleFont; title.textColor = MeetingVisualStyle.ink
+        activity.font = .systemFont(ofSize: 13); activity.textColor = MeetingVisualStyle.muted
+        spinner.style = .spinning; spinner.controlSize = .small; spinner.isIndeterminate = true
+        let spacer = NSView(); spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        let top = NSStackView(views: [source, spacer, spinner, state]); top.orientation = .horizontal; top.spacing = 6; top.alignment = .centerY
+        let column = NSStackView(views: [top, title, activity]); column.orientation = .vertical; column.alignment = .leading; column.spacing = 6
+        column.translatesAutoresizingMaskIntoConstraints = false; addSubview(column)
+        NSLayoutConstraint.activate([column.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16), column.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
+                                     column.topAnchor.constraint(equalTo: topAnchor, constant: 14), column.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -14),
+                                     top.widthAnchor.constraint(equalTo: column.widthAnchor), spinner.widthAnchor.constraint(equalToConstant: 12), spinner.heightAnchor.constraint(equalToConstant: 12)])
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    override var wantsUpdateLayer: Bool { true }
+    override func updateLayer() {
+        layer?.cornerRadius = 14; layer?.borderWidth = 1
+        layer?.backgroundColor = NSColor.textBackgroundColor.cgColor; layer?.borderColor = MeetingVisualStyle.border.cgColor
+    }
+    func apply(_ item: [String: Any]) {
+        source.stringValue = item["origin"] as? String == "user" ? "交办" : "旁听发现"
+        let status = item["status"] as? String ?? ""
+        state.stringValue = ["queued": "排队中", "running": "进行中", "waiting": "等待确认", "cancelling": "正在停止"][status] ?? "进行中"
+        title.stringValue = item["title"] as? String ?? ""
+        let now = (item["activity"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        activity.stringValue = now; activity.isHidden = now.isEmpty
+        if status == "running" { spinner.isHidden = false; spinner.startAnimation(nil) } else { spinner.stopAnimation(nil); spinner.isHidden = true }
+        setAccessibilityElement(true); setAccessibilityRole(.group)
+        setAccessibilityLabel(source.stringValue + "：" + title.stringValue + "，" + state.stringValue + (now.isEmpty ? "" : "，" + now))
+    }
+    func constrainWidth(to stack: NSStackView) {
+        if widthConstraint == nil { widthConstraint = widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -32) }
+        widthConstraint?.isActive = true
+        title.preferredMaxLayoutWidth = 0; activity.preferredMaxLayoutWidth = 0
+    }
 }
 
 private final class TranscriptDocumentView: NSView {
@@ -840,7 +990,7 @@ private final class MeetingSwitchSurface:NSView {
         guard let owner,bounds.width>0,bounds.height>0 else{return}
         owner.backgroundColor.setFill();NSBezierPath(rect:bounds).fill()
         let track=bounds.insetBy(dx:1,dy:2),active=owner.state == .on
-        let color=active ? NSColor.systemGreen:NSColor(calibratedWhite:0.78,alpha:1)
+        let color=active ? MeetingVisualStyle.accent:NSColor(calibratedWhite:0.78,alpha:1)
         color.withAlphaComponent(owner.isEnabled ? 1:0.4).setFill()
         NSBezierPath(roundedRect:track,xRadius:track.height/2,yRadius:track.height/2).fill()
         let diameter=max(1,track.height-4)
@@ -872,7 +1022,7 @@ extension MeetingAgentPanel: NSTextViewDelegate {
         return true
     }
     func textDidChange(_ notification: Notification) {
-        composerPlaceholder.isHidden = !composer.string.isEmpty
+        composerPlaceholder.isHidden = !composer.string.isEmpty || composer.hasMarkedText()
     }
     func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
         if commandSelector == #selector(insertNewline(_:)), NSApp.currentEvent?.modifierFlags.contains(.shift) == true { return false }

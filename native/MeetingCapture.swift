@@ -633,20 +633,94 @@ func applicationTapInputFormat(device:AudioObjectID)throws->AVAudioFormat {
     return format
 }
 
-// Device-free clock check shared by both tap paths. A route can change its
-// sample rate without changing its device ID; stop using that format promptly.
-struct ApplicationTapClockCheck {
-    private var anchor:(sample:Double,host:Double)?
-    mutating func accepts(_ time:AudioTimeStamp,sampleRate:Double)->Bool {
-        guard time.mFlags.contains(.sampleTimeValid),time.mFlags.contains(.hostTimeValid) else{return true}
-        let host=AVAudioTime.seconds(forHostTime:time.mHostTime),sample=time.mSampleTime
-        guard host.isFinite,sample.isFinite else{return false}
-        guard let old=anchor else{anchor=(sample,host);return true}
-        let elapsed=host-old.host
-        guard elapsed>=0,sample>=old.sample else{return false}
-        guard elapsed>=0.1 else{return true}
-        anchor=(sample,host)
-        return abs((sample-old.sample)/elapsed/sampleRate-1)<=0.05
+// Bluetooth call routes can keep reporting 48 kHz for both the tap and the aggregate
+// stream while frames really arrive at 16 kHz (Feishu with iFlytek earbuds, 2026-10-30).
+// The delivered frame rate is therefore the only trustworthy rate. Two consecutive
+// windows must agree on a standard rate, so a stall or burst cannot switch the format.
+struct TapDeliveryRate {
+    static let standardRates:[Double]=[8000,11025,12000,16000,22050,24000,32000,44100,48000,88200,96000,176400,192000]
+    private var anchor:Double?,last:Double?,frames=0.0,candidate:Double?
+    mutating func observe(frames count:Int,at host:Double,window:Double=0.2)->Double? {
+        guard host.isFinite,count>=0 else{return nil}
+        defer {last=host}
+        guard let start=anchor,let previous=last,host>=previous,host-previous<=0.25 else {
+            // First packet, reversed clock or a stall: nothing measurable across this gap.
+            anchor=host;frames=0;candidate=nil;return nil
+        }
+        frames+=Double(count)
+        let elapsed=host-start
+        guard elapsed>=window else{return nil}
+        let measured=frames/elapsed
+        anchor=host;frames=0
+        guard let snapped=Self.standardRates.min(by:{abs($0-measured)<abs($1-measured)}),abs(measured/snapped-1)<=0.05 else{candidate=nil;return nil}
+        defer {candidate=snapped}
+        return candidate==snapped ? snapped:nil
+    }
+}
+
+/// A source that keeps failing must not open a new track generation every half second:
+/// one Bluetooth meeting left 1,407 empty tracks. After five failures within 30 seconds
+/// its retries wait 30 seconds. The microphone is unaffected.
+struct SourceRetryBackoff {
+    private var failures:[String:[Double]]=[:],heldUntil:[String:Double]=[:]
+    mutating func recordFailure(_ source:String,at now:Double) {
+        var recent=(failures[source] ?? []).filter{now-$0<30};recent.append(now)
+        if recent.count>=5 {heldUntil[source]=now+30;recent=[]}
+        failures[source]=recent
+    }
+    func heldBack(at now:Double)->Set<String> {Set(heldUntil.filter{$0.value>now}.keys)}
+}
+
+extension AVAudioPCMBuffer {
+    /// The same samples read under another rate; only the format's rate differs.
+    func reinterpreted(as other:AVAudioFormat)->AVAudioPCMBuffer? {
+        guard let copy=AVAudioPCMBuffer(pcmFormat:other,frameCapacity:frameCapacity) else{return nil}
+        copy.frameLength=frameLength
+        let source=UnsafeMutableAudioBufferListPointer(mutableAudioBufferList),target=UnsafeMutableAudioBufferListPointer(copy.mutableAudioBufferList)
+        guard source.count==target.count else{return nil}
+        for (from,to) in zip(source,target) {
+            guard let input=from.mData,let output=to.mData,from.mDataByteSize<=to.mDataByteSize else{return nil}
+            memcpy(output,input,Int(from.mDataByteSize))
+        }
+        return copy
+    }
+}
+
+/// The format and converter a tap uses, corrected in place when delivery disagrees with
+/// what CoreAudio reported. Correcting avoids restarting the tap, which would only read
+/// the same wrong report again. A new tap holds its first frames until the rate is known,
+/// so its opening audio is neither garbled nor seen by the journal as a run of gaps.
+/// Used only on the tap's serial queue.
+final class TapRateFollower {
+    private(set) var format:AVAudioFormat
+    private(set) var converter:PCMConverter
+    private var delivery=TapDeliveryRate()
+    private var held:[(AVAudioPCMBuffer,Double)]=[]
+    private var settled=false,firstHost:Double?
+    init(reported:AVAudioFormat)throws {format=reported;converter=try PCMConverter(reported)}
+    /// Returns the new rate when the format was just corrected.
+    func observe(frames:Int,at host:Double)throws->Double? {
+        if firstHost==nil {firstHost=host}
+        let verdict=delivery.observe(frames:frames,at:host)
+        // Never hold longer than a second: an unreadable rate falls back to the report.
+        if verdict != nil || host-(firstHost ?? host)>=1 {settled=true}
+        guard let rate=verdict,abs(rate/format.sampleRate-1)>0.05 else{return nil}
+        var description=format.streamDescription.pointee;description.mSampleRate=rate
+        guard let corrected=AVAudioFormat(streamDescription:&description,channelLayout:format.channelLayout) else{return nil}
+        converter=try PCMConverter(corrected);format=corrected
+        return rate
+    }
+    /// Converted audio ready to write, with each packet's original capture time.
+    func accept(_ buffer:AVAudioPCMBuffer,at stamp:Double)throws->[(Data,Double)] {
+        guard settled else {held.append((buffer,stamp));return []}
+        var ready:[(Data,Double)]=[]
+        for (packet,time) in held+[(buffer,stamp)] {
+            guard let input=packet.format.sampleRate==format.sampleRate ? packet:packet.reinterpreted(as:format) else{throw Failure(code:"tap_rate_reinterpret")}
+            let data=try converter.convert(input)
+            if !data.isEmpty {ready.append((data,time))}
+        }
+        held=[]
+        return ready
     }
 }
 
@@ -721,8 +795,7 @@ final class ApplicationTap {
         try check(AudioHardwareCreateAggregateDevice(aggregate as CFDictionary, &device), "create_private_aggregate")
         let format=try applicationTapInputFormat(device:device)
         asbd=format.streamDescription.pointee;capturedInputFormat=format
-        let converter=try PCMConverter(format)
-        var formatClock=ApplicationTapClockCheck()
+        let follower=try TapRateFollower(reported:format)
         let formatInfo:[String:Any]=["type":"capture_format","source_id":global ? "reference":"remote",
               "tap_sample_rate":declaredTapSampleRate,"input_sample_rate":format.sampleRate,
               "input_channels":format.channelCount,"input_bytes_per_frame":asbd.mBytesPerFrame]
@@ -730,11 +803,17 @@ final class ApplicationTap {
         emit(formatInfo)
         try check(AudioDeviceCreateIOProcIDWithBlock(&io, device, queue) { _, input, inputTime, _, _ in
             guard captureAdmissionOpen() else { return }
-            guard formatClock.accepts(inputTime.pointee,sampleRate:format.sampleRate) else{box.fail("tap_input_clock_changed");return}
             let list = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: input))
             guard let first = list.first, asbd.mBytesPerFrame > 0 else { box.fail("tap_empty_format"); return }
             let frames = AVAudioFrameCount(first.mDataByteSize / asbd.mBytesPerFrame)
-            guard let copied = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frames) else { box.fail("tap_copy"); return }
+            let stamp = inputTime.pointee.mFlags.contains(.hostTimeValid) ? AVAudioTime.seconds(forHostTime: inputTime.pointee.mHostTime) : ProcessInfo.processInfo.systemUptime
+            do {
+                if let measured=try follower.observe(frames:Int(frames),at:stamp) {
+                    var info=formatInfo;info["input_sample_rate"]=measured;info["measured_from_delivery"]=true
+                    box.journal?.recordCaptureFormat(info);emit(info)
+                }
+            } catch {box.fail("tap_conversion");return}
+            guard let copied = AVAudioPCMBuffer(pcmFormat: follower.format, frameCapacity: frames) else { box.fail("tap_copy"); return }
             copied.frameLength = frames
             let target = UnsafeMutableAudioBufferListPointer(copied.mutableAudioBufferList)
             guard target.count == list.count else { box.fail("tap_channel_layout"); return }
@@ -742,8 +821,7 @@ final class ApplicationTap {
                 guard source.mDataByteSize <= destination.mDataByteSize, let from = source.mData, let to = destination.mData else { box.fail("tap_buffer_layout"); return }
                 memcpy(to, from, Int(source.mDataByteSize))
             }
-            let stamp = inputTime.pointee.mFlags.contains(.hostTimeValid) ? AVAudioTime.seconds(forHostTime: inputTime.pointee.mHostTime) : ProcessInfo.processInfo.systemUptime
-            do { let data = try converter.convert(copied); if !data.isEmpty { _ = writeCapturedPCMIfAdmitted(data,at:stamp,to:box) } }
+            do { for (data,time) in try follower.accept(copied,at:stamp) { _ = writeCapturedPCMIfAdmitted(data,at:time,to:box) } }
             catch { box.fail("tap_conversion") }
         }, "create_tap_io")
         try check(AudioDeviceStart(device, io), "start_tap")

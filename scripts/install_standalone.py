@@ -15,6 +15,9 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+import app_version
+
 WORK = ROOT / ".runtime/build/standalone"
 QA_APP = WORK / "在场独立版QA.app"
 STAGE = WORK / ".在场.app.installing"
@@ -28,8 +31,9 @@ PYTHON_MODULES = (
     "live_trial.py", "meeting_context.py", "model_standby.py", "public_audio_trial.py",
     "runtime_config.py", "shared_terms.py", "shared_people.py", "speaker_identity.py",
 )
-VERSION = "0.3.0"
-BUILD = "20261023.1"
+VERSION = app_version.VERSION
+BUILD = app_version.BUILD
+BUNDLE_ID = "com.joesang.zaichang.standalone"
 
 
 def run(*args: str, capture_output: bool = False) -> subprocess.CompletedProcess:
@@ -139,7 +143,7 @@ def rewrite_bundle(stage: Path, runtime_hashes: dict[str, str]) -> dict:
     info_path = stage / "Contents/Info.plist"
     info = plistlib.loads(info_path.read_bytes())
     info.update({
-        "CFBundleIdentifier": "com.joesang.zaichang.standalone",
+        "CFBundleIdentifier": BUNDLE_ID,
         "CFBundleName": "在场",
         "CFBundleDisplayName": "在场",
         "CFBundleVersion": BUILD,
@@ -272,9 +276,17 @@ def install(destination: Path) -> dict:
     return result
 
 
+def default_destination(home: Path = Path.home() / "Applications/在场.app", system: Path = Path("/Applications/在场.app")) -> Path:
+    # Update the copy the user already has instead of leaving a stale one behind.
+    info = system / "Contents/Info.plist"
+    if home.exists() or system.is_symlink() or not info.is_file():
+        return home
+    return system if plistlib.loads(info.read_bytes()).get("CFBundleIdentifier") == BUNDLE_ID else home
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--destination", type=Path, default=Path.home() / "Applications/在场.app")
+    parser.add_argument("--destination", type=Path, default=default_destination())
     parser.add_argument("--build-only", action="store_true", help="Build and verify the bundle without installing it")
     args = parser.parse_args()
     if args.build_only:

@@ -93,6 +93,7 @@ final class MeetingAgentController: NSObject {
     private var service: MeetingAgentBridge
     private let token = UUID()
     private var timer: Timer?
+    private var profileObserver: NSObjectProtocol?
     private var binding = false
     private var bindingSucceeded = false
     private var bindGeneration = 0
@@ -139,17 +140,23 @@ final class MeetingAgentController: NSObject {
             else { self.state = snapshot }
             self.state["workspaces"] = self.owner?.currentCacheID == nil ? self.workspaces : []
             self.panel.apply(self.state)
-            self.owner?.agentSidebarButton?.toolTip = self.state["listening"] as? Bool == true ? "正在旁听 · 收起不停止旁听" : "显示或隐藏右侧栏"
+            self.owner?.showAgentListening(self.state["listening"] as? Bool == true)
+        }
+        // A renamed assistant shows at once in every open window.
+        profileObserver = NotificationCenter.default.addObserver(forName: AssistantProfile.changed, object: nil, queue: .main) { [weak self] _ in
+            guard let self else { return }
+            self.panel.apply(self.state); self.owner?.showAgentListening(self.state["listening"] as? Bool == true)
         }
         timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             self?.sync(); self?.updateOverviewVisibility()
         }
         bind()
     }
-    deinit { timer?.invalidate(); service.observers.removeValue(forKey: token) }
+    deinit { timer?.invalidate(); service.observers.removeValue(forKey: token); if let profileObserver { NotificationCenter.default.removeObserver(profileObserver) } }
     func installNotes(_ notes: MeetingNotesController) {
         notes.embeddedInAssistant = true; notes.panelWidth.isActive = false; notes.panel.isHidden = false
         panel.installNotes(notes.panel)
+        owner?.installTransportNotes(notes)
     }
     func layout() {
         guard let owner else { return }
@@ -178,6 +185,7 @@ final class MeetingAgentController: NSObject {
         owner.resizeTranscript()
     }
     var requestedPanelWidth: CGFloat { width.constant }
+    func openNotes() {manualVisible=true;layout();panel.chooseTab("笔记");owner?.window.contentView?.layoutSubtreeIfNeeded();owner?.resizeTranscript()}
     func toggle() { manualVisible = !(manualVisible ?? expanded); layout(); owner?.window.contentView?.layoutSubtreeIfNeeded(); owner?.resizeTranscript() }
     func newWorkspace() {
 
@@ -310,6 +318,38 @@ extension Delegate {
     }
     @objc func toggleAssistantPanel() { agentController?.toggle() }
     @objc func toggleVisibleAssistant() {displayedDocument.agentController?.toggle()}
+    /// The toolbar's right-panel button doubles as the listening indicator, so
+    /// listening stays visible while the panel is closed.
+    func showAgentListening(_ listening:Bool) {
+        guard let button=agentSidebarButton else{return}
+        let name=AssistantProfile.name
+        button.toolTip=listening ? name+"正在旁听 · 收起右栏不停止旁听":"显示或隐藏右侧栏"
+        button.setAccessibilityLabel(listening ? name+"旁听中，显示或隐藏右侧栏":"显示或隐藏右侧栏")
+        button.wantsLayer=true;button.layer?.cornerRadius=13
+        // The toolbar sizes its item once, from the icon; give the pill an explicit
+        // size that follows its label so it is never clipped to "● …".
+        func constraint(_ id:String,_ make:()->NSLayoutConstraint)->NSLayoutConstraint {
+            if let existing=button.constraints.first(where:{$0.identifier==id}) {return existing}
+            let value=make();value.identifier=id;value.isActive=true;return value
+        }
+        button.translatesAutoresizingMaskIntoConstraints=false
+        let width=constraint("agent-pill-width"){button.widthAnchor.constraint(equalToConstant:30)}
+        let height=constraint("agent-pill-height"){button.heightAnchor.constraint(equalToConstant:26)}
+        height.constant=26
+        if listening {
+            let title=NSAttributedString(string:" "+name+"旁听中",attributes:[.font:NSFont.systemFont(ofSize:12,weight:.semibold),.foregroundColor:MeetingVisualStyle.accentText])
+            button.image=MeetingVisualStyle.listeningDot;button.imagePosition = .imageLeading
+            button.attributedTitle=title;width.constant=ceil(title.size().width)+12+24
+            button.effectiveAppearance.performAsCurrentDrawingAppearance {
+                button.layer?.backgroundColor=MeetingVisualStyle.accentTint.cgColor;button.layer?.borderColor=MeetingVisualStyle.accentTintBorder.cgColor
+            }
+            button.layer?.borderWidth=1
+        } else {
+            button.attributedTitle=NSAttributedString(string:"");button.image=NSImage(systemSymbolName:"sidebar.right",accessibilityDescription:"显示或隐藏右侧栏");button.imagePosition = .imageOnly
+            button.layer?.backgroundColor=nil;button.layer?.borderWidth=0;width.constant=30
+        }
+        button.superview?.needsLayout=true
+    }
     @objc func showAssistantMore(_ sender:NSButton) {
         let menu=NSMenu()
         let search=NSMenuItem(title:"搜索原文",action:#selector(showDocumentSearch),keyEquivalent:"");search.target=self;menu.addItem(search)

@@ -60,14 +60,14 @@ private final class MeetingLibraryMouseProbe:NSTableView {
     try check(app.libraryParticipants==retainedNames,"library_reload_retains_names_while_background_refresh_waits")
     reloadSummaryGate.signal();try wait{app.recoveries.allSatisfy{app.librarySummaryLoaded.contains($0.id)}}
     // Use the production row factory and actual hit testing, including its child labels.
-    let tableProbe=MeetingLibraryMouseProbe(frame:NSRect(x:0,y:0,width:220,height:72))
+    let tableProbe=MeetingLibraryMouseProbe(frame:NSRect(x:0,y:0,width:220,height:100))
     let rowItem=app.libraryVisible[0]
     app.libraryParticipants[rowItem.id]=["测试参会人甲","测试参会人乙"]
     guard let hitCell=app.tableView(tableProbe,viewFor:nil,row:0) as? MeetingLibraryCellView else{throw Failure(code:"library_row_cell_type")}
-    let hitHost=NSView(frame:NSRect(x:0,y:0,width:220,height:72))
+    let hitHost=NSView(frame:NSRect(x:0,y:0,width:220,height:100))
     hitCell.frame=hitHost.bounds;hitHost.addSubview(hitCell);hitHost.layoutSubtreeIfNeeded()
     guard let titleHit=hitCell.textField,
-          let dateHit=hitCell.subviews.compactMap({$0 as? NSTextField}).first(where:{$0 !== titleHit}),
+          let dateHit=hitCell.subviews.compactMap({$0 as? NSTextField}).first(where:{$0 !== titleHit && $0.stringValue.contains(" · ")}),
           let peopleHit=hitCell.subviews.compactMap({$0 as? MeetingParticipantLabel}).first else{throw Failure(code:"library_row_display_children")}
     for (name,child) in [("title",titleHit as NSView),("date",dateHit as NSView),("participants",peopleHit as NSView)] {
         try check(child.bounds.width>0 && child.bounds.height>0,"library_"+name+"_has_hit_area")
@@ -82,11 +82,11 @@ private final class MeetingLibraryMouseProbe:NSTableView {
     try check(tableProbe.leftEvents.count==3 && tableProbe.rightEvents.count==3,"library_row_forwards_once_without_text_menu")
     try check(!titleHit.isSelectable && !dateHit.isSelectable && !titleHit.isEditable && !dateHit.isEditable,"library_row_text_is_display_only")
     try check(titleHit.accessibilityLabel()==titleHit.stringValue && dateHit.accessibilityLabel()==dateHit.stringValue && peopleHit.accessibilityLabel()=="参会人：测试参会人甲  ·  测试参会人乙","library_row_accessibility_labels_preserved")
-    try check(dateHit.stringValue.contains("仅录音") && !dateHit.stringValue.contains("待转写"),"record_only_row_does_not_promise_automatic_transcription")
+    try check(dateHit.stringValue.contains("不到 1 分钟 · 仅录音") && !dateHit.stringValue.contains("待转写"),"record_only_row_does_not_promise_automatic_transcription")
     if let row=app.libraryVisible.firstIndex(where:{$0.id==pending.id}) {
         let original=app.libraryVisible[row];var transcribing=original;transcribing.recordingMode="record_and_transcribe";app.libraryVisible[row]=transcribing
         let pendingCell=app.tableView(tableProbe,viewFor:nil,row:row)!
-        try check(pendingCell.subviews.compactMap{$0 as? NSTextField}.contains{$0.stringValue.contains("待转写")},"transcription_row_still_discloses_remaining_audio")
+        try check(pendingCell.subviews.compactMap{$0 as? NSTextField}.contains{$0.stringValue.hasSuffix(" · 待转写")},"transcription_row_still_discloses_remaining_audio")
         app.libraryVisible[row]=original
     }
     peopleHit.updateTrackingAreas()
@@ -103,7 +103,7 @@ private final class MeetingLibraryMouseProbe:NSTableView {
     app.window.contentView?.layoutSubtreeIfNeeded()
     guard let menuCell=menuTable.view(atColumn:0,row:menuRow,makeIfNecessary:true) as? MeetingLibraryCellView,
           let menuTitle=menuCell.textField,
-          let menuDate=menuCell.subviews.compactMap({$0 as? NSTextField}).first(where:{$0 !== menuTitle}),
+          let menuDate=menuCell.subviews.compactMap({$0 as? NSTextField}).first(where:{$0 !== menuTitle && $0.stringValue.contains(" · ")}),
           let menuPeople=menuCell.subviews.compactMap({$0 as? MeetingParticipantLabel}).first else{throw Failure(code:"library_context_actual_row")}
     menuCell.layoutSubtreeIfNeeded()
     var presented=0,preparedIDs:[String]=[],preparedOperations:Set<Int>=[],presentationRow = -1
@@ -319,7 +319,7 @@ private final class MeetingLibraryMouseProbe:NSTableView {
     app.window.setContentSize(NSSize(width:640,height:480));app.layoutWorkspace()
     try check(app.sidebar.isHidden && divider.isHidden && app.sidebarWidth.constant==0 && app.preferredSidebarWidth==360,"sidebar_narrow_window_hides_without_losing_user_width")
     app.sidebarManualVisible=true;app.layoutWorkspace()
-    try check(app.sidebarWidth.constant==200 && app.documentHost.frame.maxX<=640.5 && (app.microphoneLevel?.bounds.width ?? 0)>=96 && (app.computerLevel?.bounds.width ?? 0)>=96,"sidebar_explicit_narrow_show_keeps_waveforms_readable_and_document_inside")
+    try check(app.sidebarWidth.constant==200 && app.documentHost.frame.maxX<=640.5 && (app.microphoneLevel?.bounds.width ?? 0)>=48 && (app.computerLevel?.bounds.width ?? 0)>=48 && (app.recordingTransportView?.subviews.first?.frame.maxX ?? .infinity)<=(app.recordingTransportView?.bounds.maxX ?? 0)+0.5,"sidebar_explicit_narrow_show_keeps_waveforms_readable_and_document_inside")
     app.sidebarManualVisible=nil;app.layoutWorkspace()
     try check(app.sidebar.isHidden && app.preferredSidebarWidth==360,"sidebar_automatic_visibility_restored_without_preference_loss")
     app.window.setContentSize(NSSize(width:1040,height:720));app.layoutWorkspace()
@@ -347,5 +347,32 @@ private final class MeetingLibraryMouseProbe:NSTableView {
         try check(abs(app.output.frame.width-app.scroll.contentSize.width)<1 && app.scroll.contentSize.width>500,name+"_readable_transcript_width")
         try snapshot(app,name)
     }
+    // Paper & vermilion P0: real native views with isolated, synthetic rows.
+    func dated(_ item:CachedMeeting,_ date:Date,_ title:String)->CachedMeeting {
+        var row=CachedMeeting(id:item.id,directory:item.directory,date:date,writtenBytes:item.writtenBytes,pendingBytes:item.pendingBytes,occupiedBytes:item.occupiedBytes,tracks:item.tracks,audioCleaned:item.audioCleaned,warning:item.warning,retiredBytes:item.retiredBytes)
+        row.customTitle=title;row.durationSeconds=item.durationSeconds;row.recordingMode="record_and_transcribe";return row
+    }
+    // A fixed Wednesday keeps all three calendar groups represented on any run date.
+    let reference=Date(timeIntervalSince1970:1793188800)
+    let today=dated(current,Date(),"纸与朱砂｜离线界面检查")
+    let early=dated(old,Calendar.current.date(byAdding:.day,value:-14,to:Date())!,"较早会议")
+    app.returnToCurrent();app.currentCacheID=today.id;app.activeSession=today.id;app.meetingTitle=today.displayTitle;app.phase.phase = .recording;app.phase.elapsed=1938;app.sessionLocalOnly=false
+    app.recoveries=[today,early];app.libraryVisible=app.recoveries;app.libraryParticipants[today.id]=["测试参会人甲","测试参会人乙"];app.renderLibraryList()
+    try check(app.libraryGroup(at:0)=="今天" && app.libraryGroup(at:1)=="更早","paper_sidebar_calendar_groups")
+    try check(MeetingLibraryDate.group(reference,now:reference)=="今天" && MeetingLibraryDate.group(reference.addingTimeInterval(-86400),now:reference)=="本周" && MeetingLibraryDate.group(reference.addingTimeInterval(-14*86400),now:reference)=="更早","paper_all_three_group_rules")
+    let unknown:[String:Any]=["type":"segment","session":today.id,"segment_id":"paper-unknown","track":"mic","start":1930.0,"end":1933.0,"text":"这句话保留原文，只确认界面的发言人入口。","final":true,"speaker":["basis":"unknown"]]
+    app.receive(unknown);app.renderText();try app.settleTranscriptForOfflineReview()
+    let exportBefore=app.transcriptExport()
+    try check(app.output.string.contains("未识别 · 是谁？") && exportBefore.contains("待确认"),"paper_unknown_display_changes_without_export_wording")
+    try check(app.heading.isDescendant(of:app.recordingTransportView!) && !app.meetingEyebrow!.stringValue.contains(app.phase.time),"paper_status_and_timer_live_only_in_transport_not_title")
+    try check(app.notesController!.toggle.isDescendant(of:app.recordingTransportView!),"paper_note_entry_inside_capsule")
+    app.window.appearance=NSAppearance(named:.aqua);app.window.setContentSize(NSSize(width:1040,height:720));app.sidebarManualVisible=nil;app.layoutWorkspace();settle()
+    try snapshot(app,"paper-sidebar-title-unknown")
+    app.showDocumentSearch();settle();try snapshot(app,"paper-chinese-find")
+    app.scroll.isFindBarVisible=false
+    app.window.appearance=NSAppearance(named:.darkAqua);try snapshot(app,"paper-dark")
+    app.window.setContentSize(NSSize(width:640,height:480));app.layoutWorkspace();settle();try snapshot(app,"paper-640pt")
+    try check(app.sidebar.isHidden && app.recordingTransportView!.frame.maxX<=app.recordingTransportView!.superview!.bounds.width+0.5,"paper_640pt_transport_inside_document")
+    try check(app.transcriptExport()==exportBefore,"paper_rendering_preserves_exact_transcript_export_bytes")
     return ["type":"workspace_checks","passed":checks.count,"checks":checks,"images":images,"capture":false,"cloud":false,"keychain":false,"offscreen":true]
 }

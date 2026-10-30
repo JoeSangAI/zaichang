@@ -23,6 +23,28 @@ def data_root(environment=None):
     return Path.home() / 'Library/Application Support' / name
 
 
+DEFAULT_ASSISTANT_NAME = '小满'
+
+
+def assistant_name():
+    """The name the user gave the assistant (assistant-profile.json), or the default."""
+    import json
+    try:
+        path = data_root() / 'assistant-profile.json'
+        if path.stat().st_size > 4096:
+            return DEFAULT_ASSISTANT_NAME
+        value = json.loads(path.read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        return DEFAULT_ASSISTANT_NAME
+    if not isinstance(value, dict) or type(value.get('schema')) is not int or value['schema'] != 1:
+        return DEFAULT_ASSISTANT_NAME
+    name = value.get('name')
+    name = name.strip() if isinstance(name, str) else ''
+    if not name or len(name) > 12 or any(ord(c) < 32 or ord(c) == 127 for c in name):
+        return DEFAULT_ASSISTANT_NAME
+    return name
+
+
 # Optional integration configuration is user-owned, never bundled with the app.
 def connectors():
     import json

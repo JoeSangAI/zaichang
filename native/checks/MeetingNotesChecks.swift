@@ -254,8 +254,8 @@ private final class NotesDragFixture: NSObject, NSDraggingInfo {
     let redoEvent = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [.command, .shift], timestamp: 0, windowNumber: 0, context: nil, characters: "z", charactersIgnoringModifiers: "z", isARepeat: false, keyCode: 6)!
     let folder = try cache(), view = makeView(folder), controller = view.notesController!, uiStore = controller.store!
     try check(controller.store?.directory.standardizedFileURL.path == folder.standardizedFileURL.path, "UI_fixture_bound_to_synthetic_cache")
-    try check(!controller.expanded && controller.panel.isHidden && controller.toggle.title == "笔记", "notebook_default_collapsed_single_plain_toggle")
-    try check(controller.transportRow?.arrangedSubviews.compactMap { $0 as? NSButton }.count == 1 && !descendants(controller.panel).contains { $0 is NSButton && !$0.isHidden }, "notebook_has_one_transport_switch_and_no_visible_panel_buttons")
+    try check(!controller.expanded && controller.panel.isHidden && controller.toggle.title.isEmpty && controller.toggle.accessibilityLabel()=="笔记", "notebook_default_collapsed_capsule_note_button")
+    try check(view.notesTransportStack?.arrangedSubviews.contains(where:{$0 === controller.toggle})==true && !descendants(controller.panel).contains { $0 is NSButton && !$0.isHidden }, "notebook_has_one_transport_switch_and_no_visible_panel_buttons")
     try check(descendants(controller.panel).compactMap { $0 as? NSTextView }.count == 1 && controller.status.isHidden && controller.editor.isPlaceholderVisible && controller.editor.placeholder == "记点什么…可直接粘贴截图", "notebook_single_text_view_empty_placeholder_no_status")
     try check(try fm.contentsOfDirectory(atPath: folder.path).isEmpty, "opening_empty_notebook_creates_no_files")
     controller.toggle.performClick(nil)

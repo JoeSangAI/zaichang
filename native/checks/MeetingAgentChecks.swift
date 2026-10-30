@@ -71,6 +71,7 @@ import SQLite3
     try check(abs(firstFrame.minX-secondFrame.minX)<1 && firstFrame.minX>=14 && firstFrame.minX<=26,"assistant_short_and_long_replies_share_left_margin")
     try check(userFrame.width>20 && userFrame.minX>firstFrame.minX+20 && userFrame.maxX<layoutPanel.bounds.width-12,"short_user_message_visible_and_right_aligned")
     layoutWindow.orderOut(nil)
+    try check(app.notesController!.store==nil && !app.notesController!.toggle.isEnabled,"premeeting_note_button_disabled_until_meeting_has_storage")
     let first = controller.workspaceID
     controller.panel.chooseTab("笔记"); settle()
     try check(controller.panel.selectedTab == "笔记" && app.notesController?.panel.isHidden == false, "notes_tab_visible")
@@ -180,6 +181,9 @@ import SQLite3
         try bitmap.representation(using: .png, properties: [:])!.write(to: directory.appendingPathComponent(name + ".png"))
     }
     try snapshot("assistant")
+    controller.panel.apply(["workspace_id":controller.workspaceID,"runtime_status":"ready","proactive":true,"listening":true])
+    app.translationSwitch?.isEnabled=true;app.translationSwitch?.state = .on
+    try snapshot("paper-translation-listening-on")
     controller.panel.chooseTab("概览"); settle(); try snapshot("overview")
     controller.panel.chooseTab("助理")
     app.window.setContentSize(NSSize(width: 640, height: 720)); app.layoutWorkspace(); settle()
@@ -200,6 +204,36 @@ import SQLite3
     controller.sync()
     try wait {controller.state["cache_id"] as? String == app.currentCacheID}
     try check(controller.workspaceID == first,"recording_binds_existing_premeeting_conversation")
+    // Exercise an enabled production button after the same meeting owns a notebook.
+    // A premeeting button is intentionally disabled: performClick cannot dispatch it.
+    app.refreshMeetingNotes()
+    let notes=app.notesController!
+    guard let noteStore=notes.store else {throw Failure(code:"capsule_note_fixture_missing_meeting_store")}
+    try FileManager.default.createDirectory(at:noteStore.directory,withIntermediateDirectories:true)
+    _ = try noteStore.create(text:"本场笔记：点击入口不能迁移或复制这份数据。",anchor:nil)
+    notes.bind(app.currentCacheID,reload:true)
+    let originalPanel=notes.panel,originalEditor=notes.editor
+    let noteDataBefore=try noteStore.snapshot().events
+    let noteBytesBefore=try Data(contentsOf:noteStore.notes.appendingPathComponent("notes.jsonl"))
+    controller.panel.chooseTab("助理")
+    if controller.expanded {controller.toggle()}
+    try check(!controller.expanded && controller.panel.isHidden,"capsule_note_fixture_starts_with_right_panel_closed")
+    try check(!notes.toggle.isDescendant(of:app.recordingTransportView!),"assistant_mode_has_no_separate_capsule_note_button")
+    // The toolbar sizes items once; the listening pill must still fit its label.
+    app.showAgentListening(true);app.window.contentView?.superview?.layoutSubtreeIfNeeded()
+    if let pill=app.agentSidebarButton {
+        let needed=(" \(AssistantProfile.name)旁听中" as NSString).size(withAttributes:[.font:NSFont.systemFont(ofSize:12,weight:.semibold)]).width
+        try check(pill.frame.width>=needed+12 && pill.frame.height>=20,"listening_pill_fits_its_label")
+        let frame=app.window.contentView!.superview!
+        if let bitmap=frame.bitmapImageRepForCachingDisplay(in:frame.bounds) {
+            frame.effectiveAppearance.performAsCurrentDrawingAppearance{frame.cacheDisplay(in:frame.bounds,to:bitmap)}
+            try bitmap.representation(using:.png,properties:[:])!.write(to:directory.appendingPathComponent("toolbar-listening.png"))
+        }
+    }
+    app.showAgentListening(false)
+    controller.openNotes();settle()
+    try check(controller.expanded && !controller.panel.isHidden && controller.panel.selectedTab=="笔记" && !originalPanel.isHiddenOrHasHiddenAncestor && app.notesController === notes && notes.panel === originalPanel && notes.editor === originalEditor,"notes_tab_opens_same_notebook")
+    try check(try noteStore.snapshot().events == noteDataBefore && Data(contentsOf:noteStore.notes.appendingPathComponent("notes.jsonl")) == noteBytesBefore && notes.editor.string.contains("本场笔记"),"opening_notes_does_not_write_note_data")
     var stopped = false; controller.shutdown { stopped = true }; try wait { stopped }
     return ["status": "passed", "checks": checks, "live_subscription": live, "capture": false, "keychain": false,
             "state": controller.state, "images": ["assistant.png", "overview.png", "narrow.png"].map { directory.appendingPathComponent($0).path }]
@@ -219,7 +253,18 @@ import SQLite3
                  "messages": [["id": "u", "role": "user", "text": "请看项目背景", "status": "completed"],
                               ["id": "a", "role": "assistant", "text": "这项前提需要核实", "origin": "say", "status": "completed"]]])
     let labels = descendants(panel).compactMap { $0 as? NSTextField }.map { $0.stringValue }
-    guard labels.contains("旁听"), labels.contains("正在旁听") else { throw Failure(code: "listener_labels") }
+    guard labels.contains("\(AssistantProfile.name)正在旁听"), labels.contains("正在旁听") else { throw Failure(code: "listener_labels") }
+    guard panel.composeMarkedTextForChecks("se w") else { throw Failure(code: "composer_placeholder_hidden_while_composing") }
+    // Renaming reaches the panel at once and an empty name restores the default (isolated QA data root).
+    try AssistantProfile.save(name: "阿满")
+    panel.apply(["workspace_id": "listener", "runtime_status": "ready", "proactive": true, "listening": true,
+                 "messages": [["id": "u", "role": "user", "text": "请看项目背景", "status": "completed"],
+                              ["id": "a", "role": "assistant", "text": "这项前提需要核实", "origin": "say", "status": "completed"]]])
+    let renamed = descendants(panel).compactMap { $0 as? NSTextField }.map { $0.stringValue }
+    guard AssistantProfile.load() == "阿满", renamed.contains("阿满正在旁听"), renamed.contains("问阿满，或直接在会上交办") else { throw Failure(code: "assistant_rename_updates_panel") }
+    guard AssistantProfile.validated(String(repeating: "满", count: AssistantProfile.maxNameLength + 1)) == nil, AssistantProfile.validated("a\nb") == nil else { throw Failure(code: "assistant_name_validation") }
+    try AssistantProfile.save(name: "")
+    guard AssistantProfile.name == AssistantProfile.defaultName, AssistantProfile.load() == AssistantProfile.defaultName else { throw Failure(code: "assistant_empty_name_restores_default") }
     let texts = descendants(panel).compactMap { $0 as? NSTextView }.map { $0.string.trimmingCharacters(in: .whitespacesAndNewlines) }
     guard texts.contains("请看项目背景"), texts.contains("这项前提需要核实") else { throw Failure(code: "single_conversation_text") }
     guard !descendants(panel).compactMap({ $0 as? NSButton }).contains(where: { $0.title.contains("任务") }) else { throw Failure(code: "task_list_removed") }

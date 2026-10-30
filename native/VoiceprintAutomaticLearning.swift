@@ -145,13 +145,16 @@ private func automaticHumanLabels(_ ledger:VoiceprintLearningLedger)->[(sample:V
 private func automaticReplay(_ archive:VoiceprintArchive,isCurrent:()->Bool)->VoiceprintAutomaticReplay? {
     guard let ledger=archive.learning else{return VoiceprintAutomaticReplay(correct:0,wrong:0,unknown:0,lostPreviouslyCorrect:0,newlyWrong:0)}
     let labels=automaticHumanLabels(ledger)
+    var tables:[String:VoiceprintReferenceTable]=[:]
     var correct=0,wrong=0,unknown=0,ambiguous=0
     for row in labels {
         guard isCurrent() else{return nil}
         let colliding=labels.filter{voiceSampleOverlap($0.sample,row.sample)}
         let identities=Set(colliding.map(\.personID))
         guard identities.count==1 else{ambiguous+=1;continue}
-        let scores=archive.scores(row.sample.vector,excludingSession:row.sample.session)
+        let table=tables[row.sample.session] ?? VoiceprintReferenceTable(archive:archive,excludingSession:row.sample.session,includingAutomatic:true)
+        tables[row.sample.session]=table
+        let scores=table.scores(row.sample.vector)
         guard let best=scores.first,best.1>=0.60,
               best.1-(scores.dropFirst().first?.1 ?? 0)>=0.14 else{unknown+=1;continue}
         if best.0==row.personID {correct+=1}else{wrong+=1}
@@ -163,13 +166,17 @@ private func automaticReplay(_ archive:VoiceprintArchive,isCurrent:()->Bool)->Vo
 private func automaticReplayComparison(_ before:VoiceprintAutomaticReplay,_ after:VoiceprintAutomaticReplay,beforeArchive:VoiceprintArchive,afterArchive:VoiceprintArchive,isCurrent:()->Bool)->VoiceprintAutomaticReplay? {
     guard let ledger=beforeArchive.learning else{return VoiceprintAutomaticReplay(correct:0,wrong:0,unknown:0,lostPreviouslyCorrect:0,newlyWrong:0)}
     let labels=automaticHumanLabels(ledger)
+    var oldTables:[String:VoiceprintReferenceTable]=[:],freshTables:[String:VoiceprintReferenceTable]=[:]
     var lost=0,newWrong=0
     for row in labels {
         guard isCurrent() else{return nil}
         let colliding=labels.filter{voiceSampleOverlap($0.sample,row.sample)}
         guard Set(colliding.map(\.personID)).count==1 else{continue}
-        let old=beforeArchive.scores(row.sample.vector,excludingSession:row.sample.session)
-        let fresh=afterArchive.scores(row.sample.vector,excludingSession:row.sample.session)
+        let session=row.sample.session
+        let oldTable=oldTables[session] ?? VoiceprintReferenceTable(archive:beforeArchive,excludingSession:session,includingAutomatic:true)
+        let freshTable=freshTables[session] ?? VoiceprintReferenceTable(archive:afterArchive,excludingSession:session,includingAutomatic:true)
+        oldTables[session]=oldTable;freshTables[session]=freshTable
+        let old=oldTable.scores(row.sample.vector),fresh=freshTable.scores(row.sample.vector)
         func classification(_ scores:[(String,Double)])->String? {
             guard let top=scores.first,top.1>=0.60,top.1-(scores.dropFirst().first?.1 ?? 0)>=0.14 else{return nil}
             return top.0
@@ -211,10 +218,10 @@ func proposeAutomaticVoiceprintContribution(_ old:VoiceprintArchive,candidate:Vo
     }}
     let allManual=ledger.baseline.flatMap(\.samples)+activeHuman.flatMap(\.samples)
     guard !samples.contains(where:{candidateSample in allManual.contains(where:{voiceSampleOverlap($0,candidateSample)})}) else{return rejectedAutomatic(old,reason:"manual_overlap",before:before,isCurrent:isCurrent)}
-    let humanOnly=VoiceprintArchive(schema:1,partition:old.partition,inputKind:old.inputKind,revision:old.revision,people:old.people,learning:nil)
+    let humanOnly=VoiceprintReferenceTable(archive:VoiceprintArchive(schema:1,partition:old.partition,inputKind:old.inputKind,revision:old.revision,people:old.people,learning:nil),excludingSession:candidate.key.session,includingAutomatic:false)
     for sample in samples {
         guard isCurrent() else{return rejectedAutomatic(old,reason:"cancelled",before:before,isCurrent:isCurrent)}
-        let scores=humanOnly.scores(sample.vector,excludingSession:candidate.key.session,includingAutomatic:false)
+        let scores=humanOnly.scores(sample.vector)
         guard let top=scores.first,top.0==candidate.personID,top.1>=0.60,
               top.1-(scores.dropFirst().first?.1 ?? 0)>=0.14 else{return rejectedAutomatic(old,reason:"human_match_gate",before:before,isCurrent:isCurrent)}
     }

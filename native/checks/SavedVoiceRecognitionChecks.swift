@@ -322,3 +322,57 @@ func savedVoiceRecognitionReview(resultURL:URL,archiveURL:URL)throws->[String:An
     try check(try Data(contentsOf:folder.appendingPathComponent("mic-000000.pcm"))==pcm,"automatic_service_never_changes_original_audio")
     return checks
 }
+
+// Read-only replay of saved-voice naming on an isolated copy of a real meeting.
+// One view starts without any human label (the state right after recording);
+// the other restores the saved human labels as ground truth. The same saved
+// features go through the production matcher and naming reconciliation, so the
+// counts show what a meeting would have displayed, without touching originals.
+@MainActor func savedVoiceNamingReplay(cacheID:String,cacheRoot:URL,featuresURL:URL,archiveURL:URL)throws->[String:Any] {
+    guard Credential.offline,let root=Bundle.main.object(forInfoDictionaryKey:"AdapterRoot") as? String,
+          UUID(uuidString:cacheID) != nil,cacheRoot.standardizedFileURL.path.hasPrefix(root+"/.runtime/") else{throw Failure(code:"saved_naming_replay_scope")}
+    guard let meeting=try cachedMeetings(in:cacheRoot,recoverInterrupted:false).first(where:{$0.id==cacheID}) else{throw Failure(code:"saved_naming_replay_missing")}
+    let events=try meeting.events(),metadata=try meeting.metadata()
+    guard let session=metadata["session"] as? String else{throw Failure(code:"saved_naming_replay_session")}
+    let result=try JSONDecoder().decode(SavedVoiceRecognitionResult.self,from:SavedVoiceRecognition.read(featuresURL,limit:2*1024*1024))
+    let archive=try JSONDecoder().decode(VoiceprintArchive.self,from:SavedVoiceRecognition.read(archiveURL,limit:16*1024*1024)).validated(domain:result.inputKind)
+    guard result.session==session else{throw Failure(code:"saved_naming_replay_session")}
+    _ = NSApplication.shared;NSApp.setActivationPolicy(.prohibited)
+    func view(human:Bool)throws->Delegate {
+        let view=Delegate();view.previewRenderOnly=true;view.applicationDidFinishLaunching(Notification(name:NSApplication.didFinishLaunchingNotification))
+        view.deferPresentation=true;view.activeSession=session;view.phase.phase = .stopped
+        for event in events {view.receive(event)}
+        let names=meeting.directory.appendingPathComponent("session-names.json")
+        if human,FileManager.default.fileExists(atPath:names.path) {try view.naming.restore(Data(contentsOf:names),session:session,events:events,directory:meeting.directory)}
+        view.naming.validateVoiceprintArchive(archive)
+        return view
+    }
+    let automatic=try view(human:false),truth=try view(human:true),guarded=try view(human:true)
+    var matcher=VoiceprintMatcher(archive:archive);matcher.reset(session:session);matcher.importSavedEvidence(result.evidence)
+    func label(_ key:SessionSpeakerKey)->String {key.source+"/"+key.identity+"/"+String(key.epoch.prefix(8))}
+    var groups:[[String:Any]]=[]
+    for key in Set(result.evidence.map(\.key)).sorted(by:{label($0)<label($1)}) {
+        let candidate=matcher.suggestion(key),conflict=matcher.conflictingEvidence(key)
+        _ = automatic.naming.reconcileAutoVoiceprint(key:key,candidate:candidate,conflictingEvidence:conflict)
+        _ = guarded.naming.reconcileAutoVoiceprint(key:key,candidate:candidate,conflictingEvidence:conflict)
+        groups.append(["key":label(key),"samples":result.evidence.filter{$0.key==key}.count,"candidate":candidate?.name as Any? ?? NSNull(),
+                       "whole_group":candidate?.groupConsistent as Any? ?? NSNull(),"conflict":conflict,
+                       "displayed_group_name":automatic.naming.autoName(for:key)?.name as Any? ?? NSNull(),
+                       "span_suggestion":automatic.naming.voiceSuggestion(for:key)?.name as Any? ?? NSNull(),
+                       "manual_name":truth.naming.name(speaker:key) as Any? ?? NSNull()])
+    }
+    var counts=["correct":0,"wrong":0,"unknown":0,"named_without_label":0,"unlabeled":0],chars=counts,overwritten=0,wrong:[[String:Any]]=[]
+    for id in automatic.sequence {
+        guard let item=automatic.segments[id] else{continue}
+        for (rowID,row) in automatic.spokenRows(id,item) {
+            let predicted=automatic.naming.displayName(segment:rowID)?.value,label=truth.naming.displayName(segment:rowID)
+            let expected=label?.origin == .manual ? label?.value:nil,size=(row["text"] as? String ?? "").count
+            let bucket=expected==nil ? (predicted==nil ? "unlabeled":"named_without_label"):predicted==nil ? "unknown":predicted==expected ? "correct":"wrong"
+            counts[bucket]!+=1;chars[bucket]!+=size
+            if bucket=="wrong",wrong.count<20 {wrong.append(["id":rowID,"predicted":predicted!,"expected":expected!,"text":String((row["text"] as? String ?? "").prefix(40))])}
+            if label?.origin == .manual,guarded.naming.displayName(segment:rowID)?.value != label?.value {overwritten+=1}
+        }
+    }
+    return ["cache_id":cacheID,"session":session,"groups":groups,"rows":counts,"chars":chars,"wrong_examples":wrong,"manual_overwritten":overwritten,
+            "archive_revision":archive.revision,"capture":false,"cloud":false,"original_files_modified":false]
+}

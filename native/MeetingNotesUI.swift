@@ -207,7 +207,6 @@ final class MeetingNotesController: NSObject, NSTextViewDelegate {
     let retryLoadButton = NSButton(title: "重新读取笔记", target: nil, action: nil)
     let toggle = NSButton(title: "笔记", target: nil, action: nil)
     var panelWidth: NSLayoutConstraint!
-    var transportRow: NSStackView?
     var expanded = false
     var embeddedInAssistant = false
     var lastError: String?
@@ -488,6 +487,9 @@ final class MeetingNotesController: NSObject, NSTextViewDelegate {
         status.stringValue = message; status.isHidden = false; retryLoadButton.isHidden = false
     }
     @objc func togglePanel() {
+        if embeddedInAssistant,let agent=owner?.agentController {
+            agent.openNotes();owner?.window.makeFirstResponder(editor);return
+        }
         expanded.toggle(); (owner?.workspaceOwner ?? owner)?.notesExpanded = expanded; applyExpansion()
         if expanded { owner?.window.makeFirstResponder(editor) } else { flushPendingChanges() }
     }
@@ -548,14 +550,6 @@ extension Delegate {
         transcript.heightAnchor.constraint(equalTo: body.heightAnchor).isActive = true
         let height = controller.panel.heightAnchor.constraint(equalTo: body.heightAnchor); height.priority = .defaultHigh; height.isActive = true
         controller.bind(currentCacheID); return body
-    }
-    func notesTransport(_ transport: NSView) -> NSView {
-        guard let notesController else { return transport }
-        // The switch sits under the capsule so it never takes width from the
-        // capsule's timer at narrow window sizes.
-        let row = NSStackView(views: [transport, notesController.toggle]); row.orientation = .vertical; row.spacing = 4; row.alignment = .centerX
-        transport.widthAnchor.constraint(equalTo: row.widthAnchor).isActive = true
-        notesController.transportRow = row; return row
     }
     func refreshMeetingNotes() {
         guard let controller = notesController else { return }

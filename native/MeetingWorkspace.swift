@@ -102,7 +102,10 @@ extension Delegate {
         let background=MeetingSidebarSurface();background.translatesAutoresizingMaskIntoConstraints=false;sidebar.addSubview(background);pin(background,to:sidebar)
         let column=stack(.vertical,spacing:10);column.alignment = .leading;column.distribution = .fill;column.translatesAutoresizingMaskIntoConstraints=false;sidebar.addSubview(column)
         NSLayoutConstraint.activate([column.leadingAnchor.constraint(equalTo:sidebar.leadingAnchor,constant:14),column.trailingAnchor.constraint(equalTo:sidebar.trailingAnchor,constant:-14),column.topAnchor.constraint(equalTo:sidebar.topAnchor,constant:14),column.bottomAnchor.constraint(equalTo:sidebar.bottomAnchor,constant:-14)])
-        let new=ImmediateButton(title:"新对话",target:self,action:#selector(beginNewMeeting));new.bezelStyle = .rounded;new.controlSize = .regular;new.font = .systemFont(ofSize:12,weight:.medium);new.image=NSImage(systemSymbolName:"plus",accessibilityDescription:nil)?.withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize:13,weight:.medium));new.imagePosition = .imageLeading;new.heightAnchor.constraint(equalToConstant:32).isActive=true;new.setAccessibilityLabel("新对话");newButton=new;column.addArrangedSubview(new)
+        let new=ImmediateButton(title:"新会议",target:self,action:#selector(beginNewMeeting));new.bezelStyle = .rounded;new.controlSize = .regular;new.font = .systemFont(ofSize:12,weight:.medium);new.image=NSImage(systemSymbolName:"plus",accessibilityDescription:nil)?.withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize:13,weight:.medium));new.imagePosition = .imageLeading;new.heightAnchor.constraint(equalToConstant:32).isActive=true;new.setAccessibilityLabel("新会议，Command N");new.alignment = .left
+        let shortcut=label("⌘N",size:12);shortcut.textColor=MeetingVisualStyle.muted;shortcut.translatesAutoresizingMaskIntoConstraints=false;new.addSubview(shortcut)
+        NSLayoutConstraint.activate([shortcut.trailingAnchor.constraint(equalTo:new.trailingAnchor,constant:-10),shortcut.centerYAnchor.constraint(equalTo:new.centerYAnchor)])
+        newButton=new;column.addArrangedSubview(new)
         librarySearch=NSSearchField();librarySearch.placeholderString="搜索会议";librarySearch.delegate=self;librarySearch.controlSize = .regular;librarySearch.focusRingType = .default;librarySearch.setAccessibilityLabel("搜索会议标题和原文");librarySearch.isHidden=true;column.addArrangedSubview(librarySearch)
         liveReturn=ImmediateButton(title:"返回当前记录",target:self,action:#selector(returnToCurrent));liveReturn.bezelStyle = .inline;column.addArrangedSubview(liveReturn)
         libraryStatus=label("会议记录",size:11,weight:.semibold);libraryStatus.textColor = MeetingVisualStyle.muted;libraryStatus.lineBreakMode = .byTruncatingTail
@@ -110,7 +113,7 @@ extension Delegate {
         let libraryHeading=stack(.horizontal,spacing:4);libraryStatus.setContentHuggingPriority(.defaultLow,for:.horizontal);libraryHeading.addArrangedSubview(libraryStatus);libraryHeading.addArrangedSubview(libraryRetryButton);column.addArrangedSubview(libraryHeading)
         libraryTable=MeetingLibraryTableView();let tableColumn=NSTableColumn(identifier:NSUserInterfaceItemIdentifier("meeting"));libraryTable.addTableColumn(tableColumn);libraryTable.headerView=nil;libraryTable.rowHeight=72;libraryTable.intercellSpacing=NSSize(width:0,height:2);libraryTable.backgroundColor = .clear;libraryTable.selectionHighlightStyle = .regular;libraryTable.delegate=self;libraryTable.dataSource=self;libraryTable.setAccessibilityLabel("会议列表");installLibraryContextMenu()
         let listScroll=NSScrollView();listScroll.documentView=libraryTable;listScroll.hasVerticalScroller=true;listScroll.autohidesScrollers=true;listScroll.drawsBackground=false;listScroll.heightAnchor.constraint(greaterThanOrEqualToConstant:80).isActive=true;column.addArrangedSubview(listScroll)
-        let settings=ImmediateButton(title:"设置",target:self,action:#selector(showSettings));settings.bezelStyle = .inline;settings.image=NSImage(systemSymbolName:"gearshape",accessibilityDescription:nil);settings.imagePosition = .imageLeading;let utilities=stack(.horizontal,spacing:10);utilities.addArrangedSubview(makeLibraryRecycleButton());let utilitySpacer=NSView();utilitySpacer.setContentHuggingPriority(.defaultLow,for:.horizontal);utilities.addArrangedSubview(utilitySpacer);utilities.addArrangedSubview(settings);column.addArrangedSubview(utilities)
+        let settings=ImmediateButton(title:"设置",target:self,action:#selector(showSettings));settings.bezelStyle = .inline;settings.image=NSImage(systemSymbolName:"gearshape",accessibilityDescription:nil);settings.imagePosition = .imageLeading;settings.contentTintColor=MeetingVisualStyle.ink;settings.font = .systemFont(ofSize:12);let utilities=stack(.horizontal,spacing:10);utilities.addArrangedSubview(makeLibraryRecycleButton());let utilitySpacer=NSView();utilitySpacer.setContentHuggingPriority(.defaultLow,for:.horizontal);utilities.addArrangedSubview(utilitySpacer);utilities.addArrangedSubview(settings);column.addArrangedSubview(utilities)
         for row in column.arrangedSubviews {row.widthAnchor.constraint(equalTo:column.widthAnchor).isActive=true}
         currentDocument=makeDocumentView();documentHost.addSubview(currentDocument);pin(currentDocument,to:documentHost)
         let divider=MeetingSidebarDivider();divider.translatesAutoresizingMaskIntoConstraints=false;root.addSubview(divider);sidebarDivider=divider
@@ -127,35 +130,38 @@ extension Delegate {
         NSLayoutConstraint.activate([main.leadingAnchor.constraint(equalTo:view.leadingAnchor,constant:26),main.trailingAnchor.constraint(equalTo:view.trailingAnchor,constant:-26),main.topAnchor.constraint(equalTo:view.topAnchor,constant:22),main.bottomAnchor.constraint(equalTo:view.bottomAnchor,constant:-12)])
         let header=stack(.horizontal,spacing:16);header.alignment = .centerY;header.distribution = .fill
         let words=stack(.vertical,spacing:7);words.alignment = .leading;words.distribution = .fill;words.setContentHuggingPriority(.defaultLow,for:.horizontal)
-        meetingTitleField=NSTextField();meetingTitleField.isBordered=false;meetingTitleField.drawsBackground=false;meetingTitleField.focusRingType = .none;meetingTitleField.font = .systemFont(ofSize:20,weight:.semibold);meetingTitleField.textColor=MeetingVisualStyle.ink;meetingTitleField.stringValue=meetingTitle;meetingTitleField.placeholderString="会议名称";meetingTitleField.delegate=self;meetingTitleField.lineBreakMode = .byTruncatingTail;meetingTitleField.setAccessibilityLabel("会议名称");words.addArrangedSubview(meetingTitleField)
+        let eyebrow=label("新会议 · 实时转写",size:13);eyebrow.textColor=MeetingVisualStyle.muted;meetingEyebrow=eyebrow;words.addArrangedSubview(eyebrow)
+        meetingTitleField=NSTextField();meetingTitleField.isBordered=false;meetingTitleField.drawsBackground=false;meetingTitleField.focusRingType = .none;meetingTitleField.font = MeetingVisualStyle.titleFont();meetingTitleField.textColor=MeetingVisualStyle.ink;meetingTitleField.stringValue=meetingTitle;meetingTitleField.placeholderString="会议名称";meetingTitleField.delegate=self;meetingTitleField.lineBreakMode = .byTruncatingTail;meetingTitleField.setAccessibilityLabel("会议名称");words.addArrangedSubview(meetingTitleField)
         heading=label("准备就绪",size:12);heading.textColor = MeetingVisualStyle.muted;heading.lineBreakMode = .byTruncatingTail;heading.setContentCompressionResistancePriority(.defaultLow,for:.horizontal);header.addArrangedSubview(words)
-        action=RecordingPrimaryButton(title:"开始录音",target:self,action:#selector(primaryWorkspaceAction));action.bezelStyle = .rounded;action.controlSize = .large;action.isBordered=false;action.wantsLayer=true;action.layer?.cornerRadius=12;action.widthAnchor.constraint(equalToConstant:48).isActive=true;action.heightAnchor.constraint(equalToConstant:48).isActive=true;action.font = .systemFont(ofSize:14,weight:.semibold);action.setAccessibilityLabel("开始录音或继续录音");(action as? RecordingPrimaryButton)?.circularTransport=true
-        main.addArrangedSubview(header)
+        action=RecordingPrimaryButton(title:"开始录音",target:self,action:#selector(primaryWorkspaceAction));action.bezelStyle = .rounded;action.controlSize = .large;action.isBordered=false;action.wantsLayer=true;action.layer?.cornerRadius=12;action.widthAnchor.constraint(equalToConstant:46).isActive=true;action.heightAnchor.constraint(equalToConstant:46).isActive=true;action.font = .systemFont(ofSize:14,weight:.semibold);action.setAccessibilityLabel("开始录音或继续录音");(action as? RecordingPrimaryButton)?.circularTransport=true
+        main.addArrangedSubview(header);readingAlignedRows.append(header)
         historyLiveButton=ImmediateButton(title:"返回当前记录",target:self,action:#selector(returnFromHistory));historyLiveButton.bezelStyle = .inline;historyLiveButton.lineBreakMode = .byTruncatingTail;historyLiveButton.isHidden=true;main.addArrangedSubview(historyLiveButton)
         let tools=stack(.horizontal,spacing:10);tools.distribution = .fill;tools.alignment = .centerY
-        tools.addArrangedSubview(heading)
         let statusSpacer=NSView();statusSpacer.setContentHuggingPriority(.defaultLow,for:.horizontal);tools.addArrangedSubview(statusSpacer)
         tools.addArrangedSubview(makeTranslationControl())
         timelineToggle=ImmediateButton(checkboxWithTitle:"人物时间线",target:self,action:#selector(toggleSpeakerRanges));timelineToggle.controlSize = .small;timelineToggle.isHidden=true
         let peopleButton=ImmediateButton(title:"发言人",target:self,action:#selector(showSpeakerReview));speakerReviewButton=peopleButton;peopleButton.bezelStyle = .inline;peopleButton.font = .systemFont(ofSize:12);peopleButton.controlSize = .small;peopleButton.contentTintColor=MeetingVisualStyle.ink;peopleButton.image=NSImage(systemSymbolName:"person.2",accessibilityDescription:"按发言人查看与修改");peopleButton.imagePosition = .imageLeading;peopleButton.setAccessibilityLabel("按发言人查看与修改");tools.addArrangedSubview(peopleButton)
         let voice=ImmediateButton(title:"",target:self,action:#selector(showQuickVoiceConfirmation));voice.bezelStyle = .inline;voice.controlSize = .small;voice.contentTintColor=MeetingVisualStyle.muted;voice.isHidden=true;voice.lineBreakMode = .byTruncatingTail;voice.widthAnchor.constraint(lessThanOrEqualToConstant:180).isActive=true;voiceCandidateButton=voice;tools.addArrangedSubview(voice)
         let archive=makeMeetingArchiveButton();archive.controlSize = .small;archiveButton=archive
-        latest=ImmediateButton(title:"回到最新",target:self,action:#selector(goLatest));latest.bezelStyle = .inline;latest.isHidden=true;tools.addArrangedSubview(latest);main.addArrangedSubview(tools)
+        latest=ImmediateButton(title:"回到最新",target:self,action:#selector(goLatest));latest.bezelStyle = .inline;latest.isHidden=true;tools.addArrangedSubview(latest);main.addArrangedSubview(tools);readingAlignedRows.append(tools)
         main.addArrangedSubview(makeRecordingDashboard())
         let doc=NSView();doc.translatesAutoresizingMaskIntoConstraints=false
         let transcriptScroll=MeetingTranscriptScroll();transcriptScroll.manualScroll={ [weak self] in self?.cancelTranscriptReadingRestore() };scroll=transcriptScroll;scroll.automaticallyAdjustsContentInsets=false;scroll.hasVerticalScroller=true;scroll.autohidesScrollers=true;scroll.drawsBackground=true;scroll.backgroundColor = MeetingVisualStyle.surface;scroll.findBarPosition = .aboveContent;doc.addSubview(scroll);pin(scroll,to:doc)
         let transcriptView=MeetingTranscriptTextView(frame:NSRect(x:0,y:0,width:700,height:400));transcriptView.manualNavigation={ [weak self] in self?.cancelTranscriptReadingRestore() };output=transcriptView;output.backgroundColor=MeetingVisualStyle.surface;output.textColor=MeetingVisualStyle.ink;output.isEditable=false;output.isSelectable=true;output.isRichText=true;output.delegate=self;output.isVerticallyResizable=true;output.isHorizontallyResizable=false;output.autoresizingMask=[.width];output.textContainerInset=NSSize(width:0,height:12);output.textContainer?.widthTracksTextView=true;output.textContainer?.containerSize=NSSize(width:700,height:CGFloat.greatestFiniteMagnitude);output.maxSize=NSSize(width:CGFloat.greatestFiniteMagnitude,height:CGFloat.greatestFiniteMagnitude);output.usesFindBar=true;output.isIncrementalSearchingEnabled=true;output.linkTextAttributes=[.underlineStyle:0];output.setAccessibilityLabel("会议原文");scroll.documentView=output
         let emptyLabel=MeetingEmptyLabel(labelWithString:"开始录音，文字会显示在这里");empty=emptyLabel;empty.font = .systemFont(ofSize:13);empty.textColor=MeetingVisualStyle.muted;empty.maximumNumberOfLines=0;empty.lineBreakMode = .byWordWrapping;empty.alignment = .center;empty.setContentCompressionResistancePriority(.defaultLow,for:.horizontal)
         let mark=MeetingVoiceMark();emptyLabel.voiceMark=mark;mark.widthAnchor.constraint(equalToConstant:38).isActive=true;mark.heightAnchor.constraint(equalToConstant:38).isActive=true
-        let emptyGroup=NSStackView(views:[mark,empty]);emptyGroup.orientation = .vertical;emptyGroup.alignment = .centerX;emptyGroup.spacing=10;emptyGroup.translatesAutoresizingMaskIntoConstraints=false;doc.addSubview(emptyGroup)
+        let files=NSButton(title:"打开会议文件",target:self,action:#selector(openEmptyMeetingFiles));files.bezelStyle = .rounded;files.isHidden=true;emptyFilesButton=files
+        let transcribe=NSButton(title:"补转剩余录音",target:self,action:#selector(transcribeEmptyMeeting));transcribe.bezelStyle = .rounded;transcribe.isHidden=true;emptyTranscribeButton=transcribe
+        let emptyGroup=NSStackView(views:[mark,empty,files,transcribe]);emptyGroup.orientation = .vertical;emptyGroup.alignment = .centerX;emptyGroup.spacing=10;emptyGroup.translatesAutoresizingMaskIntoConstraints=false;doc.addSubview(emptyGroup)
         NSLayoutConstraint.activate([emptyGroup.centerXAnchor.constraint(equalTo:doc.centerXAnchor),emptyGroup.centerYAnchor.constraint(equalTo:doc.centerYAnchor),emptyGroup.widthAnchor.constraint(lessThanOrEqualTo:doc.widthAnchor,constant:-24)])
         doc.heightAnchor.constraint(greaterThanOrEqualToConstant:80).isActive=true;main.addArrangedSubview(assistantEnabled ? doc : attachMeetingNotes(to:doc))
-        main.addArrangedSubview(assistantEnabled ? makeRecordingTransport() : notesTransport(makeRecordingTransport()))
+        main.addArrangedSubview(makeRecordingTransport())
         // Waveform plots can shrink with the document; their preferred 180pt
         // widths must not enlarge the window's content beyond its visible frame.
         for level in [microphoneLevel,computerLevel].compactMap({$0}) {
             level.setContentCompressionResistancePriority(.defaultLow,for:.horizontal)
-            level.widthAnchor.constraint(greaterThanOrEqualToConstant:assistantEnabled ? 30 : 96).isActive=true
+            // Icon plus at least five bars; the capsule also holds the timer and notes now.
+            level.widthAnchor.constraint(greaterThanOrEqualToConstant:assistantEnabled ? 30 : 48).isActive=true
         }
         let separator=NSBox();separator.boxType = .separator;separator.isHidden=true
         let footer=stack(.horizontal,spacing:10)
@@ -208,8 +214,8 @@ extension Delegate {
             action.toolTip=owner.recordingBusy ? "先保存「"+owner.meetingTitle+"」，再继续这场会议录音":"继续这场会议录音"
         } else {
             newButton?.isEnabled = !newMeetingRequested && phase.phase != .connecting && !preparingModels && !credentialReadJob.waiting && !meetingDeletionBusy && !audioAssetOperationBusy
-            newButton?.toolTip="保存当前对话并开始一场新对话"
-            newButton?.title="新对话"
+            newButton?.toolTip="保存当前会议并开始一场新会议"
+            newButton?.title="新会议"
             historyButton?.isEnabled=true
             liveReturn.isHidden=true
             liveReturn.title="返回当前会议"
@@ -234,7 +240,7 @@ extension Delegate {
         source.toolTip=source.stringValue
         timelineToggle?.state=showsSpeakerRanges ? .on:.off
         updateRecordingDashboard()
-        if !isHistoryReader {updateLibraryManagement()}
+        if !isHistoryReader {updateLibraryManagement();refreshLibraryRecordingRow()}
         if !isHistoryReader {scheduleMeetingArchivePreparationIfEligible(trigger:"workspace_refresh")}
         historyReader?.updateWorkspacePresentation()
     }
@@ -265,7 +271,7 @@ extension Delegate {
             window.endEditing(for:meetingTitleField)
             if meetingTitleField.currentEditor() != nil { _ = window.makeFirstResponder(nil) }
             guard meetingTitleField.currentEditor() == nil else {
-                diagnostic.stringValue="请先完成会议名称编辑，再新建对话";updateUI();return
+                diagnostic.stringValue="请先完成会议名称编辑，再新建会议";updateUI();return
             }
         }
         returnToCurrent();cacheReadJob.cancel();libraryOpenJob.cancel()
@@ -446,20 +452,49 @@ extension Delegate {
             }}){[weak self] result in guard let self=self,self.librarySearch.stringValue.trimmingCharacters(in:.whitespacesAndNewlines)==query else{return};switch result {case .success(let items):self.libraryVisible=items;self.renderLibraryList();case .failure:self.libraryStatus.stringValue="搜索未完成，请重试"}}
         };libraryFilterWork=work;DispatchQueue.main.asyncAfter(deadline:.now()+0.25,execute:work)
     }
-    func renderLibraryList(){if recordingBusy,let id=currentCacheID,let index=libraryVisible.firstIndex(where:{$0.id==id}) {let current=libraryVisible.remove(at:index);libraryVisible.insert(current,at:0)};librarySelectionChanging=true;libraryTable.reloadData();let id=historyReader?.currentCacheID ?? currentCacheID;if let row=libraryVisible.firstIndex(where:{$0.id==id}) {libraryTable.selectRowIndexes(IndexSet(integer:row),byExtendingSelection:false)};librarySelectionChanging=false;libraryStatus.stringValue=libraryVisible.isEmpty ? (librarySearch.stringValue.isEmpty ? "还没有会议记录":"没有找到会议") : "会议记录 · \(libraryVisible.count)";libraryRetryButton?.isHidden=true;updateLibraryManagement()}
+    func renderLibraryList(){libraryVisible.sort{$0.date>$1.date};if recordingBusy,let id=currentCacheID,let index=libraryVisible.firstIndex(where:{$0.id==id}) {let current=libraryVisible.remove(at:index);libraryVisible.insert(current,at:0)};librarySelectionChanging=true;libraryTable.reloadData();let id=historyReader?.currentCacheID ?? currentCacheID;if let row=libraryVisible.firstIndex(where:{$0.id==id}) {libraryTable.selectRowIndexes(IndexSet(integer:row),byExtendingSelection:false)};librarySelectionChanging=false;libraryStatus.stringValue=libraryVisible.isEmpty ? (librarySearch.stringValue.isEmpty ? "还没有会议记录":"没有找到会议") : "会议记录 · \(libraryVisible.count)";libraryRetryButton?.isHidden=true;updateLibraryManagement()}
+    func refreshLibraryRecordingRow() {
+        guard let table=libraryTable,let row=libraryVisible.firstIndex(where:{$0.id==currentCacheID}),
+              let cell=table.view(atColumn:0,row:row,makeIfNecessary:false) else{return}
+        if let status=cell.subviews.first(where:{$0.identifier==NSUserInterfaceItemIdentifier("library-recording-status")}) as? NSTextField {
+            if recordingBusy {status.stringValue=(phase.phase == .recording ? "● 录音中 · ":phase.phase == .paused ? "已暂停 · ":"正在整理 · ")+phase.time;status.textColor=phase.phase == .recording ? MeetingVisualStyle.accent:MeetingVisualStyle.muted}
+            else {table.reloadData(forRowIndexes:IndexSet(integer:row),columnIndexes:IndexSet(integer:0))}
+        } else if recordingBusy {table.reloadData(forRowIndexes:IndexSet(integer:row),columnIndexes:IndexSet(integer:0))}
+    }
+    func libraryGroup(at row:Int)->String {
+        guard libraryVisible.indices.contains(row) else{return ""}
+        return MeetingLibraryDate.group(libraryVisible[row].date)
+    }
+    func tableView(_ tableView:NSTableView,heightOfRow row:Int)->CGFloat {row==0 || libraryGroup(at:row-1) != libraryGroup(at:row) ? 100:76}
     func numberOfRows(in tableView:NSTableView)->Int {libraryVisible.count}
-    func tableView(_ tableView:NSTableView,rowViewForRow row:Int)->NSTableRowView? {MeetingListRow()}
+    func tableView(_ tableView:NSTableView,rowViewForRow row:Int)->NSTableRowView? {let view=MeetingListRow();view.sectionInset=row==0 || libraryGroup(at:row-1) != libraryGroup(at:row) ? 24:0;return view}
     func tableView(_ tableView:NSTableView,viewFor tableColumn:NSTableColumn?,row:Int)->NSView? {
         guard libraryVisible.indices.contains(row) else{return nil};let item=libraryVisible[row];let cell=MeetingLibraryCellView();cell.libraryTable=tableView;let title=label(item.id==currentCacheID ? meetingTitle:item.displayTitle,size:13,weight:.semibold);title.textColor=MeetingVisualStyle.ink;title.lineBreakMode = .byTruncatingTail;title.maximumNumberOfLines=1
         let mode=item.recordingMode == "local_only" ? "仅录音":item.recordingMode == "record_and_transcribe" ? "录音并转写":"模式未记录"
-        let icon=NSImageView(image:NSImage(systemSymbolName:item.recordingMode == "local_only" ? "mic":item.recordingMode == "record_and_transcribe" ? "text.bubble":"doc",accessibilityDescription:mode)!)
-        icon.contentTintColor=MeetingVisualStyle.muted;icon.translatesAutoresizingMaskIntoConstraints=false;icon.toolTip=mode;icon.setAccessibilityLabel(mode);cell.addSubview(icon)
+        let group=libraryGroup(at:row),first=row==0 || libraryGroup(at:row-1) != group
+        let top:CGFloat=first ? 33:9
+        if first {
+            let section=label(group,size:12,weight:.semibold);section.textColor=MeetingVisualStyle.muted;section.translatesAutoresizingMaskIntoConstraints=false;cell.addSubview(section)
+            NSLayoutConstraint.activate([section.leadingAnchor.constraint(equalTo:cell.leadingAnchor,constant:8),section.topAnchor.constraint(equalTo:cell.topAnchor,constant:4)])
+        }
         let duration=MeetingLibraryDate.duration(item.durationSeconds)
-        let savedState=item.recordingMode == "local_only" ? " · 仅录音":item.pendingBytes>0 ? " · 待转写":""
-        let subtitle=label(MeetingLibraryDate.label(item.date)+" · "+(item.id==currentCacheID && recordingBusy ? phase.time:duration+savedState),size:11);subtitle.textColor = MeetingVisualStyle.muted;subtitle.lineBreakMode = .byTruncatingTail;subtitle.maximumNumberOfLines=1
-        let participants=MeetingParticipantLabel(names:libraryParticipants[item.id] ?? []);participants.translatesAutoresizingMaskIntoConstraints=false;cell.addSubview(participants)
+        let names=libraryParticipants[item.id] ?? []
+        // Processing state outranks the people count: an unfinished transcript is the row's actionable fact.
+        // People are listed on the next line, so only a processing state is added here.
+        let rowState=item.recordingMode == "local_only" ? " · 仅录音":item.pendingBytes>0 ? " · 待转写":""
+        // The group header already says 今天/本周, so the row keeps only what it adds.
+        let dateText=MeetingLibraryDate.label(item.date),groupPrefix=group+" "
+        let subtitle=label((dateText.hasPrefix(groupPrefix) ? String(dateText.dropFirst(groupPrefix.count)):dateText)+" · "+duration+rowState,size:12);subtitle.textColor=MeetingVisualStyle.muted;subtitle.lineBreakMode = .byTruncatingTail;subtitle.maximumNumberOfLines=1
+        let participants=MeetingParticipantLabel(names:names);participants.translatesAutoresizingMaskIntoConstraints=false;cell.addSubview(participants)
         for view in [title,subtitle] {view.isSelectable=false;view.isEditable=false;view.setAccessibilityLabel(view.stringValue);view.translatesAutoresizingMaskIntoConstraints=false;cell.addSubview(view)}
-        NSLayoutConstraint.activate([icon.leadingAnchor.constraint(equalTo:cell.leadingAnchor,constant:8),icon.widthAnchor.constraint(equalToConstant:14),icon.heightAnchor.constraint(equalToConstant:14),icon.centerYAnchor.constraint(equalTo:title.centerYAnchor),title.leadingAnchor.constraint(equalTo:icon.trailingAnchor,constant:6),title.trailingAnchor.constraint(equalTo:cell.trailingAnchor,constant:-8),title.topAnchor.constraint(equalTo:cell.topAnchor,constant:9),subtitle.leadingAnchor.constraint(equalTo:title.leadingAnchor),subtitle.trailingAnchor.constraint(equalTo:title.trailingAnchor),subtitle.topAnchor.constraint(equalTo:title.bottomAnchor,constant:3),participants.leadingAnchor.constraint(equalTo:title.leadingAnchor),participants.trailingAnchor.constraint(equalTo:title.trailingAnchor),participants.topAnchor.constraint(equalTo:subtitle.bottomAnchor,constant:3),participants.heightAnchor.constraint(equalToConstant:16)])
+        let isCurrent=item.id==currentCacheID && recordingBusy
+        participants.isHidden=isCurrent
+        if isCurrent {
+            let status=label((phase.phase == .recording ? "● 录音中 · ":phase.phase == .paused ? "已暂停 · ":"正在整理 · ")+phase.time,size:12,weight:.medium)
+            status.identifier=NSUserInterfaceItemIdentifier("library-recording-status");status.font = .monospacedDigitSystemFont(ofSize:12,weight:.medium);status.textColor=phase.phase == .recording ? MeetingVisualStyle.accent:MeetingVisualStyle.muted;status.translatesAutoresizingMaskIntoConstraints=false;cell.addSubview(status)
+            NSLayoutConstraint.activate([status.leadingAnchor.constraint(equalTo:cell.leadingAnchor,constant:8),status.trailingAnchor.constraint(equalTo:cell.trailingAnchor,constant:-8),status.topAnchor.constraint(equalTo:subtitle.bottomAnchor,constant:3)])
+        }
+        NSLayoutConstraint.activate([title.leadingAnchor.constraint(equalTo:cell.leadingAnchor,constant:8),title.trailingAnchor.constraint(equalTo:cell.trailingAnchor,constant:-8),title.topAnchor.constraint(equalTo:cell.topAnchor,constant:top),subtitle.leadingAnchor.constraint(equalTo:title.leadingAnchor),subtitle.trailingAnchor.constraint(equalTo:title.trailingAnchor),subtitle.topAnchor.constraint(equalTo:title.bottomAnchor,constant:3),participants.leadingAnchor.constraint(equalTo:title.leadingAnchor),participants.trailingAnchor.constraint(equalTo:title.trailingAnchor),participants.topAnchor.constraint(equalTo:subtitle.bottomAnchor,constant:3),participants.heightAnchor.constraint(equalToConstant:16)])
         cell.textField=title;cell.toolTip=item.displayTitle+" · "+mode;return cell
     }
     func tableViewSelectionDidChange(_ notification:Notification){guard !librarySelectionChanging,libraryVisible.indices.contains(libraryTable.selectedRow) else{updateLibraryManagement();return};updateLibraryManagement();requestSelectedLibraryParticipantSummary();openLibraryMeeting(libraryVisible[libraryTable.selectedRow])}
@@ -567,6 +602,11 @@ extension Delegate {
 
 /// Sidebar dates read like a list of days: 今天 14:25 · 37 分钟.
 enum MeetingLibraryDate {
+    static func group(_ date:Date,now:Date=Date(),calendar:Calendar = .current)->String {
+        if calendar.isDate(date,inSameDayAs:now) {return "今天"}
+        if calendar.isDate(date,equalTo:now,toGranularity:.weekOfYear) {return "本周"}
+        return "更早"
+    }
     static func label(_ date:Date,now:Date=Date(),calendar:Calendar = .current)->String {
         let time=DateFormatter();time.dateFormat="HH:mm"
         if calendar.isDate(date,inSameDayAs:now) {return "今天 "+time.string(from:date)}
@@ -575,7 +615,7 @@ enum MeetingLibraryDate {
         return day.string(from:date)
     }
     static func duration(_ seconds:Double)->String {
-        guard seconds.isFinite,seconds>=60 else{return "<1分钟"}
+        guard seconds.isFinite,seconds>=60 else{return "不到 1 分钟"}
         let minutes=Int((seconds/60).rounded())
         return minutes<60 ? "\(minutes)分钟":"\(minutes/60)小时\(minutes%60)分"
     }

@@ -90,7 +90,7 @@ final class RecordingLevelView:NSView {
     private var peak=0.0
     private(set) var status="未开始"
     private var samples=[Double](repeating:0,count:48)
-    override var intrinsicContentSize:NSSize {NSSize(width:180,height:40)}
+    override var intrinsicContentSize:NSSize {NSSize(width:150,height:28)}
     override init(frame:NSRect) {super.init(frame:frame);setAccessibilityElement(true);setAccessibilityRole(.levelIndicator)}
     required init?(coder:NSCoder) {fatalError("init(coder:) has not been implemented")}
     func show(rms:Double,peak:Double,status:String) {
@@ -100,37 +100,101 @@ final class RecordingLevelView:NSView {
         self.rms=value;self.peak=peak.isFinite ? min(1,max(0,peak)):0;self.status=status;toolTip=name+" · "+status
         setAccessibilityLabel(name);setAccessibilityValue(status+(self.rms>0 ? "，\(Int(20*log10(self.rms)))分贝":""));needsDisplay=true
     }
+    /// Bar tone on the charcoal capsule: the microphone reads brighter than computer audio.
+    var barColor=MeetingVisualStyle.capsulePaper
     override func draw(_ dirtyRect:NSRect) {
-        var caption=name+" · "+(rms>0 ? "\(Int(max(-60,20*log10(rms)))) dB" : status)
-        let font=NSFont.systemFont(ofSize:10.5,weight:.regular),attrs:[NSAttributedString.Key:Any]=[.font:font,.foregroundColor:MeetingVisualStyle.muted]
-        if (caption as NSString).size(withAttributes:attrs).width > bounds.width { caption = name }
-        let size=(caption as NSString).size(withAttributes:attrs)
-        (caption as NSString).draw(at:NSPoint(x:max(0,(bounds.width-size.width)/2),y:0),withAttributes:attrs)
-        let plot=NSRect(x:3,y:17,width:max(1,bounds.width-6),height:22)
-        if samples.allSatisfy({$0<=0}) {
-            // Idle: one quiet hairline instead of a row of dots.
-            MeetingVisualStyle.border.setFill();NSBezierPath(roundedRect:NSRect(x:plot.minX,y:plot.midY-0.5,width:plot.width,height:1),xRadius:0.5,yRadius:0.5).fill()
-            return
+        // Drawn on the charcoal capsule. Name and status live in the tooltip and
+        // accessibility value; the plot itself is the visible state.
+        let iconSize:CGFloat=14
+        if let symbol=NSImage(systemSymbolName:name=="麦克风" ? "mic":"desktopcomputer",accessibilityDescription:nil)?
+            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize:12,weight:.medium).applying(NSImage.SymbolConfiguration(paletteColors:[NSColor.white.withAlphaComponent(0.72)]))) {
+            symbol.draw(in:NSRect(x:0,y:bounds.midY-iconSize/2,width:iconSize,height:iconSize))
         }
-        let step=plot.width/CGFloat(samples.count),barWidth=min(2.5,max(1,step*0.55))
-        for (i,value) in samples.enumerated() {
+        let plot=NSRect(x:iconSize+8,y:bounds.midY-12,width:max(1,bounds.width-iconSize-10),height:24)
+        let step:CGFloat=5,barWidth:CGFloat=3
+        let count=max(1,Int(plot.width/step)),recent=Array(samples.suffix(count))
+        let silent=recent.allSatisfy{$0<=0}
+        let clipping=peak>=0.99
+        for i in 0..<count {
+            // Newest samples sit on the right; a silent source is a row of flat dots.
+            let index=recent.count-count+i,value=index>=0 ? recent[index]:0
             let normalized=value>0 ? min(1,max(0,(20*log10(value)+60)/54)):0
-            let h=max(1.5,CGFloat(normalized)*plot.height)
-            (value>0 ? MeetingVisualStyle.accent.withAlphaComponent(0.35+0.65*Double(i)/48):NSColor.tertiaryLabelColor.withAlphaComponent(0.35)).setFill()
+            let h=max(3,CGFloat(normalized)*plot.height)
+            (silent || value<=0 ? NSColor.white.withAlphaComponent(0.22):clipping ? NSColor.systemOrange:barColor).setFill()
             NSBezierPath(roundedRect:NSRect(x:plot.minX+CGFloat(i)*step,y:plot.midY-h/2,width:barWidth,height:h),xRadius:barWidth/2,yRadius:barWidth/2).fill()
         }
-        if peak>=0.99 { ("声音过响" as NSString).draw(at:NSPoint(x:0,y:bounds.height-10),withAttributes:[.font:NSFont.systemFont(ofSize:10),.foregroundColor:NSColor.systemOrange]) }
+        toolTip=name+" · "+(clipping ? "声音过响":rms>0 ? "\(Int(max(-60,20*log10(rms)))) dB":status)
     }
 }
 
-final class RecordingTransportSurface:NSVisualEffectView {
+/// The charcoal capsule that holds the recording controls.
+final class RecordingTransportSurface:NSView {
     override init(frame:NSRect) {
-        super.init(frame:frame);material = .popover;blendingMode = .withinWindow;state = .active
-        wantsLayer=true;layer?.cornerRadius=30;layer?.masksToBounds=true;layer?.borderWidth=0.5
+        super.init(frame:frame);wantsLayer=true;layer?.masksToBounds=false
+        layer?.borderWidth=MeetingVisualStyle.charcoalBorderWidth;layer?.shadowOpacity=0.2;layer?.shadowRadius=14;layer?.shadowOffset=CGSize(width:0,height:-6)
     }
     required init?(coder:NSCoder) {fatalError("init(coder:) has not been implemented")}
-    override func updateLayer() {super.updateLayer();effectiveAppearance.performAsCurrentDrawingAppearance {self.layer?.borderColor=MeetingVisualStyle.border.cgColor}}
-    override func layout() {super.layout();layer?.cornerRadius=min(30,bounds.height/2)}
+    override var wantsUpdateLayer:Bool {true}
+    override func updateLayer() {
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            self.layer?.backgroundColor=MeetingVisualStyle.charcoal.cgColor;self.layer?.borderColor=MeetingVisualStyle.charcoalBorder.cgColor
+            self.layer?.shadowColor=NSColor.black.cgColor
+        }
+    }
+    override func viewDidChangeEffectiveAppearance() {super.viewDidChangeEffectiveAppearance();needsDisplay=true}
+    override func layout() {
+        super.layout();layer?.cornerRadius=bounds.height/2
+        layer?.shadowPath=CGPath(roundedRect:bounds,cornerWidth:bounds.height/2,cornerHeight:bounds.height/2,transform:nil)
+    }
+}
+
+/// Breathing dot beside the timer; static when Reduce Motion is on.
+final class RecordingLiveDot:NSView {
+    enum Tone {case live,idle,hidden}
+    private(set) var tone:Tone = .hidden
+    override init(frame:NSRect) {super.init(frame:frame);wantsLayer=true;setAccessibilityElement(false)}
+    required init?(coder:NSCoder) {fatalError("init(coder:) has not been implemented")}
+    override var intrinsicContentSize:NSSize {NSSize(width:8,height:8)}
+    override func layout() {super.layout();layer?.cornerRadius=bounds.height/2}
+    func show(_ next:Tone) {
+        guard next != tone else{return}
+        tone=next;isHidden=next == .hidden
+        layer?.backgroundColor=(next == .live ? MeetingVisualStyle.capsuleLive:MeetingVisualStyle.capsuleIdleDot).cgColor
+        layer?.removeAnimation(forKey:"breathe")
+        guard next == .live,!MeetingVisualStyle.reducesMotion else{return}
+        let breathe=CABasicAnimation(keyPath:"opacity");breathe.fromValue=1;breathe.toValue=0.35
+        breathe.duration=0.8;breathe.autoreverses=true;breathe.repeatCount = .infinity
+        breathe.timingFunction=CAMediaTimingFunction(name:.easeInEaseOut);layer?.add(breathe,forKey:"breathe")
+    }
+}
+
+/// Recording-mode choice shown inside the capsule before a meeting starts.
+final class RecordingModeChip:NSButton {
+    var onSelect:((Int)->Void)?
+    var selectedIndex=0 {didSet {refreshTitle()}}
+    private let titles=["录音并转写","仅录音"]
+    override init(frame:NSRect) {
+        super.init(frame:frame);isBordered=false;bezelStyle = .regularSquare;wantsLayer=true;focusRingType = .default
+        target=self;action=#selector(showChoices);setAccessibilityLabel("记录模式")
+        setAccessibilityHelp("录音并转写使用云服务；仅录音只保存在本机。开始录音后，本场模式不可切换。")
+        toolTip="录音并转写：音频送云端识别；仅录音：只存本机，不上传。";refreshTitle()
+    }
+    required init?(coder:NSCoder) {fatalError("init(coder:) has not been implemented")}
+    private func refreshTitle() {
+        let text=NSMutableAttributedString(string:titles[selectedIndex]+" ",attributes:[.font:NSFont.systemFont(ofSize:12,weight:.medium),.foregroundColor:NSColor.white.withAlphaComponent(0.86)])
+        text.append(NSAttributedString(string:"⌄",attributes:[.font:NSFont.systemFont(ofSize:11,weight:.semibold),.foregroundColor:NSColor.white.withAlphaComponent(0.62),.baselineOffset:2]))
+        attributedTitle=text;setAccessibilityValue(titles[selectedIndex]);invalidateIntrinsicContentSize()
+    }
+    override var intrinsicContentSize:NSSize {let size=attributedTitle.size();return NSSize(width:ceil(size.width)+22,height:26)}
+    override func layout() {super.layout();layer?.cornerRadius=bounds.height/2;layer?.backgroundColor=NSColor.white.withAlphaComponent(isEnabled ? 0.10:0.05).cgColor}
+    @objc private func showChoices() {
+        let menu=NSMenu()
+        for (index,title) in titles.enumerated() {
+            let item=NSMenuItem(title:title,action:#selector(choose(_:)),keyEquivalent:"");item.target=self;item.tag=index;item.state=index==selectedIndex ? .on:.off;menu.addItem(item)
+        }
+        menu.popUp(positioning:menu.item(at:selectedIndex),at:NSPoint(x:0,y:bounds.height),in:self)
+    }
+    @objc private func choose(_ sender:NSMenuItem) {selectedIndex=sender.tag;onSelect?(sender.tag)}
 }
 
 extension Delegate {
@@ -143,6 +207,7 @@ extension Delegate {
         let row=stack(.horizontal,spacing:12);row.distribution = .fill
         let switcher=NSSegmentedControl(labels:["录音并转写","仅录音"],trackingMode:.selectOne,target:self,action:#selector(selectDashboardMode(_:)))
         switcher.segmentStyle = .rounded;switcher.controlSize = .regular;switcher.selectedSegment=localOnlyMode ? 1:0
+        switcher.toolTip="录音并转写：音频送云端识别；仅录音：只存本机，不上传。"
         switcher.setWidth(116,forSegment:0);switcher.setWidth(82,forSegment:1);switcher.setAccessibilityLabel("记录模式");switcher.setAccessibilityHelp("录音并转写使用云服务；仅录音只保存在本机。开始录音后，本场模式不可切换。")
         recordingModeSwitch=switcher;row.addArrangedSubview(switcher)
         let spacer=NSView();spacer.setContentHuggingPriority(.defaultLow,for:.horizontal);row.addArrangedSubview(spacer)
@@ -157,21 +222,60 @@ extension Delegate {
         // the full document width, so no fixed width reaches the window.
         let container=NSView();container.translatesAutoresizingMaskIntoConstraints=false
         let surface=RecordingTransportSurface();surface.translatesAutoresizingMaskIntoConstraints=false;container.addSubview(surface);recordingTransportView=container
-        let row=stack(.horizontal,spacing:18);row.alignment = .centerY;row.distribution = .fill;row.translatesAutoresizingMaskIntoConstraints=false;surface.addSubview(row)
-        let mic=RecordingLevelView(),computer=RecordingLevelView();mic.name="麦克风";computer.name="电脑声音";microphoneLevel=mic;computerLevel=computer
-        mic.setContentHuggingPriority(.defaultLow,for:.horizontal);computer.setContentHuggingPriority(.defaultLow,for:.horizontal)
-        let center=stack(.horizontal,spacing:12);center.alignment = .centerY
-        let clock=label("00:00",size:16,weight:.semibold);clock.font = .monospacedDigitSystemFont(ofSize:16,weight:.semibold);clock.textColor=MeetingVisualStyle.ink;recordingTimeLabel=clock;center.addArrangedSubview(clock)
-        center.addArrangedSubview(action)
+        let row=stack(.horizontal,spacing:16);row.alignment = .centerY;row.distribution = .fill;row.translatesAutoresizingMaskIntoConstraints=false;surface.addSubview(row)
+        // Controls resolve as on a dark surface; the surface itself follows the window so its charcoal tracks light/dark.
+        row.appearance=NSAppearance(named:.darkAqua)
+        let mic=RecordingLevelView(),computer=RecordingLevelView();mic.name="麦克风";computer.name="电脑声音";computer.barColor=MeetingVisualStyle.capsuleComputerBar;microphoneLevel=mic;computerLevel=computer
+        // The waveforms take all spare width so the controls stay pinned to the capsule ends.
+        mic.setContentHuggingPriority(.defaultLow-1,for:.horizontal);computer.setContentHuggingPriority(.defaultLow-1,for:.horizontal)
+        // Left: live dot + timer over the state line, or 开始录音 + mode chip before a meeting.
+        let dot=RecordingLiveDot();recordingLiveDot=dot
+        let clock=label("00:00",size:21,weight:.semibold);clock.font = .monospacedDigitSystemFont(ofSize:21,weight:.semibold);clock.textColor = .white;recordingTimeLabel=clock
+        heading.textColor=MeetingVisualStyle.capsuleSecondary;heading.font = .systemFont(ofSize:11)
+        let chip=RecordingModeChip();chip.onSelect={[weak self] index in self?.selectRecordingModeFromChip(index)};recordingModeChip=chip
+        let titleLine=stack(.horizontal,spacing:10);titleLine.alignment = .centerY;titleLine.addArrangedSubview(clock);titleLine.addArrangedSubview(chip)
+        let timing=stack(.vertical,spacing:1);timing.alignment = .leading;timing.addArrangedSubview(titleLine);timing.addArrangedSubview(heading)
+        heading.widthAnchor.constraint(lessThanOrEqualToConstant:220).isActive=true
+        let lead=stack(.horizontal,spacing:10);lead.alignment = .centerY;lead.addArrangedSubview(dot);lead.addArrangedSubview(timing)
+        lead.setContentHuggingPriority(.defaultHigh,for:.horizontal)
+        // Waveforms shrink to their minimum before the state line truncates.
+        heading.setContentCompressionResistancePriority(.defaultLow+1,for:.horizontal);clock.setContentCompressionResistancePriority(.required,for:.horizontal)
+        // Right: notes, then the primary control.
+        let trailing=stack(.horizontal,spacing:10);trailing.alignment = .centerY;trailing.setContentHuggingPriority(.defaultHigh,for:.horizontal);notesTransportStack=trailing
+        if let notes=notesController {installTransportNotes(notes)}
+        trailing.addArrangedSubview(action)
         // The button title and tooltip already say what it does.
         let caption=label("开始录音",size:10.5);caption.textColor = .secondaryLabelColor;caption.isHidden=true;recordingActionCaption=caption
-        row.addArrangedSubview(mic);row.addArrangedSubview(center);row.addArrangedSubview(computer)
-        let preferred=surface.widthAnchor.constraint(equalToConstant:620);preferred.priority = .defaultLow
-        NSLayoutConstraint.activate([surface.centerXAnchor.constraint(equalTo:container.centerXAnchor),surface.topAnchor.constraint(equalTo:container.topAnchor,constant:4),surface.bottomAnchor.constraint(equalTo:container.bottomAnchor,constant:-4),
-                                     surface.widthAnchor.constraint(lessThanOrEqualTo:container.widthAnchor),preferred,
-                                     row.leadingAnchor.constraint(equalTo:surface.leadingAnchor,constant:24),row.trailingAnchor.constraint(equalTo:surface.trailingAnchor,constant:-24),row.topAnchor.constraint(equalTo:surface.topAnchor,constant:8),row.bottomAnchor.constraint(equalTo:surface.bottomAnchor,constant:-8),
-                                     mic.widthAnchor.constraint(equalTo:computer.widthAnchor),mic.heightAnchor.constraint(equalToConstant:40),computer.heightAnchor.constraint(equalToConstant:40)])
+        row.addArrangedSubview(lead);row.addArrangedSubview(mic);row.addArrangedSubview(computer);row.addArrangedSubview(trailing)
+        let preferred=surface.widthAnchor.constraint(equalToConstant:600);preferred.priority = .defaultLow
+        NSLayoutConstraint.activate([surface.centerXAnchor.constraint(equalTo:container.centerXAnchor),surface.topAnchor.constraint(equalTo:container.topAnchor,constant:6),surface.bottomAnchor.constraint(equalTo:container.bottomAnchor,constant:-14),
+                                     surface.widthAnchor.constraint(lessThanOrEqualTo:container.widthAnchor,constant:-24),preferred,surface.heightAnchor.constraint(equalToConstant:66),
+                                     row.leadingAnchor.constraint(equalTo:surface.leadingAnchor,constant:22),row.trailingAnchor.constraint(equalTo:surface.trailingAnchor,constant:-10),row.centerYAnchor.constraint(equalTo:surface.centerYAnchor),
+                                     mic.widthAnchor.constraint(equalTo:computer.widthAnchor),mic.heightAnchor.constraint(equalToConstant:28),computer.heightAnchor.constraint(equalToConstant:28)])
         return container
+    }
+    func installTransportNotes(_ notes:MeetingNotesController) {
+        // With the assistant panel, notes are its 笔记 tab; the capsule gets a button only without that panel.
+        guard !assistantEnabled else {return}
+        let toggle=notes.toggle
+        toggle.title="";toggle.toolTip="记笔记：在右栏「笔记」记录，随本场一起保存";toggle.image=NSImage(systemSymbolName:"note.text",accessibilityDescription:"笔记")?.withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize:15,weight:.medium))
+        toggle.isBordered=false;toggle.bezelStyle = .regularSquare;toggle.imagePosition = .imageOnly;toggle.contentTintColor = .white
+        toggle.wantsLayer=true;toggle.layer?.cornerRadius=20;toggle.layer?.backgroundColor=NSColor.white.withAlphaComponent(0.09).cgColor
+        if toggle.constraints.isEmpty {NSLayoutConstraint.activate([toggle.widthAnchor.constraint(equalToConstant:40),toggle.heightAnchor.constraint(equalToConstant:40)])}
+        if let center=notesTransportStack {center.insertArrangedSubview(notes.toggle,at:center.arrangedSubviews.firstIndex(where:{$0 === action}) ?? center.arrangedSubviews.count)}
+    }
+    private func emptyMeetingItem()->CachedMeeting? {(workspaceOwner ?? self).recoveries.first{$0.id==currentCacheID}}
+    func refreshEmptyMeetingActions() {
+        let owner=workspaceOwner ?? self
+        guard let item=emptyMeetingItem(),let management=owner.libraryManagement else {emptyFilesButton?.isEnabled=false;emptyTranscribeButton?.isEnabled=false;return}
+        emptyFilesButton?.isEnabled=management.enabled(.meetingFiles,for:item)
+        emptyTranscribeButton?.isEnabled=management.enabled(.transcribe,for:item)
+    }
+    @objc func openEmptyMeetingFiles() {guard let item=emptyMeetingItem() else{return};(workspaceOwner ?? self).libraryManagementController.perform(.meetingFiles,item:item)}
+    @objc func transcribeEmptyMeeting() {guard let item=emptyMeetingItem() else{return};(workspaceOwner ?? self).libraryManagementController.perform(.transcribe,item:item)}
+    func selectRecordingModeFromChip(_ index:Int) {
+        guard canSelectRecordingMode,let switcher=recordingModeSwitch else {updateRecordingDashboard();return}
+        switcher.selectedSegment=index;selectDashboardMode(switcher)
     }
     @objc func selectDashboardMode(_ sender:NSSegmentedControl) {
         guard canSelectRecordingMode else {updateRecordingDashboard();return}
@@ -207,13 +311,23 @@ extension Delegate {
         switcher.selectedSegment=(live || isHistoryReader) ? (current ? 1:0):(localOnlyMode ? 1:0)
         switcher.isEnabled=canSelectRecordingMode
         // Only offer the choice while it can still be made; otherwise the hint line states the mode.
-        switcher.isHidden = !canSelectRecordingMode
-        let selectedLocal=switcher.selectedSegment==1
+        // The choice is made with the chip inside the capsule; the segmented control stays as its model.
+        switcher.isHidden=true
         let owner=isHistoryReader ? (workspaceOwner ?? self):self
         coarseStopButton?.isHidden = !hasRunningCoarseRefinement
         // An empty row would keep only its flexible spacer and swallow the window height.
         switcher.superview?.isHidden = switcher.isHidden && (coarseStopButton?.isHidden ?? true)
-        recordingModeHint?.stringValue = owner.hasPendingTranscriptionWork ? "正在补齐已录文字":isHistoryReader ? (current ? "仅录音 · 未转写":cachedTranscriptionComplete ? "录音与文字已保存":"转写尚未完成") : selectedLocal ? "仅录音 · 只存本机，不上传":""
+        recordingModeHint?.stringValue = ""
+        recordingModeHint?.isHidden=true
+        let startDate=absoluteTime?.date(0) ?? (workspaceOwner ?? self).recoveries.first{$0.id==currentCacheID}?.date
+        let startText=startDate.map{MeetingLibraryDate.label($0)+" 开始"} ?? "新会议"
+        let eyebrowStatus:String
+        if phase.phase == .recording {eyebrowStatus=current ? "仅录音":"实时转写"}
+        else if owner.hasPendingTranscriptionWork {eyebrowStatus="正在补齐已录文字"}
+        else if isHistoryReader || currentCacheID != nil && [.stopped,.ended,.failed].contains(phase.phase) {
+            eyebrowStatus=current ? "仅录音 · 未转写":cachedTranscriptionComplete ? "录音与文字已保存":"转写尚未完成"
+        } else {eyebrowStatus=current ? "仅录音":"实时转写"}
+        meetingEyebrow?.stringValue=startText+" · "+eyebrowStatus
         let progressView=(recordingModeHint?.superview?.subviews.first{$0.identifier==NSUserInterfaceItemIdentifier("recording-coarse-progress")} as? CoarseProcessingStatusView)
         progressView?.show(owner.coarseProcessingProgress,summary:owner.coarseProcessingSummary,isRecording:owner.phase.phase == .recording,fallbackRunning:owner.hasRunningCoarseRefinement)
         if phase.error==nil && !microphoneSignalAlertVisible {
@@ -246,15 +360,21 @@ extension Delegate {
                 let prefix=phase.phase == .paused ? "录音已暂停":"录音已保存"
                 if let message=speakerRefinementMessage,owner.coarseProcessingSummary==nil {text=prefix+" · "+message}
             }
-            heading.stringValue=text+(currentCacheID != nil || phase.elapsed>0 ? " · "+phase.time:"")
-            heading.font = .systemFont(ofSize:12,weight:.regular)
-            heading.textColor=phase.phase == .recording ? MeetingVisualStyle.accent:MeetingVisualStyle.muted
+            heading.stringValue=text
+            heading.font = .systemFont(ofSize:11,weight:.regular)
+            heading.textColor=MeetingVisualStyle.capsuleSecondary
         }
+        // Before a meeting the capsule offers 开始录音 + mode chip; afterwards the timer and state line.
+        let choosing=canSelectRecordingMode && currentCacheID==nil && !isHistoryReader
+        recordingModeChip?.isHidden = !choosing;recordingModeChip?.isEnabled=choosing;recordingModeChip?.selectedIndex=localOnlyMode ? 1:0
+        heading.isHidden=choosing
+        recordingLiveDot?.show(owner.phase.phase == .recording ? .live:choosing ? .hidden:.idle)
+        (action as? RecordingPrimaryButton)?.resumeStyle = !choosing && owner.phase.phase != .recording && owner.phase.phase != .connecting
         if sequence.isEmpty && recoveredArchiveText==nil {
             if showsMissingCredentialHint && currentCacheID==nil && !localOnlyMode {
                 empty.stringValue="去设置里填写百炼密钥"
             } else if current || (phase.phase == .idle && localOnlyMode) {
-                empty.stringValue=phase.phase == .recording ? "正在保存声音，下方波形显示收音状态":phase.phase == .paused ? "录音已暂停，声音保存在本机":currentCacheID != nil ? "录音已保存，右键会议选择“打开会议文件…”即可查看":"点击开始录音，声音将保存在本机"
+                empty.stringValue=phase.phase == .recording ? "正在保存声音，下方波形显示收音状态":phase.phase == .paused ? "录音已暂停，声音保存在本机":currentCacheID != nil ? "录音已保存，可打开会议文件查看":"点击开始录音，声音将保存在本机"
             } else {
                 switch phase.phase {
                 case .recording:empty.stringValue="正在收音，识别出的文字会出现在这里"
@@ -263,12 +383,19 @@ extension Delegate {
                 case .stopping:empty.stringValue="录音已结束，正在补齐文字并保存"
                 default:
                     if currentCacheID != nil {
-                        empty.stringValue=cachedTranscriptionComplete ? "本场没有识别到文字，右键会议选择“打开会议文件…”可查看录音":"录音已保存，转写尚未完成；右键会议可补转剩余录音或打开会议文件"
+                        empty.stringValue=cachedTranscriptionComplete ? "本场没有识别到文字，可打开会议文件查看录音":"录音已保存，转写尚未完成"
                     } else {empty.stringValue="开始后，会议文字会出现在这里"}
                 }
             }
         }
-        recordingTimeLabel?.stringValue=phase.time
+        let emptySaved=sequence.isEmpty && recoveredArchiveText==nil && currentCacheID != nil && !live
+        emptyFilesButton?.isHidden = !emptySaved
+        emptyTranscribeButton?.isHidden = !emptySaved || current || cachedTranscriptionComplete
+        refreshEmptyMeetingActions()
+        let startPrompt=choosing && phase.phase != .failed
+        recordingTimeLabel?.stringValue=startPrompt ? "开始录音":phase.time
+        recordingTimeLabel?.font=startPrompt ? .systemFont(ofSize:15,weight:.semibold):.monospacedDigitSystemFont(ofSize:21,weight:.semibold)
+        recordingTimeLabel?.textColor=owner.phase.phase == .paused ? NSColor.white.withAlphaComponent(0.8):.white
         recordingActionCaption?.stringValue=action.title
         refreshAudioLevels()
         if phase.phase == .recording && audioLevelTimer==nil && !previewRenderOnly {

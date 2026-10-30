@@ -335,7 +335,7 @@ import AppKit
     try newFlow.vault.save("fixture-key")
     newFlow.newButton!.performClick(nil)
     try await wait({!newFlow.newMeetingRequested && newFlow.phase.phase == .idle})
-    try check(newFlow.newButton!.title=="新对话" && newFlow.currentCacheID==nil && newFlow.child==nil && newFlow.timer==nil && !newFlow.credentialReadJob.busy && newFlow.sequence.isEmpty,
+    try check(newFlow.newButton!.title=="新会议" && newFlow.currentCacheID==nil && newFlow.child==nil && newFlow.timer==nil && !newFlow.credentialReadJob.busy && newFlow.sequence.isEmpty,
               "new_conversation_opens_blank_without_starting_capture_or_reading_credentials")
     newFlow.receive(["type":"stopped","session":"previous-session","reason":"user_stop","transcription_complete":true])
     try check(newFlow.phase.phase == .idle && newFlow.currentCacheID==nil && newFlow.child==nil && newFlow.timer==nil,

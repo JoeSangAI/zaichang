@@ -974,7 +974,7 @@ func runSourceCaptureSession(config: Config) async throws {
 
     func refreshRoutes(at sessionOrigin: Double?) async throws {
         let previouslyActive = Dictionary(uniqueKeysWithValues: routes.sources.map { ($0.sourceID, $0) })
-        let change = try routes.refresh { source in
+        let change = try routes.refresh(holdingBack: sourceRetryBackoff.heldBack(at: ProcessInfo.processInfo.systemUptime)) { source in
             if previouslyActive[source.sourceID] != nil {
                 // A live tap is being rebuilt (process or output route change).
                 // Paused taps are absent from previouslyActive and keep their era.
@@ -1038,6 +1038,7 @@ func runSourceCaptureSession(config: Config) async throws {
         }
     }
 
+    var sourceRetryBackoff = SourceRetryBackoff()
     func isolateFailedSourceTaps() -> Bool {
         var failed: [(core: String, track: String, entry: SourceCaptureEntry)] = []
         for (core, track) in generations.active {
@@ -1059,6 +1060,7 @@ func runSourceCaptureSession(config: Config) async throws {
             }
         }
         let failedIDs = Set(failed.map(\.core))
+        for core in failedIDs {sourceRetryBackoff.recordFailure(core, at: ProcessInfo.processInfo.systemUptime)}
         do {
             // Computer audio is a core meeting source. Retire only its damaged
             // generation; the same control-loop turn refreshes the inventory
