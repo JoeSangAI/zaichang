@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock
 
 from assistant_runtime import AssistantRuntime, AssistantStore
 from codex_runtime import CodexRuntime, RuntimeErrorCode
-from tests.test_assistant_runtime import FakeAppServer
+from tests.test_assistant_runtime import FakeAppServer, fake_members
 
 
 def public_image(name):
@@ -20,14 +20,14 @@ def public_image(name):
     return (assets / name).resolve()
 
 
-class ListenerTests(unittest.IsolatedAsyncioTestCase):
+class ListenerHarness(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.store = AssistantStore(self.tmp.name)
         self.fake = FakeAppServer(); self.fake.auto_complete = False
         self.fake.steer = AsyncMock(return_value={})
         self.fake.interrupt = AsyncMock(wraps=self.fake.interrupt)
-        self.service = AssistantRuntime(self.store, Path.cwd(), output_root=Path(self.tmp.name) / "outputs", runtime_factory=lambda **kw: self.fake)
+        self.service = AssistantRuntime(self.store, Path.cwd(), output_root=Path(self.tmp.name) / "outputs", runtime_factory=fake_members(self.fake))
         self.service._schedule_overview = lambda *a, **kw: None
         self.service.wait_batch_seconds = .03
         await self.service.bind('w', {'cache_id': 'local-test'})
@@ -79,6 +79,8 @@ class ListenerTests(unittest.IsolatedAsyncioTestCase):
         await self.event('turn/completed', row=row)
         await self.wait(lambda: self.store.task(row['id'])['status'] == 'completed')
 
+
+class ListenerTests(ListenerHarness):
     async def test_all_threads_ephemeral_and_read_only_transport(self):
         await self.listen()
         self.assertTrue(all(o['ephemeral'] and o['sandbox']=='read-only' and o['approval_policy']=='never' for o in self.fake.thread_options))
@@ -255,7 +257,7 @@ class ListenerTests(unittest.IsolatedAsyncioTestCase):
         await self.wait(lambda:not self.service.task_workers)
         self.assertEqual(self.row()['status'],'interrupted')
         replacement=FakeAppServer(); replacement.auto_complete=False
-        self.service.runtime_factory=lambda **kw:replacement
+        self.service.runtime_factory=fake_members(replacement)
         await self.ask('继续')
         prompt=replacement.requests[0][1]['input'][0]['text']
         self.assertIn(self.speech,prompt); self.assertIn('本场已有对话',prompt)
@@ -266,7 +268,7 @@ class ListenerTests(unittest.IsolatedAsyncioTestCase):
         await self.listen(); await self.tool('say',{'text':self.speech})
         await self.service.shutdown()
         replacement=FakeAppServer(); replacement.auto_complete=False
-        self.service=AssistantRuntime(self.store,Path.cwd(),output_root=Path(self.tmp.name) / "outputs", runtime_factory=lambda **kw:replacement)
+        self.service=AssistantRuntime(self.store,Path.cwd(),output_root=Path(self.tmp.name) / "outputs", runtime_factory=fake_members(replacement))
         await self.service.bind('w',{})
         self.assertEqual(self.row()['status'],'interrupted')
         await self.ask('继续')
@@ -556,3 +558,131 @@ class ListenerTests(unittest.IsolatedAsyncioTestCase):
         await self.work_event('turn/completed')
         await self.wait(lambda: self.work()['status'] == 'completed')
         self.assertEqual(self.service._with_background('w', {}, listener)['background'][0]['status'], 'completed')
+
+
+class ProcessOwnershipTests(ListenerHarness):
+    """Every Codex process has one owner and ends with it."""
+
+    def live(self):
+        return self.service.runtime.threads()
+
+    async def test_request_process_ends_with_the_request(self):
+        row = await self.ask('在吗')
+        self.assertEqual(self.live(), {row['thread_id']})
+        await self.event('turn/completed', row=row)
+        await self.wait(lambda: not self.live())
+        member = self.fake.members[-1]
+        self.assertTrue(member.member_closed)
+
+    async def test_listening_keeps_its_process_until_turned_off(self):
+        row = await self.listen()
+        await self.event('turn/completed')
+        await self.wait(lambda: self.row()['status'] == 'running' and self.row()['turn_id'] != row['turn_id'])
+        self.assertEqual(self.live(), {row['thread_id']})
+        await self.service.cmd_proactive('w', {'enabled': False})
+        await self.wait(lambda: not self.live())
+
+    async def test_recording_stop_ends_the_listeners_process(self):
+        await self.listen()
+        await self.context('stopped', revision=2)
+        await self.event('turn/completed')
+        await self.wait(lambda: not self.live())
+
+    async def test_many_requests_never_accumulate(self):
+        for number in range(12):
+            row = await self.ask(f'第{number}个问题')
+            await self.event('turn/completed', row=row)
+            await self.wait(lambda: not self.live())
+        self.assertEqual(sum(not m.member_closed for m in self.fake.members), 0)
+
+    async def test_failed_start_leaves_nothing_behind(self):
+        self.fake.start_turn = AsyncMock(side_effect=RuntimeErrorCode('rpc_error_1'))
+        await self.service.cmd_send('w', {'text': '在吗'})
+        await self.wait(lambda: self.req()['status'] == 'failed')
+        await self.wait(lambda: not self.live())
+
+
+class ConnectionAndAnswerTests(ListenerHarness):
+    async def test_listener_heals_when_its_process_dies_after_a_good_run(self):
+        row = await self.listen()
+        with mock.patch('assistant_runtime.LISTENER_SELF_HEAL_AFTER_SECONDS', 0):
+            self.fake.members[-1].member_closed = True
+            real_event = self.fake.event
+            async def died(thread_id, **options):
+                if thread_id == row['thread_id']:
+                    raise RuntimeErrorCode('runtime_disconnected')
+                return await real_event(thread_id, **options)
+            self.fake.event = died
+            await self.wait(lambda: self.row()['thread_id'] not in (None, row['thread_id']) and self.row()['status'] == 'running', seconds=3)
+
+
+    def answers(self, row):
+        return [m for m in self.store.messages('w') if m['task_id'] == row['id'] and m['role'] == 'assistant']
+
+    async def retrying(self, row):
+        await self.fake.events[row['thread_id']].put({'method': 'error', 'params': {
+            'threadId': row['thread_id'], 'turnId': row['turn_id'], 'willRetry': True, 'error': {'message': 'Connection failed'}}})
+
+    async def test_retrying_past_the_deadline_is_a_visible_failure(self):
+        with mock.patch.dict('assistant_runtime.RETRY_DEADLINE_SECONDS', {'request': 0}):
+            row = await self.ask('公式是什么')
+            await self.retrying(row)
+            await self.wait(lambda: self.store.task(row['id'])['status'] == 'failed', seconds=4)
+        self.assertEqual(self.store.task(row['id'])['error'], 'model_unreachable')
+        self.assertIn('VPN', self.answers(row)[0]['text'])
+        self.assertEqual(self.fake.interrupt.await_count, 1)
+
+    async def test_retry_events_do_not_hold_off_the_deadline(self):
+        with mock.patch.dict('assistant_runtime.RETRY_DEADLINE_SECONDS', {'request': 1}):
+            row = await self.ask('公式是什么')
+            async def keep_retrying():
+                while True:
+                    await self.retrying(row); await asyncio.sleep(.05)
+            noise = asyncio.create_task(keep_retrying())
+            await self.wait(lambda: self.store.task(row['id'])['status'] == 'failed', seconds=5)
+            noise.cancel()
+        self.assertEqual(self.store.task(row['id'])['error'], 'model_unreachable')
+
+    async def test_link_status_shows_while_down_and_clears_on_progress(self):
+        row = await self.ask('公式是什么')
+        await self.retrying(row)
+        await self.wait(lambda: self.service.link_down_since is not None)
+        state = await self.service._snapshot('w', announce=False)
+        self.assertEqual(state['runtime_status'], 'unavailable')
+        self.assertIn('VPN', state['runtime_message'])
+        await self.event('item/started', {'type': 'reasoning'}, row=row)
+        await self.wait(lambda: self.service.link_down_since is None)
+        state = await self.service._snapshot('w', announce=False)
+        self.assertEqual(state['runtime_status'], 'ready')
+        await self.event('turn/completed', row=row)
+
+    async def test_known_outage_answers_quickly(self):
+        self.service.link_down_since = self.service.clock() - 600
+        self.service.runtime_status = 'unavailable'
+        row = await self.ask('公式是什么')
+        self.assertEqual(self.service._retry_deadline(row['id']), 20)
+        await self.event('turn/completed', row=row)
+
+    async def test_stopped_request_says_so(self):
+        row = await self.ask('公式是什么')
+        await self.service.cmd_cancel('w', {})
+        await self.wait(lambda: self.store.task(row['id'])['status'] == 'completed')
+        self.assertEqual([m['text'] for m in self.answers(row)], ['已停止。'])
+
+    async def test_empty_completion_says_so(self):
+        row = await self.ask('公式是什么')
+        await self.event('turn/completed', row=row)
+        await self.wait(lambda: self.store.task(row['id'])['status'] == 'completed')
+        self.assertIn('没有返回内容', self.answers(row)[0]['text'])
+
+    async def test_real_answer_gets_no_extra_message(self):
+        row = await self.ask('公式是什么')
+        await self.event('item/completed', {'id': 'a', 'type': 'agentMessage', 'content': [{'type': 'text', 'text': '答案'}]}, row=row)
+        await self.event('turn/completed', row=row)
+        await self.wait(lambda: self.store.task(row['id'])['status'] == 'completed')
+        self.assertEqual([m['text'] for m in self.answers(row)], ['答案'])
+
+    async def test_app_restart_leaves_a_message_on_unanswered_request(self):
+        row = await self.ask('公式是什么')
+        await self.service.shutdown()
+        self.assertIn('不会自动重做', self.answers(row)[0]['text'])

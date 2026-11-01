@@ -218,7 +218,7 @@ class MeetingClock:
 
 class OfflineRuntime:
     """Fake agent, real driver/callbacks/clock. No subprocess, model, curl or network."""
-    def __init__(self, *, on_request):
+    def __init__(self, *, on_request, args=()):
         self.on_request = on_request
         self.queue = asyncio.Queue()
         self.revision = self.waits = self.turns = self.calls = 0

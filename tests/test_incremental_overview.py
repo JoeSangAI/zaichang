@@ -23,8 +23,12 @@ class MeetingIncrementalOverviewTests(unittest.IsolatedAsyncioTestCase):
     async def settle(self):
         await self.wait_until(lambda: not self.service.overview_timers and not self.service.task_workers)
 
-    async def context(self, count):
-        await self.service.cmd_context(self.workspace_id, {"title": "Qoder 校园推广", "segments": self.segments(count)})
+    async def context(self, count, state="paused", segments=None):
+        await self.service.cmd_context(self.workspace_id, {"title": "Qoder 校园推广", "meeting_state": state,
+                                                           "segments": segments or self.segments(count)})
+
+    def overview_runs(self):
+        return [r for r in self.store.tasks(self.workspace_id) if r["kind"] == "overview"]
 
     def row(self):
         return self.store.db.execute("SELECT * FROM meeting_overview WHERE workspace_id=?", (self.workspace_id,)).fetchone()
@@ -38,32 +42,89 @@ class MeetingIncrementalOverviewTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.task(task["id"])["status"], "running")
         self.assertTrue(self.service.overview_inputs)
 
-    async def test_600_chars_or_180_seconds_with_new_content(self):
+    async def test_one_clock_whatever_changed(self):
         now = [1000.0]; self.service.clock = lambda: now[0]
-        await self.context(1); await self.settle()
+        await self.context(1, "recording"); await self.settle()
         delays = []; gate = asyncio.Event()
         async def sleep(delay):
             delays.append(delay); await gate.wait()
         self.service.sleep = sleep
         now[0] += 20
-        await self.context(2)
+        await self.context(2, "recording")
         await self.wait_until(lambda: bool(delays))
         self.assertEqual(delays, [160])
-        await self.context(15); await self.settle()
-        self.assertEqual(len(json.loads(self.row()["covered_json"])), 15)
-        before = len(self.fake.requests)
-        self.service._schedule_overview(self.workspace_id)
+        # A lot of new speech and a corrected speaker wait for the same moment.
+        now[0] += 20
+        await self.context(40, "recording")
+        corrected = self.segments(40); corrected[0]["speaker"] = "Alice"
+        await self.context(0, "recording", corrected)
         await asyncio.sleep(.01)
-        self.assertEqual(len(self.fake.requests), before)
-        now[0] += 181
-        await self.context(16); await self.settle()
-        self.assertEqual(len(json.loads(self.row()["covered_json"])), 16)
+        self.assertEqual(delays, [160])
+        self.assertEqual(len(self.overview_runs()), 1)
+        # When the moment comes it reads whatever is latest.
+        now[0] += 181; gate.set(); await self.settle()
+        self.assertEqual(len(self.overview_runs()), 2)
+        self.assertEqual(len(json.loads(self.row()["covered_json"])), 40)
+
+    async def test_bookkeeping_is_not_a_change(self):
+        now = [1000.0]; self.service.clock = lambda: now[0]
+        await self.context(3, "recording"); await self.settle()
+        now[0] += 500
+        batch = self.segments(3)
+        for segment in batch:
+            segment.update(revision=9, end=12.5)
+        await self.context(0, "recording", batch); await self.settle()
+        self.assertEqual(len(self.overview_runs()), 1)
+        state = await self.service._snapshot(self.workspace_id, announce=False)
+        self.assertFalse(state["meeting_overview"]["stale"])
+
+    async def test_recording_stop_runs_without_waiting(self):
+        now = [1000.0]; self.service.clock = lambda: now[0]
+        await self.context(1, "recording"); await self.settle()
+        now[0] += 10
+        await self.context(2, "recording")
+        await self.context(2, "stopped"); await self.settle()
+        self.assertEqual(len(self.overview_runs()), 2)
+        await self.context(2, "stopped"); await self.settle()
+        self.assertEqual(len(self.overview_runs()), 2)
+
+    async def test_network_failure_retries_on_the_interval_and_recovers(self):
+        now = [1000.0]; self.service.clock = lambda: now[0]
+        real_start_turn = self.fake.start_turn
+        async def unreachable(*a, **k):
+            raise fixtures.RuntimeErrorCode("model_unreachable")
+        self.fake.start_turn = unreachable
+        delays = []; gate = asyncio.Event()
+        async def sleep(delay):
+            delays.append(delay); await gate.wait()
+        self.service.sleep = sleep
+        await self.context(1, "stopped")
+        await self.wait_until(lambda: bool(delays))
+        self.assertEqual(delays, [180])
+        self.assertEqual(self.row()["error"], "model_unreachable")
+        self.fake.start_turn = real_start_turn; self.service.sleep = asyncio.sleep
+        now[0] += 181; gate.set(); await self.settle()
+        self.assertEqual(self.row()["status"], "ready")
+        self.assertIsNone(self.row()["error"])
+
+    async def test_machine_near_process_limit_holds_overview_back(self):
+        now = [1000.0]; self.service.clock = lambda: now[0]
+        self.service.headroom = lambda: 10
+        delays = []; gate = asyncio.Event()
+        async def sleep(delay):
+            delays.append(delay); await gate.wait()
+        self.service.sleep = sleep
+        await self.context(1, "stopped")
+        await self.wait_until(lambda: bool(delays))
+        self.assertEqual(self.row()["error"], "machine_process_limit")
+        self.assertFalse(self.overview_runs())
 
     async def test_full_then_incremental_batches_persist_coverage_and_old_evidence(self):
         await self.context(1); await self.settle()
         prior = json.loads(self.row()["data_json"])
         with patch.object(ar, "MAX_CONTEXT_CHARS", 2200):
-            await self.context(70); await self.settle()
+            await self.context(70, "recording")
+            await self.context(70, "stopped"); await self.settle()
             row = self.row()
             self.assertEqual(len(json.loads(row["covered_json"])), 70)
             self.assertEqual(row["status"], "ready")

@@ -556,8 +556,11 @@ final class MeetingAgentPanel: NSView {
         statusLabel.stringValue = message.isEmpty ? (fallback[status] ?? "助理状态未知") : message
         statusLabel.textColor = MeetingVisualStyle.muted
         let interrupted = ["failed", "interrupted"].contains(snapshot["conversation_status"] as? String ?? "")
-        if interrupted { statusLabel.stringValue = "助理已中断，发送消息或重新开启旁听可继续" }
-        if snapshot["listening"] as? Bool == true { statusLabel.stringValue = "正在旁听" }
+        // A connection problem outranks what the assistant was doing when it hit it.
+        if status != "unavailable" {
+            if interrupted { statusLabel.stringValue = "助理已中断，发送消息或重新开启旁听可继续" }
+            if snapshot["listening"] as? Bool == true { statusLabel.stringValue = "正在旁听" }
+        }
         // Listening shows in the presence card; this line is only for problems.
         let needsAttention = ["unavailable", "auth_required"].contains(status) || interrupted
         statusLabel.isHidden = !needsAttention; statusHeight.constant = needsAttention ? 24 : 0

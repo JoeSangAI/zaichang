@@ -24,10 +24,14 @@ final class MeetingAgentBridge {
         env["PATH"] = (RuntimeConfiguration.toolSearchPaths + [env["PATH"] ?? ""]).joined(separator: ":")
         child.environment = env; child.standardInput = stdin; child.standardOutput = stdout
         // Retain startup diagnostics locally; never send them into the chat.
-        // Replaced on launch so repeated failures cannot grow an unbounded log.
+        // Replaced on launch so repeated failures cannot grow an unbounded log;
+        // the previous run is kept, since that is the one a fault report asks about.
         do {
             try FileManager.default.createDirectory(at: store, withIntermediateDirectories: true)
             let log = store.appendingPathComponent("runtime-startup.log")
+            let previous = store.appendingPathComponent("runtime-startup.previous.log")
+            try? FileManager.default.removeItem(at: previous)
+            try? FileManager.default.moveItem(at: log, to: previous)
             try Data().write(to: log, options: .atomic)
             try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: log.path)
             child.standardError = try FileHandle(forWritingTo: log)

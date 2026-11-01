@@ -8,8 +8,22 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
+import os
+import resource
+import signal
+import subprocess
 from collections import defaultdict, deque
 from typing import Any, Awaitable, Callable
+
+# A task with no tools needs none of the user's MCP servers, plugins or hooks.
+NO_TOOLS_ARGS = ("-c", "mcp_servers={}", "-c", "features.plugins=false", "-c", "features.apps=false",
+                 "-c", "features.skills=false", "-c", "notify=[]", "-c", "project_doc_max_bytes=0",
+                 "-c", "features.shell_snapshot=false", "-c", 'web_search="disabled"',
+                 "-c", "include_apps_instructions=false", "-c", "include_environment_context=false",
+                 "-c", "include_permissions_instructions=false")
+# Listening, 4 requests, 2 background jobs, 2 overviews and one warm spare.
+MAX_PROCESSES = 10
 
 
 class RuntimeErrorCode(Exception):
@@ -18,13 +32,26 @@ class RuntimeErrorCode(Exception):
         self.code = code
 
 
+def process_headroom() -> int:
+    """Free process slots for this user; 0 when the machine cannot even fork."""
+    limit = resource.getrlimit(resource.RLIMIT_NPROC)[0]
+    try:
+        if limit == resource.RLIM_INFINITY:
+            limit = int(subprocess.run(["sysctl", "-n", "kern.maxprocperuid"], capture_output=True, timeout=5).stdout)
+        listing = subprocess.run(["ps", "-U", str(os.getuid()), "-o", "pid="], capture_output=True, timeout=5).stdout
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return 0
+    return max(0, limit - len(listing.splitlines()))
+
+
 class CodexRuntime:
     def __init__(self, executable: str = "codex", *,
                  on_request: Callable[[str, dict], Awaitable[dict]] | None = None,
-                 experimental_api: bool = True):
+                 experimental_api: bool = True, args: tuple[str, ...] = ()):
         self.executable = executable
         self.on_request = on_request
         self.experimental_api = experimental_api
+        self.args = tuple(args)
         self.process = None
         self._next_id = 0
         self._pending: dict[int, asyncio.Future] = {}
@@ -42,10 +69,14 @@ class CodexRuntime:
     async def start(self):
         if self.process is not None:
             raise RuntimeErrorCode("already_started")
-        self.process = await asyncio.create_subprocess_exec(
-            self.executable, "app-server", "--listen", "stdio://",
-            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE, limit=8 * 1024 * 1024)
+        try:
+            # Its own session, so close() can take every MCP server down with it.
+            self.process = await asyncio.create_subprocess_exec(
+                self.executable, "app-server", "--listen", "stdio://", *self.args,
+                stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE, limit=8 * 1024 * 1024, start_new_session=True)
+        except BlockingIOError as exc:
+            raise RuntimeErrorCode("machine_process_limit") from exc
         self.closed = False
         self._reader = asyncio.create_task(self._read())
         self._stderr = asyncio.create_task(self._drain_stderr())
@@ -184,6 +215,7 @@ class CodexRuntime:
                            sandbox: str = "read-only", approval_policy: str = "on-request",
                            dynamic_tools: list[dict] | None = None,
                            developer_instructions: str | None = None,
+                           base_instructions: str | None = None,
                            model: str | None = None, effort: str | None = None):
         # Explicit per-purpose defaults apply only to new threads; existing turns retain their settings.
         params = {"cwd": cwd, "approvalPolicy": approval_policy,
@@ -201,6 +233,8 @@ class CodexRuntime:
             params["dynamicTools"] = dynamic_tools
         if developer_instructions:
             params["developerInstructions"] = developer_instructions
+        if base_instructions:
+            params["baseInstructions"] = base_instructions
         result = await self.request("thread/start", params)
         return result
 
@@ -242,6 +276,7 @@ class CodexRuntime:
                 except asyncio.TimeoutError:
                     self.process.kill()
                     await self.process.wait()
+        await self._end_session()
         for task in [self._reader, self._stderr, *self._workers]:
             if task is not None:
                 task.cancel()
@@ -249,9 +284,148 @@ class CodexRuntime:
                                if t is not None), return_exceptions=True)
         self.closed = True
 
+    async def _end_session(self):
+        """Nothing this process started may outlive it."""
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            for check in range(10):
+                try:
+                    os.killpg(self.process.pid, 0 if check else sig)
+                except (ProcessLookupError, PermissionError):
+                    return
+                await asyncio.sleep(.1)
+
     async def __aenter__(self):
         await self.start()
         return self
 
     async def __aexit__(self, *_):
         await self.close()
+
+
+class CodexPool:
+    """One Codex process per task: a loaded thread cannot be released, a process can.
+
+    Codex keeps every thread's MCP servers until its process exits, and
+    thread/unsubscribe, delete and archive do not free them. So the process is
+    the unit of ownership: releasing a thread ends its process and everything
+    it started, and at most MAX_PROCESSES can exist. Offers CodexRuntime's
+    surface, routed by thread.
+    """
+
+    def __init__(self, factory: Callable[..., CodexRuntime], *,
+                 on_request: Callable[[str, dict], Awaitable[dict]] | None = None,
+                 capacity: int = MAX_PROCESSES):
+        self.factory = factory
+        self.on_request = on_request
+        self.capacity = capacity
+        self.closed = True
+        self.failure: str | None = None
+        self.members: dict[str, CodexRuntime] = {}
+        self.spare: tuple[str, CodexRuntime, dict] | None = None
+        self._warming: asyncio.Task | None = None
+
+    async def start(self):
+        # Proves Codex can start now; each task still gets its own process.
+        probe = self.factory(on_request=self.on_request, args=NO_TOOLS_ARGS)
+        try:
+            await probe.start()
+        finally:
+            with contextlib.suppress(Exception):
+                await probe.close()
+        self.closed = False
+
+    def threads(self) -> set[str]:
+        return set(self.members)
+
+    def _log(self, event: str, thread_id: str | None = None):
+        logging.getLogger(__name__).warning("zaichang-runtime %s", json.dumps(
+            {"event": event, "thread_id": thread_id, "processes": len(self.members) + bool(self.spare)}))
+
+    async def _open(self, cwd: str, tools: bool, options: dict) -> tuple[CodexRuntime, dict]:
+        if len(self.members) + bool(self.spare) >= self.capacity:
+            await self.discard_spare()
+        if len(self.members) >= self.capacity:
+            raise RuntimeErrorCode("runtime_capacity")
+        member = self.factory(on_request=self.on_request, args=() if tools else NO_TOOLS_ARGS)
+        try:
+            await member.start()
+            return member, await member.start_thread(cwd, **options)
+        except BaseException:
+            with contextlib.suppress(Exception):
+                await member.close()
+            raise
+
+    @staticmethod
+    def _key(cwd: str, tools: bool, options: dict) -> str:
+        return json.dumps([cwd, tools, options], sort_keys=True, ensure_ascii=False)
+
+    async def start_thread(self, cwd: str, *, tools: bool = True, **options) -> dict:
+        if self.closed:
+            raise RuntimeErrorCode("runtime_closed")
+        if self._warming is not None:
+            await asyncio.wait({self._warming})
+        key = self._key(cwd, tools, options)
+        if self.spare and self.spare[0] == key and not self.spare[1].closed:
+            _, member, result = self.spare
+            self.spare = None
+        else:
+            member, result = await self._open(cwd, tools, options)
+        self.members[result["thread"]["id"]] = member
+        self._log("open", result["thread"]["id"])
+        return result
+
+    async def warm(self, cwd: str, *, tools: bool = True, **options):
+        """Hold one ready thread: its tools are loaded before anyone asks."""
+        key = self._key(cwd, tools, options)
+        if self.closed or self._warming is not None or (self.spare and self.spare[0] == key and not self.spare[1].closed):
+            return
+        await self.discard_spare()
+        self._warming = asyncio.current_task()
+        try:
+            member, result = await self._open(cwd, tools, options)
+            if self.closed:
+                await member.close()
+                return
+            self.spare = (key, member, result)
+            self._log("warm", result["thread"]["id"])
+        finally:
+            self._warming = None
+
+    async def discard_spare(self):
+        spare, self.spare = self.spare, None
+        if spare:
+            await spare[1].close()
+
+    async def release(self, thread_id: str):
+        member = self.members.pop(thread_id, None)
+        if member is not None:
+            await member.close()
+            self._log("release", thread_id)
+
+    def _member(self, thread_id: str) -> CodexRuntime:
+        try:
+            return self.members[thread_id]
+        except KeyError:
+            raise RuntimeErrorCode("thread_not_found") from None
+
+    async def start_turn(self, thread_id: str, text: str, **options):
+        return await self._member(thread_id).start_turn(thread_id, text, **options)
+
+    async def event(self, thread_id: str, *, timeout: float = 120):
+        return await self._member(thread_id).event(thread_id, timeout=timeout)
+
+    async def steer(self, thread_id: str, turn_id: str, text: str):
+        return await self._member(thread_id).steer(thread_id, turn_id, text)
+
+    async def interrupt(self, thread_id: str, turn_id: str):
+        return await self._member(thread_id).interrupt(thread_id, turn_id)
+
+    async def close(self):
+        self.closed = True
+        if self._warming is not None:
+            self._warming.cancel()
+            await asyncio.wait({self._warming})
+        members = list(self.members.values())
+        self.members.clear()
+        await self.discard_spare()
+        await asyncio.gather(*(member.close() for member in members), return_exceptions=True)

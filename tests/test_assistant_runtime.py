@@ -119,6 +119,29 @@ class FakeAppServer:
         self.closed = True
 
 
+class FakeMember:
+    """One pooled process of a shared fake server: closing it ends only this process."""
+
+    def __init__(self, server, args=()):
+        self.server, self.args = server, args
+        self.member_closed = False
+        server.members = getattr(server, "members", []) + [self]
+
+    def __getattr__(self, name):
+        return getattr(self.server, name)
+
+    @property
+    def closed(self):
+        return self.member_closed or self.server.closed
+
+    async def close(self):
+        self.member_closed = True
+
+
+def fake_members(server):
+    return lambda args=(), **options: FakeMember(server, args)
+
+
 class AssistantRuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -130,7 +153,7 @@ class AssistantRuntimeTests(unittest.IsolatedAsyncioTestCase):
         async def emit(value):
             self.emitted.append(value)
 
-        self.service = AssistantRuntime(self.store, self.root, output_root=self.root / "outputs", runtime_factory=lambda **kw: self.fake, emit=emit)
+        self.service = AssistantRuntime(self.store, self.root, output_root=self.root / "outputs", runtime_factory=fake_members(self.fake), emit=emit)
         result = await self.service.bind("workspace-proposed", {"session_id": "session-1", "cache_id": "cache-1", "title": "广告策略会"})
         self.workspace_id = result["workspace_id"]
 
@@ -176,7 +199,7 @@ class AssistantRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
         store = AssistantStore(self.root / "race-store")
         runtime = SlowStart()
-        service = AssistantRuntime(store, self.root, output_root=self.root / "outputs", runtime_factory=lambda **kw: runtime)
+        service = AssistantRuntime(store, self.root, output_root=self.root / "outputs", runtime_factory=fake_members(runtime))
         first = asyncio.create_task(service.bind("race-workspace", {"cache_id": "race-cache", "session_id": "race-session"}))
         await entered.wait()
         second = asyncio.create_task(service.bind("ignored", {"cache_id": "race-cache", "session_id": "race-session"}))
@@ -383,7 +406,7 @@ class AssistantRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.store.close()
         reopened = AssistantStore(self.root / "store")
         recovered_runtime = FakeAppServer()
-        offline = AssistantRuntime(reopened, self.root, output_root=self.root / "outputs", runtime_factory=lambda **kw: recovered_runtime)
+        offline = AssistantRuntime(reopened, self.root, output_root=self.root / "outputs", runtime_factory=fake_members(recovered_runtime))
         try:
             await offline.bind("ignored", {"session_id": "session-1"})
             task = reopened.task(task_id)
@@ -429,7 +452,7 @@ class AssistantRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
         reopened = AssistantStore(self.root / "store")
         recovered_runtime = FakeAppServer()
-        recovered = AssistantRuntime(reopened, self.root, output_root=self.root / "outputs", runtime_factory=lambda **kw: recovered_runtime)
+        recovered = AssistantRuntime(reopened, self.root, output_root=self.root / "outputs", runtime_factory=fake_members(recovered_runtime))
         try:
             await recovered.bind("ignored", {"session_id": "session-1"})
             row = reopened.db.execute("SELECT status,source_hash FROM meeting_overview WHERE workspace_id=?",

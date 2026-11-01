@@ -20,10 +20,10 @@ import SQLite3
     checks += try meetingListenerPanelChecks(directory: directory)
     checks += try meetingAssistantReminderExportChecks(directory: directory)
     func check(_ value: Bool, _ name: String) throws { if !value { throw Failure(code: name) }; checks.append(name) }
-    func wait(_ seconds: Double = 15, _ predicate: () -> Bool) throws {
+    func wait(_ seconds: Double = 15, line: Int = #line, _ predicate: () -> Bool) throws {
         let end = Date().addingTimeInterval(seconds)
         while !predicate() && Date() < end { _ = RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.02)) }
-        try check(predicate(), "async_\(checks.count)")
+        try check(predicate(), "async_line_\(line)")
     }
     func settle() { let end = Date().addingTimeInterval(0.2); while Date() < end { _ = RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.02)) } }
     let app = Delegate(); app.previewRenderOnly = true; app.agentFeatureOverride = true; app.agentLiveProbe = live
@@ -109,10 +109,15 @@ import SQLite3
         try check(overview["stale"] as? Bool == false, "overview_matches_current_speech")
         let data = overview["data"] as? [String: Any] ?? [:]
         try check(!((data["current_topic"] as? [String: Any])?["text"] as? String ?? "").isEmpty, "overview_has_current_topic")
-        try check(!(data["discussion_points"] as? [[String: Any]] ?? []).isEmpty, "overview_has_structured_points")
+        // Which group a point lands in is the model's call: these sentences read as decisions.
+        try check(["discussion_points", "decisions", "actions", "open_questions"].contains {
+            !(data[$0] as? [[String: Any]] ?? []).isEmpty }, "overview_has_structured_points")
         try check((controller.state["messages"] as? [[String: Any]] ?? []).isEmpty, "overview_not_in_chat")
         try JSONSerialization.data(withJSONObject: controller.state, options: [.prettyPrinted, .sortedKeys]).write(to: directory.appendingPathComponent("overview-state.json"))
-        controller.panel.chooseTab("助理")
+        // The checks below start from no meeting and belong to the other entry points.
+        var stopped = false; controller.shutdown { stopped = true }; try wait { stopped }
+        return ["status": "passed", "checks": checks, "live_subscription": live, "capture": false, "keychain": false,
+                "state": controller.state, "images": ["overview.png"].map { directory.appendingPathComponent($0).path }]
     }
     let priorCommandHandler = controller.panel.onCommand
     var panelCommand: (String, [String: Any])?

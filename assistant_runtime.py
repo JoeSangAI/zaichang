@@ -18,7 +18,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
-from codex_runtime import CodexRuntime, RuntimeErrorCode
+from codex_runtime import CodexPool, CodexRuntime, RuntimeErrorCode, process_headroom
 
 
 def overview_evidence_eligible(segment: dict) -> bool:
@@ -62,6 +62,15 @@ MAX_WORK_RUNNING = 2
 MAX_WORK_QUEUED = 4
 # Each user request gets its own thread so none waits behind another.
 MAX_REQUESTS_RUNNING = 4
+# How long Codex may keep retrying the model before the task is told it failed.
+# Listening has none: it picks up by itself once the connection is back.
+RETRY_DEADLINE_SECONDS = {"overview": 60, "request": 120, "work": 300}
+RETRY_DEADLINE_WHEN_DOWN = 20
+# Background work stops starting when the machine is this close to its process limit.
+PROCESS_RESERVE = 300
+# A process that lived this long died of something passing, so listening picks up on a new one.
+LISTENER_SELF_HEAL_AFTER_SECONDS = 60
+LINK_DOWN_MESSAGE = "连不上模型服务，多半是 VPN 或网络断了。录音不受影响，恢复后助理会继续。"
 MEETING_REQUEST_SECONDS = 60
 # A single image can take ~18 minutes with only a few events in between;
 # twenty silent minutes means the turn is lost, not slow.
@@ -84,7 +93,10 @@ def _speech_line(segment: dict) -> str:
     review = "〔识别待核实〕" if not overview_evidence_eligible({**segment, "final": True}) else ""
     return f"{_clock_text(segment.get('start'))} {speaker}：{str(segment.get('text') or '')}{review}"
 OVERVIEW_INTERVAL_SECONDS = 180
-OVERVIEW_MIN_NEW_CHARS = 600
+OVERVIEW_BASE_INSTRUCTIONS = "You turn supplied meeting text into the requested JSON. Answer directly, without tools."
+# Failures of the machine or the network, not of this overview: try again next interval.
+OVERVIEW_TRANSIENT_FAILURES = {"model_unreachable", "machine_process_limit", "runtime_capacity",
+                               "runtime_disconnected", "turn_stalled"}
 OVERVIEW_SOURCE_FORMAT = "indexed-v1"
 _EVIDENCE_SCHEMA = {"type": "array", "minItems": 1, "maxItems": 3, "items": {
     "type": "object", "additionalProperties": False,
@@ -114,6 +126,20 @@ EMPTY_OVERVIEW = {"current_topic": {"text": "", "evidence": []}, "discussion_poi
 
 def _now() -> float:
     return time.time()
+
+
+TERMINAL_STATUSES = ("completed", "failed", "interrupted")
+
+
+def _failure_text(code: str | None) -> str:
+    return {None: "这次没有返回内容，可以重发一次。",
+            "model_unreachable": "连不上模型服务，这条没答上。多半是 VPN 或网络断了，恢复后重发一次就行。",
+            "machine_process_limit": "这台电脑的进程数快满了，助理启动不了新任务。退出不用的应用后重发一次就行。",
+            "runtime_capacity": "同时在做的事太多了，等手上的做完再发一次。",
+            "runtime_disconnected": "和 Codex 的连接断了，这条没做完，可以重发。",
+            "turn_stalled": "长时间没有进展，已自动停止；已生成的图片保留在上方。",
+            "shutdown_no_replay": "在场关闭时这条还没答完，不会自动重做，可以重发。",
+            "restart_no_replay": "在场关闭时这条还没答完，不会自动重做，可以重发。"}.get(code, f"没能做完（{code}）。")
 
 
 def _id() -> str:
@@ -223,7 +249,9 @@ class AssistantRuntime:
                  runtime_factory: Callable[..., CodexRuntime] = CodexRuntime,
                  emit: Callable[[dict], Awaitable[None]] | None = None,
                  clock: Callable[[], float] = _now,
-                 sleep: Callable[[float], Awaitable[None]] = asyncio.sleep):
+                 sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+                 headroom: Callable[[], int] = process_headroom,
+                 warm_requests: bool = False):
         self.store = store
         self.cwd = str(Path(cwd).expanduser().resolve())
         self.output_root = Path(output_root) if output_root is not None else Path.home() / "Desktop" / "AI output"
@@ -242,6 +270,12 @@ class AssistantRuntime:
         self.overview_inputs: dict[str, dict] = {}
         self.overview_timers: dict[str, asyncio.Task] = {}
         self.overview_refresh_pending: set[str] = set()
+        self.overview_last_attempt: dict[str, float] = {}
+        self.contexts_seen: set[str] = set()
+        self.headroom = headroom
+        self.warm_requests = warm_requests
+        self.link_down_since: float | None = None
+        self.housekeeping: set[asyncio.Task] = set()
         self._state_lock = asyncio.Lock()
         self._output_lock = asyncio.Lock()
         self.conversation_locks: dict[str, asyncio.Lock] = {}
@@ -469,7 +503,7 @@ class AssistantRuntime:
                 self.runtime = None
                 self.runtime_threads.clear()
                 self.runtime_status, self.runtime_message = "unavailable", "Codex 连接已断开，正在重连"
-            candidate = self.runtime_factory(on_request=self._on_server_request)
+            candidate = CodexPool(lambda **options: self.runtime_factory(**options), on_request=self._on_server_request)
             try:
                 await candidate.start()
                 self.runtime = candidate
@@ -479,7 +513,7 @@ class AssistantRuntime:
                 self.runtime = None
                 code = exc.code if isinstance(exc, RuntimeErrorCode) else "runtime_unavailable"
                 self.runtime_status = "auth_required" if "auth" in code.lower() or "login" in code.lower() else "unavailable"
-                self.runtime_message = code
+                self.runtime_message = _failure_text(code) if code == "machine_process_limit" else code
 
     async def list_workspaces(self) -> dict:
         rows = self.store.db.execute("SELECT id,title,session_id,cache_id,updated FROM workspace ORDER BY updated DESC")
@@ -520,8 +554,17 @@ class AssistantRuntime:
         changed = digest != ws["context_hash"]
         self.store.db.execute("""UPDATE workspace SET context_hash=?,context_revision=?,context_segment_ids=?,
             updated=? WHERE id=?""", (digest, revision, _compact(segment_ids), self.clock(), workspace_id))
-        if previous_overview_hash != self._overview_hash(context):
-            self._schedule_overview(workspace_id)
+        if workspace_id not in self.contexts_seen:
+            # Fingerprints of an unchanged, finished overview from an earlier version are not news.
+            self.contexts_seen.add(workspace_id)
+            self.store.db.execute("""UPDATE meeting_overview SET covered_json=? WHERE workspace_id=?
+                AND status='ready' AND data_source_hash=?""",
+                (_compact(self._coverage(context)), workspace_id, self._overview_hash(context)))
+        recording_stopped = previous_context.get("meeting_state") == "recording" and context["meeting_state"] != "recording"
+        if recording_stopped or previous_overview_hash != self._overview_hash(context):
+            self._schedule_overview(workspace_id, immediate=recording_stopped)
+        if previous_context.get("meeting_state") != context["meeting_state"]:
+            self._keep_house()
         if changed:
             self.revisions[workspace_id] = self.revisions.get(workspace_id, 0) + 1
             previous_segments = {str(s.get("id")): s for s in previous_context.get("segments", [])}
@@ -553,16 +596,22 @@ class AssistantRuntime:
         return {"active": bool(params.get("active")), "queued": live, "available": available}
 
     @staticmethod
-    def _overview_hash(ctx: dict) -> str:
+    def _overview_content(segment: dict) -> dict:
+        """What an overview can see of a segment. Bookkeeping (batch revision, end time) is not a change."""
+        return {"id": segment.get("id"), "text": segment.get("text", ""), "speaker": segment.get("speaker", ""),
+                "quality_flags": segment.get("quality_flags", []), "speaker_uncertain": segment.get("speaker_uncertain", False),
+                "text_quality": segment.get("text_quality")}
+
+    @classmethod
+    def _overview_hash(cls, ctx: dict) -> str:
         material = {"evidence_policy": 5, "title": ctx.get("title", ""), "segments": [
-            {"id": s.get("id"), "text": s.get("text", ""), "speaker": s.get("speaker", ""), "quality_flags": s.get("quality_flags", []), "speaker_uncertain": s.get("speaker_uncertain", False), "text_quality": s.get("text_quality")}
-            for s in ctx.get("segments", []) if isinstance(s, dict) and s.get("final") is True]}
+            cls._overview_content(s) for s in ctx.get("segments", []) if isinstance(s, dict) and s.get("final") is True]}
         return hashlib.sha256(_compact(material).encode()).hexdigest() if material["segments"] else ""
 
-    @staticmethod
-    def _coverage(ctx: dict) -> dict:
+    @classmethod
+    def _coverage(cls, ctx: dict) -> dict:
         # Fingerprints also detect corrected text under an existing segment ID.
-        return {str(s["id"]): hashlib.sha256(_compact(s).encode()).hexdigest()
+        return {str(s["id"]): hashlib.sha256(_compact(cls._overview_content(s)).encode()).hexdigest()
                 for s in ctx.get("segments", []) if s.get("id") is not None and overview_evidence_eligible(s)}
 
     @classmethod
@@ -582,7 +631,8 @@ class AssistantRuntime:
             return
         previous = self.store.db.execute("SELECT * FROM meeting_overview WHERE workspace_id=?", (workspace_id,)).fetchone()
         if (not refresh and previous and previous["source_hash"] == source_hash
-                and previous["status"] in ("failed", "interrupted")):
+                and previous["status"] in ("failed", "interrupted")
+                and previous["error"] not in OVERVIEW_TRANSIENT_FAILURES):
             timer = self.overview_timers.pop(workspace_id, None)
             if timer:
                 timer.cancel()
@@ -595,14 +645,17 @@ class AssistantRuntime:
             return
         covered = json.loads(previous["covered_json"]) if previous else {}
         new = self._new_segments(ctx, covered)
-        if not refresh and previous and not new and previous["data_source_hash"] == source_hash:
+        if not refresh and previous and previous["data_source_hash"] == source_hash and not (immediate and new):
             return
-        # Metadata/corrections which invalidate old evidence are processed immediately.
-        corrected = bool(set(covered) - set(self._coverage(ctx))) or any(str(s["id"]) in covered for s in new)
+        # One clock: whatever changed, an overview waits for the interval. Only the
+        # user's refresh and the backlog after a meeting's recording stops go early.
         delay = 0
-        if previous and previous["completed_at"] and new and not (refresh or immediate or corrected):
-            if sum(len(s["text"]) for s in new) < OVERVIEW_MIN_NEW_CHARS:
-                delay = max(0, previous["completed_at"] + OVERVIEW_INTERVAL_SECONDS - self.clock())
+        if not (refresh or immediate):
+            current = self.overview_timers.get(workspace_id)
+            if current and not current.done():
+                return  # Already set for the same moment; it reads the latest speech when it fires.
+            last = max(previous["completed_at"] if previous else 0, self.overview_last_attempt.get(workspace_id, 0))
+            delay = max(0, last + OVERVIEW_INTERVAL_SECONDS - self.clock()) if last else 0
         old = self.overview_timers.pop(workspace_id, None)
         if old and not old.done():
             old.cancel()
@@ -648,12 +701,17 @@ class AssistantRuntime:
             source_hash = self._overview_hash(ctx)
             if not any(overview_evidence_eligible(s) for s in ctx["segments"]):
                 raise RuntimeErrorCode("overview_no_reliable_evidence")
+            if await asyncio.to_thread(self.headroom) < PROCESS_RESERVE:
+                raise RuntimeErrorCode("machine_process_limit")
             frozen = self._prepare_overview(workspace_id, ctx)
             task_id = self._create_task(workspace_id, "会议概览", "user", goal="根据已完成的会议发言更新结构化概览",
                                         source_refs=[source_hash], kind="overview")
             self.overview_inputs[task_id] = frozen
             self._message(_id(), task_id, "user", "生成结构化会议概览", "queued", "user")
             self._set_overview_status(workspace_id, "queued", None, source_hash)
+            # Its moment has come: from here a finished run must be able to set the next one.
+            if self.overview_timers.get(workspace_id) is asyncio.current_task():
+                self.overview_timers.pop(workspace_id, None)
             self._pump()
             await self._snapshot(workspace_id)
         except asyncio.CancelledError:
@@ -663,6 +721,10 @@ class AssistantRuntime:
             if source_hash:
                 self._set_overview_status(workspace_id, "failed", code, source_hash)
                 await self._snapshot(workspace_id)
+                if code in OVERVIEW_TRANSIENT_FAILURES:
+                    self.overview_last_attempt[workspace_id] = self.clock()
+                    self.overview_timers.pop(workspace_id, None)
+                    self._schedule_overview(workspace_id)
         finally:
             if self.overview_timers.get(workspace_id) is asyncio.current_task():
                 self.overview_timers.pop(workspace_id, None)
@@ -812,12 +874,23 @@ class AssistantRuntime:
         allowed = {"title", "origin", "status", "thread_id", "turn_id", "goal", "goal_key", "source_refs", "error", "lane", "parent_task_id", "depth", "kind"}
         if set(fields) - allowed:
             raise ValueError("invalid_task_update")
+        before = self.store.task(task_id) if fields.get("status") in TERMINAL_STATUSES else None
         fields["updated"] = self.clock()
         self.store.db.execute("UPDATE task SET " + ",".join(f"{key}=?" for key in fields) + " WHERE id=?",
                               (*fields.values(), task_id))
         row = self.store.db.execute("SELECT workspace_id FROM task WHERE id=?", (task_id,)).fetchone()
         if row:
             self.store.db.execute("UPDATE workspace SET updated=? WHERE id=?", (self.clock(), row["workspace_id"]))
+        if before and before["kind"] == "work" and before["lane"] == "request" and before["status"] not in TERMINAL_STATUSES:
+            self._settle_request(task_id, before["status"], fields.get("error"))
+
+    def _settle_request(self, task_id: str, status_before: str, error: str | None):
+        """A question the user asked always ends in something they can read."""
+        answered = self.store.db.execute("SELECT 1 FROM message WHERE task_id=? AND role='assistant' LIMIT 1", (task_id,)).fetchone()
+        if not answered:
+            stopped = error == "cancelled" or (status_before == "cancelling" and error is None)
+            self._message(_id(), task_id, "assistant", "已停止。" if stopped else _failure_text(error),
+                          "completed" if stopped else "failed", "user")
 
     def _message(self, message_id: str, task_id: str, role: str, text: str, status: str, origin: str):
         now = self.clock()
@@ -891,7 +964,8 @@ class AssistantRuntime:
         refresh = row["workspace_id"] in self.overview_refresh_pending
         self.overview_refresh_pending.discard(row["workspace_id"])
         if stale or refresh:
-            self._schedule_overview(row["workspace_id"], immediate=bool(ctx.get("remaining")), refresh=refresh)
+            recording = self.contexts.get(row["workspace_id"], {}).get("meeting_state") == "recording"
+            self._schedule_overview(row["workspace_id"], immediate=bool(ctx.get("remaining")) and not recording, refresh=refresh)
 
     def _conversation(self, workspace_id, *, create=True):
         row = self.store.db.execute("SELECT * FROM task WHERE workspace_id=? AND kind='chat'", (workspace_id,)).fetchone()
@@ -1045,7 +1119,46 @@ class AssistantRuntime:
             row = self.store.task(task_id)
             if row and row["kind"] == "chat" and row["status"] == "completed" and self._listening_enabled(row["workspace_id"]):
                 self._set_task(task_id, status="queued")
+            if row and row["kind"] == "overview":
+                self.overview_last_attempt[row["workspace_id"]] = self.clock()
+                if row["error"] in OVERVIEW_TRANSIENT_FAILURES:
+                    self._schedule_overview(row["workspace_id"])
             self._pump()
+            self._keep_house()
+
+    def _keep_house(self):
+        task = asyncio.create_task(self._reconcile_processes())
+        self.housekeeping.add(task)
+        task.add_done_callback(self.housekeeping.discard)
+
+    async def _reconcile_processes(self):
+        """A process lives as long as its owner: one running task, or a meeting being listened to."""
+        if self._closed or self.runtime is None:
+            return
+        owned = {self.store.task(task_id)["thread_id"] for task_id in self.task_workers}
+        owned.update(row["thread_id"] for row in self.store.db.execute(
+            "SELECT thread_id,workspace_id FROM task WHERE kind='chat' AND thread_id IS NOT NULL")
+            if self._listening_enabled(row["workspace_id"]))
+        for thread_id in self.runtime.threads() - owned:
+            self.runtime_threads.discard(thread_id)
+            await self.runtime.release(thread_id)
+        if not self.warm_requests:
+            return
+        recording = any(ctx.get("meeting_state") == "recording" for ctx in self.contexts.values())
+        if recording and await asyncio.to_thread(self.headroom) >= PROCESS_RESERVE:
+            with contextlib.suppress(RuntimeErrorCode, OSError):
+                await self.runtime.warm(self.cwd, **self._request_thread())
+        else:
+            await self.runtime.discard_spare()
+
+    async def _link_changed(self, down: bool):
+        if down == (self.link_down_since is not None) or self.runtime_status not in ("ready", "unavailable"):
+            return
+        self.link_down_since = self.clock() if down else None
+        self.runtime_status, self.runtime_message = ("unavailable", LINK_DOWN_MESSAGE) if down else ("ready", "Codex 已连接")
+        logging.getLogger(__name__).warning("zaichang-model-link %s", "down" if down else "up")
+        for workspace_id in list(self.contexts):
+            await self._snapshot(workspace_id)
 
     @staticmethod
     def _listener_prompt():
@@ -1105,18 +1218,20 @@ class AssistantRuntime:
         if row["kind"] == "work":
             return await self._run_work(task_id)
         is_overview = row["kind"] == "overview"
+        started = time.monotonic()
         fresh = row["thread_id"] not in self.runtime_threads
         self.turn_modes[task_id] = "overview" if is_overview else "listen"
         try:
             thread_id = row["thread_id"]
             if fresh:
                 model, effort = 'gpt-6.1-terra', 'medium'  # Overview and conversation threads share one route.
+                options = {"tools": False, "base_instructions": OVERVIEW_BASE_INSTRUCTIONS} if is_overview else {}
                 result = await self.runtime.start_thread(self.cwd, ephemeral=True, sandbox="read-only", approval_policy="never",
                     dynamic_tools=[] if is_overview else self._dynamic_tools(), model=model, effort=effort,
                     developer_instructions=("You produce a concise, structured meeting overview from the provided finalized speech segments only. "
                                             "Do not use filesystem, web, MCP, tools, or outside context. Never infer decisions, tasks, owners, or deadlines. "
                                             "Every non-empty item must cite exact source quotes and segment IDs from the supplied meeting projection."
-                                            if is_overview else self._listener_prompt()))
+                                            if is_overview else self._listener_prompt()), **options)
                 thread_id = result["thread"]["id"]
                 logging.getLogger(__name__).warning('zaichang-model-route %s', _compact({
                     'kind': row['kind'], 'requested_model': model, 'requested_effort': effort,
@@ -1156,9 +1271,13 @@ class AssistantRuntime:
                 self.runtime_threads.discard(thread_id)
                 self._set_task(task_id, thread_id=None, turn_id=None, status="running")
                 return await self._run_task(task_id)
-            # A stalled listening turn resumes on a fresh thread instead of ending listening.
-            self._set_task(task_id, status="completed" if code == "turn_stalled" and not is_overview
-                           else "interrupted" if self.runtime is None or self.runtime.closed else "failed", turn_id=None, error=code)
+            # A stalled listening turn, or one whose process died after a good run,
+            # resumes on a fresh thread instead of ending listening.
+            resumes = not is_overview and (code == "turn_stalled" or (
+                code == "runtime_disconnected" and time.monotonic() - started >= LISTENER_SELF_HEAL_AFTER_SECONDS))
+            self._set_task(task_id, status="completed" if resumes
+                           else "interrupted" if self.runtime is None or self.runtime.closed or code == "runtime_disconnected"
+                           else "failed", turn_id=None, error=code)
             self.store.db.execute("UPDATE message SET status='interrupted' WHERE task_id=? AND status='queued'", (task_id,))
             if is_overview:
                 self._set_overview_status(workspace_id, "failed", code, (json.loads(row["source_refs"]) or [""])[0])
@@ -1183,10 +1302,11 @@ class AssistantRuntime:
         self.activities[task_id] = "正在思考…" if request else "正在开始…"
         thread_id = None
         try:
-            model, effort = 'gpt-6.1-terra', 'medium'
-            result = await self.runtime.start_thread(self.cwd, ephemeral=True, sandbox="read-only", approval_policy="never",
-                dynamic_tools=self._dynamic_tools(work=True), model=model, effort=effort,
-                developer_instructions=self._request_prompt() if request else self._worker_prompt())
+            options = self._request_thread()
+            if not request:
+                options["developer_instructions"] = self._worker_prompt()
+            model, effort = options["model"], options["effort"]
+            result = await self.runtime.start_thread(self.cwd, **options)
             thread_id = result["thread"]["id"]
             logging.getLogger(__name__).warning('zaichang-model-route %s', _compact({
                 'kind': 'work', 'requested_model': model, 'requested_effort': effort,
@@ -1215,11 +1335,10 @@ class AssistantRuntime:
             raise
         except Exception as exc:
             code = exc.code if isinstance(exc, RuntimeErrorCode) else str(exc)
-            self._set_task(task_id, status="interrupted" if self.runtime is None or self.runtime.closed else "failed",
+            if not request:
+                self._message(_id(), task_id, "assistant", f"**{row['title']}**\n\n{_failure_text(code)}", "failed", row["origin"])
+            self._set_task(task_id, status="interrupted" if self.runtime is None or self.runtime.closed or code == "runtime_disconnected" else "failed",
                            turn_id=None, error=code)
-            reason = "长时间没有进展，已自动停止；已生成的图片保留在上方" if code == "turn_stalled" else code
-            self._message(_id(), task_id, "assistant", ("" if request else f"**{row['title']}**\n\n") + f"没能做完（{reason}）。",
-                          "failed", row["origin"])
         finally:
             # Work threads are one-shot; nothing resumes them.
             if thread_id:
@@ -1233,8 +1352,35 @@ class AssistantRuntime:
             self.context_events.setdefault(workspace_id, asyncio.Event()).set()
             await self._snapshot(workspace_id)
 
+    def _request_thread(self) -> dict:
+        return dict(ephemeral=True, sandbox="read-only", approval_policy="never",
+                    dynamic_tools=self._dynamic_tools(work=True), model='gpt-6.1-terra', effort='medium',
+                    developer_instructions=self._request_prompt())
+
     def _executing(self, task_id):
         return self.turn_modes.get(task_id) == "work"
+
+    def _retry_deadline(self, task_id) -> float | None:
+        row = self.store.task(task_id)
+        lane = "overview" if row["kind"] == "overview" else None if row["kind"] == "chat" else "request" if row["lane"] == "request" else "work"
+        if lane is None:
+            return None
+        deadline = RETRY_DEADLINE_SECONDS[lane]
+        # Already known to be down: say so soon instead of making them wait it out again.
+        if self.link_down_since is not None and self.clock() - self.link_down_since >= deadline:
+            return min(deadline, RETRY_DEADLINE_WHEN_DOWN)
+        return deadline
+
+    async def _check_retry_deadline(self, task_id, thread_id, turn_id, since: float):
+        deadline = self._retry_deadline(task_id)
+        if deadline is not None and asyncio.get_running_loop().time() - since > deadline:
+            with contextlib.suppress(Exception):
+                await self.runtime.interrupt(thread_id, turn_id)
+            raise RuntimeErrorCode("model_unreachable")
+        if self._executing(task_id):
+            seconds = int(asyncio.get_running_loop().time() - since)
+            self.activities[task_id] = f"连不上模型，正在重试…（{seconds} 秒）"
+            await self._snapshot(self.store.task(task_id)["workspace_id"])
 
     def _user_requested(self, task_id):
         # Only the user's own messages create user-origin work; listener tasks are proactive.
@@ -1259,7 +1405,7 @@ class AssistantRuntime:
         if self.store.task(task_id)["status"] == "cancelling":
             await self.runtime.interrupt(thread_id, turn_id)
         await self._snapshot(self.store.task(task_id)["workspace_id"])
-        loop = asyncio.get_running_loop(); heard = loop.time()
+        loop = asyncio.get_running_loop(); heard = loop.time(); retrying_since = None
         while True:
             try:
                 event = await self.runtime.event(thread_id, timeout=1)
@@ -1274,13 +1420,25 @@ class AssistantRuntime:
                     with contextlib.suppress(Exception):
                         await self.runtime.interrupt(thread_id, turn_id)
                     raise RuntimeErrorCode("turn_stalled")
+                if retrying_since is not None:
+                    await self._check_retry_deadline(task_id, thread_id, turn_id, retrying_since)
                 continue
-            heard = loop.time()
             params = event.get("params", {})
             event_turn = params.get("turnId") or (params.get("turn") or {}).get("id")
             if params.get("threadId", thread_id) != thread_id or (event_turn and event_turn != turn_id):
                 continue
             method = event.get("method", "")
+            # Codex retrying is not progress: it must not hold off either deadline.
+            if method == "error" and params.get("willRetry"):
+                if retrying_since is None:
+                    retrying_since = loop.time()
+                    await self._link_changed(down=True)
+                await self._check_retry_deadline(task_id, thread_id, turn_id, retrying_since)
+                continue
+            heard = loop.time()
+            if method.startswith("item/") or method == "thread/tokenUsage/updated":
+                retrying_since = None
+                await self._link_changed(down=False)
             await self._handle_event(task_id, method, params)
             if method in ("turn/failed", "turn/error"):
                 raise RuntimeErrorCode("turn_failed")
@@ -1297,6 +1455,7 @@ class AssistantRuntime:
                     elif row["kind"] == "overview":
                         for item_id, text in self.turn_outputs[task_id]:
                             self._message(f"codex:{thread_id}:{turn_id}:{item_id}", task_id, "assistant", text, "completed", "user")
+                    await self._link_changed(down=False)
                     self._set_task(task_id, status="completed", turn_id=None, error=None)
                 elif status in ("interrupted", "cancelled") or row["status"] == "cancelling":
                     # Deliberate handoff (steer fallback/off) may process queued input next.
@@ -1642,7 +1801,8 @@ class AssistantRuntime:
             await self._interrupt_conversation(task_id)
         workers = list(self.task_workers.values())
         for worker in workers: worker.cancel()
-        await asyncio.gather(*timers, *workers, return_exceptions=True)
+        for task in self.housekeeping: task.cancel()
+        await asyncio.gather(*timers, *workers, *self.housekeeping, return_exceptions=True)
         if self.runtime:
             await self.runtime.close()
             self.runtime = None
@@ -1735,7 +1895,7 @@ def main(argv: list[str] | None = None) -> int:
     except (AttributeError, OSError):
         pass
     store = AssistantStore(args.store)
-    service = AssistantRuntime(store, args.cwd, offline=args.offline, emit=_stdout_emit)
+    service = AssistantRuntime(store, args.cwd, offline=args.offline, emit=_stdout_emit, warm_requests=True)
     try:
         asyncio.run(_serve(service))
     finally:
