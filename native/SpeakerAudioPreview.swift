@@ -54,10 +54,13 @@ enum SpeakerAudioPreview {
         let manifestURL=folder.appendingPathComponent(track+"-manifest.json"),manifestData=try read(manifestURL,limit:1024*1024)
         guard let manifest=try JSONSerialization.jsonObject(with:manifestData) as? [String:Any],manifest["schema"] as? Int==1,
               manifest["track"] as? String==track,manifest["format"] as? String=="pcm_s16le",manifest["sample_rate"] as? Int==16000,
-              manifest["channels"] as? Int==1,manifest["ended"] as? Bool==true,manifest["error"] as? String==nil,
+              manifest["channels"] as? Int==1,manifest["error"] as? String==nil,
               let trackOrigin=manifest["origin_uptime"] as? Double,trackOrigin.isFinite,trackOrigin>=origin,trackOrigin-origin<=86400,
               let chunks=manifest["chunks"] as? [[String:Any]],chunks.count<=2000,
               let written=manifest["written_bytes"] as? Int,written>=0,written<=512*1024*1024 else{throw Failure(code:"speaker_preview_unavailable")}
+        // A paused recording is not sealed yet. Files are only read, never opened
+        // for writing, and the manifest states how much of the last one is complete.
+        let sealed=manifest["ended"] as? Bool==true
         var pcmFolder=folder
         let retirement=folder.appendingPathComponent("audio-retirement.json")
         if fm.fileExists(atPath:retirement.path) {
@@ -78,11 +81,19 @@ enum SpeakerAudioPreview {
                   let bytes=chunk["bytes"] as? Int,bytes>0,bytes<=320000,bytes%2==0 else{throw Failure(code:"speaker_preview_invalid")}
             let next=cursor+bytes;defer{cursor=next}
             guard next>lo,cursor<hi else{continue}
-            let data=try read(pcmFolder.appendingPathComponent(String(format:"%@-%06d.pcm",track,index)),limit:320000)
-            guard data.count==bytes,chunk["sha256"] as? String==SHA256.hash(data:data).map({String(format:"%02x",$0)}).joined() else{throw Failure(code:"speaker_preview_changed")}
-            pcm.append(data[max(0,lo-cursor)..<min(bytes,hi-cursor)])
+            let file=pcmFolder.appendingPathComponent(String(format:"%@-%06d.pcm",track,index))
+            var data=try read(file,limit:320000)
+            if let hash=chunk["sha256"] as? String {
+                guard data.count==bytes,hash==SHA256.hash(data:data).map({String(format:"%02x",$0)}).joined() else{throw Failure(code:"speaker_preview_changed")}
+            } else {
+                // Only the chunk still being filled may lack its digest.
+                guard !sealed,index==chunks.count-1,data.count>=bytes else{throw Failure(code:"speaker_preview_changed")}
+                data=data.prefix(bytes)
+            }
+            pcm.append(data[data.startIndex+max(0,lo-cursor)..<data.startIndex+min(bytes,hi-cursor)])
         }
-        guard cursor==written,pcm.count==hi-lo,try read(manifestURL,limit:1024*1024)==manifestData else{throw Failure(code:"speaker_preview_changed")}
+        guard cursor==written,pcm.count==hi-lo else{throw Failure(code:"speaker_preview_changed")}
+        if sealed {guard try read(manifestURL,limit:1024*1024)==manifestData else{throw Failure(code:"speaker_preview_changed")}}
         return SpeakerAudioClip(wav:MeetingAudioAssetsStore.wavHeader(pcm.count)+pcm,duration:Double(pcm.count)/32000,truncated:requestedHi>hi)
     }
 }

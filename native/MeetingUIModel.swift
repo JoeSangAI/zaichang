@@ -100,6 +100,21 @@ struct SessionNames {
         guard learn,voiceConfirmations.count<128 else{return}
         voiceConfirmations.append(SessionVoiceConfirmation(id:UUID().uuidString,session:session,name:name,person:person,segmentIDs:ids,createdAt:ISO8601DateFormatter().string(from:Date())))
     }
+    // A person named while still talking keeps talking under that name. Cover the
+    // turns since then, exactly what naming them now would confirm; the same
+    // record keeps undo and revocation whole. Learning still needs coherent audio.
+    mutating func extendSpeakerConfirmations(session:String)->Bool {
+        var changed=false
+        for (index,record) in voiceConfirmations.enumerated() where record.session==session {
+            let keys=Set(record.segmentIDs.compactMap{key(segment:$0)})
+            guard keys.count==1,let key=keys.first,speakerNames[key]==record.name else{continue}
+            let next=Array(Set(record.segmentIDs).union(segmentIDs(for:key).filter{name(segment:$0)==record.name})).sorted()
+            guard next.count>record.segmentIDs.count,next.count<=4096 else{continue}
+            voiceConfirmations[index]=SessionVoiceConfirmation(id:record.id,session:record.session,name:record.name,person:record.person,segmentIDs:next,createdAt:record.createdAt)
+            changed=true
+        }
+        return changed
+    }
     @discardableResult mutating func confirmSegments(_ ids:[String],name:String,person:SharedPersonReference?=nil,learn:Bool)->Bool {
         let ids=Array(Set(ids)).sorted(),name=normalized(name)
         guard let name,!ids.isEmpty,ids.count<=4096,let session=ids.first.flatMap({sessions[$0]}),ids.allSatisfy({sessions[$0]==session}) else{return false}
@@ -272,14 +287,16 @@ struct SessionNames {
         }
         if let candidate,validCandidate {validatedVoiceRevisions[candidate.personID]=candidate.archiveRevision}
         if let old=autoNames[key] {
-            if let candidate,validCandidate,candidate.personID != old.personID {suppressAuto(key);return true}
+            // The same name from a new basis (a voice recognised in this meeting,
+            // then from the voice library) is agreement, not a conflict.
+            if let candidate,validCandidate,candidate.personID != old.personID,candidate.name != old.name {suppressAuto(key);return true}
             guard let candidate,validCandidate,candidate.groupConsistent,eligible else{
                 autoNames.removeValue(forKey:key);voiceSuggestions[key]=suggestion;correctionRevision &+= 1;return true
             }
-            guard candidate.personID==old.personID else{suppressAuto(key);return true}
+            guard candidate.personID==old.personID || candidate.name==old.name else{suppressAuto(key);return true}
             // Keep the original three supporting events while they are still
             // current; later turns need not rewrite every heading and cache.
-            if old.name==candidate.name && old.archiveRevision==candidate.archiveRevision && old.support.allSatisfy({segmentRevisions[$0.id]==$0.revision && bindings[$0.id]==key}) {return false}
+            if old.personID==candidate.personID && old.name==candidate.name && old.archiveRevision==candidate.archiveRevision && old.support.allSatisfy({segmentRevisions[$0.id]==$0.revision && bindings[$0.id]==key}) {return false}
             let next=SessionAutoName(key:key,personID:candidate.personID,name:candidate.name,archiveRevision:candidate.archiveRevision,support:candidate.support)
             guard old != next else{return false}
             autoNames[key]=next;voiceSuggestions.removeValue(forKey:key);correctionRevision &+= 1;return true

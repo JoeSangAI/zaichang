@@ -84,7 +84,8 @@ private final class MinimalSpeakerReviewController:NSObject,NSWindowDelegate,NST
     private var cardsScroll:NSScrollView?
     private var detailColumn:NSView?
     private let cardsTitle=NSTextField(labelWithString:"")
-    private let cardsHint=NSTextField(labelWithString:"先听一段，再确认或填名字。确认后会记住声音，下次自动认出。")
+    private let cardsHint=NSTextField(labelWithString:"")
+    private var cardsRebuildPending=false
     private let cardsCounts=NSStackView()
     private let cardsStatus=NSTextField(wrappingLabelWithString:"")
     private let cardsUndo=NSButton(title:"撤销上次",target:nil,action:nil)
@@ -598,13 +599,15 @@ private final class MinimalSpeakerReviewController:NSObject,NSWindowDelegate,NST
         updateControls()
     }
 
+    // Only promise memory that is actually on; new installs start with learning off.
+    private var cardsIdleHint:String {VoiceprintLearningPolicy().isEnabled ? "先听一段，再确认或填名字。确认后会记住声音，下次自动认出。":"先听一段，再确认或填名字。名字只用于本场；要记住声音，到“声音记忆”开启学习。"}
     /// While saved-voice recognition runs, say so on the cards: naming someone now
     /// cancels that run. Re-checked each second until the job is no longer running.
     private func updateCardsActivity() {
         guard let owner else{return}
         let job=owner.savedVoiceRecognitionJob
         let running=(job.busy || job.waiting) && owner.voiceprintStatus.hasPrefix("正在本机识别")
-        let idle="先听一段，再确认或填名字。确认后会记住声音，下次自动认出。"
+        let idle=cardsIdleHint
         let busy="正在按声音认人，通常几秒就好；等它认完再改名，结果不会被打断。"
         if cardsHint.stringValue != (running ? busy:idle),index.map({!$0.people.isEmpty || !$0.unassigned.isEmpty}) ?? false {
             cardsHint.stringValue=running ? busy:idle;cardsHint.textColor=running ? MeetingVisualStyle.accentText:MeetingVisualStyle.muted
@@ -652,7 +655,7 @@ private final class MinimalSpeakerReviewController:NSObject,NSWindowDelegate,NST
             }
             selectionLabel.stringValue=affected==0 ? "选中一轮，可试听或更正归属。":"此轮有多人同时说话，修改只作用于所选内容。"
         }
-        listenButton.isEnabled=previewPlayer != nil || (affected>0 && turns==1 && owner?.currentCacheID != nil && owner?.voiceprintManagementOwner.recordingBusy != true && !previewJob.busy)
+        listenButton.isEnabled=previewPlayer != nil || (affected>0 && turns==1 && owner?.currentCacheID != nil && owner?.voiceprintManagementOwner.audioPreviewBlocked != true && !previewJob.busy)
         let tooManyUnassigned:Bool={
             switch currentChoice {
             case .unassigned?,.simultaneous?:return selectedTurnIDs.count>1
@@ -739,7 +742,7 @@ private final class MinimalSpeakerReviewController:NSObject,NSWindowDelegate,NST
     }
     @objc private func listenSelection() {
         if previewPlayer != nil || previewJob.waiting {stopPreview();updateControls();return}
-        guard let owner,owner.voiceprintManagementOwner.recordingBusy==false,let cache=owner.currentCacheID,let session=owner.activeSession,
+        guard let owner,!owner.voiceprintManagementOwner.audioPreviewBlocked,let cache=owner.currentCacheID,let session=owner.activeSession,
               selectedTurnIDs.count==1,!selectedPartIDs.isEmpty else{return}
         let items=selectedPartIDs.compactMap{partItems[$0]}
         guard items.count==selectedPartIDs.count else{return}
@@ -747,7 +750,7 @@ private final class MinimalSpeakerReviewController:NSObject,NSWindowDelegate,NST
         listenButton.title="正在读取录音…";listenButton.isEnabled=false
         previewJob.run(work:{try SpeakerAudioPreview.read(root:root,cacheID:cache,session:session,items:items)}) { [weak self,weak owner] result in
             guard let self,let owner,self.window?.isVisible==true,self.previewRevision==revision,owner.currentCacheID==cache,
-                  owner.activeSession==session,owner.meetingDocumentGeneration==generation,owner.voiceprintManagementOwner.recordingBusy==false else{return}
+                  owner.activeSession==session,owner.meetingDocumentGeneration==generation,!owner.voiceprintManagementOwner.audioPreviewBlocked else{return}
             do {
                 let clip=try result.get(),player=try AVAudioPlayer(data:SpeakerAudioPreview.listeningData(clip.wav));player.delegate=self
                 guard player.prepareToPlay(),player.play() else{throw Failure(code:"speaker_preview_play_failed")}
@@ -861,7 +864,8 @@ private final class MinimalSpeakerReviewController:NSObject,NSWindowDelegate,NST
         cardsUndo.target=self;cardsUndo.action=#selector(undoCorrection)
         cardsRefine.target=owner;cardsRefine.action=#selector(Delegate.toggleCoarseRefinement)
         let backToText=SpeakerLinkButton(title:"回到原文",target:self,action:#selector(showOriginal))
-        let footer=NSStackView(views:[cardsUndo,cardsRefine,cardsStatus,NSView(),backToText]);footer.orientation = .horizontal;footer.spacing=16;footer.alignment = .centerY
+        let voiceMemory=SpeakerLinkButton(title:"声音记忆",target:owner,action:#selector(Delegate.manageVoiceprintRecommendations))
+        let footer=NSStackView(views:[cardsUndo,cardsRefine,cardsStatus,NSView(),voiceMemory,backToText]);footer.orientation = .horizontal;footer.spacing=16;footer.alignment = .centerY
         cardsStatus.setContentCompressionResistancePriority(.defaultLow,for:.horizontal)
         let rule=NSBox();rule.boxType = .separator
         for view in [header,scroll,rule,footer] as [NSView] {view.translatesAutoresizingMaskIntoConstraints=false;container.addSubview(view)}
@@ -894,8 +898,23 @@ private final class MinimalSpeakerReviewController:NSObject,NSWindowDelegate,NST
     private func spokenSeconds(_ entries:[SpeakerReviewEntry])->Int {Int(entries.reduce(0){$0+max(0,$1.end-$1.start)}.rounded())}
     private func durationText(_ seconds:Int)->String {seconds<60 ? "\(seconds) 秒":(seconds%60==0 ? "\(seconds/60) 分钟":"\(seconds/60) 分 \(seconds%60) 秒")}
 
+    // Live text refreshes this window every few seconds; rebuilding the cards
+    // would pull the field out from under someone typing a name.
+    private var cardsBeingEdited:Bool {
+        guard !showingDetail,let editor=window?.firstResponder as? NSTextView,editor.isFieldEditor,let field=editor.delegate as? NSView else{return false}
+        return field.isDescendant(of:cardsStack)
+    }
+    func controlTextDidEndEditing(_ notification:Notification) {
+        guard cardsRebuildPending else{return}
+        DispatchQueue.main.async { [weak self] in
+            guard let self,self.cardsRebuildPending,!self.cardsBeingEdited else{return}
+            self.rebuildCards()
+        }
+    }
     private func rebuildCards() {
         guard cardsScroll != nil else{return}
+        if cardsBeingEdited {cardsRebuildPending=true;return}
+        cardsRebuildPending=false
         for view in cardsStack.arrangedSubviews {cardsStack.removeArrangedSubview(view);view.removeFromSuperview()}
         for view in cardsCounts.arrangedSubviews {cardsCounts.removeArrangedSubview(view);view.removeFromSuperview()}
         cardsUndo.isEnabled=owner?.naming.canUndo ?? false
@@ -904,7 +923,7 @@ private final class MinimalSpeakerReviewController:NSObject,NSWindowDelegate,NST
         guard let value=index,!value.people.isEmpty || !value.unassigned.isEmpty else {
             cardsTitle.stringValue="还没有可确认的发言人";cardsHint.stringValue="开始录音或打开一场会议后，这里会按人列出发言。";return
         }
-        cardsHint.stringValue="先听一段，再确认或填名字。确认后会记住声音，下次自动认出。";cardsHint.textColor=MeetingVisualStyle.muted;updateCardsActivity()
+        cardsHint.stringValue=cardsIdleHint;cardsHint.textColor=MeetingVisualStyle.muted;updateCardsActivity()
         let kinds=value.people.map{($0,cardKind($0.key))}
         func pending(_ kind:CardKind)->Bool {if case .confirmed=kind {return false};return true}
         let open=kinds.filter{pending($0.1)},done=kinds.filter{!pending($0.1)}
@@ -935,8 +954,8 @@ private final class MinimalSpeakerReviewController:NSObject,NSWindowDelegate,NST
     }
     private func playButton(_ id:String,size:CGFloat,action:@escaping ()->Void)->NSView {
         let button=SpeakerPlayButton(diameter:size,playing:cardPlaying==id,handler:action)
-        button.isEnabled=owner?.currentCacheID != nil && owner?.voiceprintManagementOwner.recordingBusy != true
-        button.toolTip=button.isEnabled ? "试听这一段（仅本机播放）":"录音中或尚未保存时无法试听"
+        button.isEnabled=owner?.currentCacheID != nil && owner?.voiceprintManagementOwner.audioPreviewBlocked != true
+        button.toolTip=button.isEnabled ? "试听这一段（仅本机播放）":"录音时试听会被麦克风录进去；暂停后可以听"
         return button
     }
     private func quote(_ entry:SpeakerReviewEntry,id:String,note:String?)->NSView {
@@ -983,6 +1002,7 @@ private final class MinimalSpeakerReviewController:NSObject,NSWindowDelegate,NST
         let prompt=NSTextField(labelWithString:"这是谁？");prompt.font = .systemFont(ofSize:13);prompt.textColor=MeetingVisualStyle.muted
         let field=SpeakerNameField(string:cardDrafts[id] ?? "");field.placeholderString="输入姓名";field.setAccessibilityLabel("这位发言人的姓名")
         field.onChange={[weak self] text in self?.cardDrafts[id]=text}
+        field.onEndEditing={[weak self] in self?.controlTextDidEndEditing(Notification(name:NSControl.textDidEndEditingNotification))}
         let save=SpeakerPillButton(title:"确认",primary:true){[weak self,weak field] in self?.confirm(person,name:field?.stringValue ?? "")}
         field.onSubmit={[weak self,weak field] in self?.confirm(person,name:field?.stringValue ?? "")}
         let entry=NSStackView(views:[prompt,field,save]);entry.orientation = .horizontal;entry.spacing=10;entry.alignment = .centerY
@@ -1002,7 +1022,7 @@ private final class MinimalSpeakerReviewController:NSObject,NSWindowDelegate,NST
             merge.handler={[weak self,weak merge] in guard let self,let merge else{return};self.showMergeMenu(person,others:others,from:merge)}
             suggestions.addArrangedSubview(merge)
         }
-        let note=NSTextField(labelWithString:"确认后会记住这个声音，以后自动认出。");note.font = .systemFont(ofSize:12);note.textColor=MeetingVisualStyle.muted
+        let note=NSTextField(labelWithString:VoiceprintLearningPolicy().isEnabled ? "确认后会记住这个声音，以后自动认出。":"这个人本场的发言都会改，后面说的也一样。");note.font = .systemFont(ofSize:12);note.textColor=MeetingVisualStyle.muted
         let column=NSStackView(views:[entry,suggestions,note]);column.orientation = .vertical;column.alignment = .leading;column.spacing=8
         entry.widthAnchor.constraint(equalTo:column.widthAnchor).isActive=true
         if suggestions.arrangedSubviews.isEmpty {suggestions.isHidden=true}
@@ -1077,6 +1097,8 @@ private final class MinimalSpeakerReviewController:NSObject,NSWindowDelegate,NST
     private func confirm(_ person:SpeakerReviewPerson,name raw:String) {
         let name=raw.trimmingCharacters(in:.whitespacesAndNewlines)
         guard !name.isEmpty else {cardsStatus.stringValue="先填一个名字。";return}
+        // End editing first: saving rebuilds the cards, and this field goes with them.
+        window?.makeFirstResponder(nil)
         focus(.person(person.key),entry:nil)
         nameField.stringValue=name;nameDraftChanged=true;updateControls()
         cardDrafts.removeValue(forKey:personID(person.key));cardNamingOpen.remove(personID(person.key))
@@ -1655,6 +1677,7 @@ extension Delegate {
     func stopSpeakerAudioPreview() {
         for document in [self,historyReader].compactMap({$0}) {
             (document.speakerReviewWindow as? SpeakerReviewWindow)?.reviewController?.stopPreview()
+            document.confirmationController?.stopPreviewForCapture()
         }
     }
     func closeSpeakerReviewWindow(_ foreground:NSWindow?)->Bool {
@@ -1821,6 +1844,8 @@ private final class SpeakerNameField:NSTextField,NSTextFieldDelegate {
     }
     required init?(coder:NSCoder) {fatalError("init(coder:) has not been implemented")}
     func controlTextDidChange(_ notification:Notification) {onChange?(stringValue)}
+    var onEndEditing:(()->Void)?
+    func controlTextDidEndEditing(_ notification:Notification) {onEndEditing?()}
     func control(_ control:NSControl,textView:NSTextView,doCommandBy commandSelector:Selector)->Bool {
         // Return submits, but never while an input method is still composing.
         guard commandSelector == #selector(NSResponder.insertNewline(_:)),!textView.hasMarkedText() else{return false}

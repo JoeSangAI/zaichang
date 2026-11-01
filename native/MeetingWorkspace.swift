@@ -87,6 +87,12 @@ extension Delegate {
         return speakerRefinementLifecycle.shouldRefineStopped(session:session,reason:reason,
             transcriptionComplete:transcriptionComplete,localOnly:localOnly,recoverySucceeded:recoverySucceeded)
     }
+    // Playing while capture is on would put the preview into the recording: the
+    // microphone hears the speakers. A pause turns both inputs off first.
+    var audioPreviewBlocked:Bool {
+        if phase.phase == .paused {return quitting || preparingModels || resumeBusy || credentialReadJob.waiting || newMeetingRequested || recordingControlInFlight != nil}
+        return recordingBusy
+    }
     var displayedDocument:Delegate {historyReader ?? self}
     // History uses preview initialization to avoid a second app/capture owner;
     // its visible document still follows the real workspace interaction mode.
@@ -147,7 +153,7 @@ extension Delegate {
         main.addArrangedSubview(makeRecordingDashboard())
         let doc=NSView();doc.translatesAutoresizingMaskIntoConstraints=false
         let transcriptScroll=MeetingTranscriptScroll();transcriptScroll.manualScroll={ [weak self] in self?.cancelTranscriptReadingRestore() };scroll=transcriptScroll;scroll.automaticallyAdjustsContentInsets=false;scroll.hasVerticalScroller=true;scroll.autohidesScrollers=true;scroll.drawsBackground=true;scroll.backgroundColor = MeetingVisualStyle.surface;scroll.findBarPosition = .aboveContent;doc.addSubview(scroll);pin(scroll,to:doc)
-        let transcriptView=MeetingTranscriptTextView(frame:NSRect(x:0,y:0,width:700,height:400));transcriptView.manualNavigation={ [weak self] in self?.cancelTranscriptReadingRestore() };output=transcriptView;output.backgroundColor=MeetingVisualStyle.surface;output.textColor=MeetingVisualStyle.ink;output.isEditable=false;output.isSelectable=true;output.isRichText=true;output.delegate=self;output.isVerticallyResizable=true;output.isHorizontallyResizable=false;output.autoresizingMask=[.width];output.textContainerInset=NSSize(width:0,height:12);output.textContainer?.widthTracksTextView=true;output.textContainer?.containerSize=NSSize(width:700,height:CGFloat.greatestFiniteMagnitude);output.maxSize=NSSize(width:CGFloat.greatestFiniteMagnitude,height:CGFloat.greatestFiniteMagnitude);output.usesFindBar=true;output.isIncrementalSearchingEnabled=true;output.linkTextAttributes=[.underlineStyle:0];output.setAccessibilityLabel("会议原文");scroll.documentView=output
+        let transcriptView=MeetingTranscriptTextView(frame:NSRect(x:0,y:0,width:700,height:400));transcriptView.manualNavigation={ [weak self] in self?.cancelTranscriptReadingRestore() };output=transcriptView;output.backgroundColor=MeetingVisualStyle.surface;output.textColor=MeetingVisualStyle.ink;output.isEditable=false;output.isSelectable=true;output.isRichText=true;output.delegate=self;output.isVerticallyResizable=true;output.isHorizontallyResizable=false;output.autoresizingMask=[.width];output.textContainerInset=NSSize(width:0,height:12);output.textContainer?.widthTracksTextView=true;output.textContainer?.containerSize=NSSize(width:700,height:CGFloat.greatestFiniteMagnitude);output.maxSize=NSSize(width:CGFloat.greatestFiniteMagnitude,height:CGFloat.greatestFiniteMagnitude);output.usesFindBar=true;output.isIncrementalSearchingEnabled=true;output.linkTextAttributes=[.underlineStyle:0,.cursor:NSCursor.pointingHand];output.setAccessibilityLabel("会议原文");scroll.documentView=output
         let emptyLabel=MeetingEmptyLabel(labelWithString:"开始录音，文字会显示在这里");empty=emptyLabel;empty.font = .systemFont(ofSize:13);empty.textColor=MeetingVisualStyle.muted;empty.maximumNumberOfLines=0;empty.lineBreakMode = .byWordWrapping;empty.alignment = .center;empty.setContentCompressionResistancePriority(.defaultLow,for:.horizontal)
         let mark=MeetingVoiceMark();emptyLabel.voiceMark=mark;mark.widthAnchor.constraint(equalToConstant:38).isActive=true;mark.heightAnchor.constraint(equalToConstant:38).isActive=true
         let files=NSButton(title:"打开会议文件",target:self,action:#selector(openEmptyMeetingFiles));files.bezelStyle = .rounded;files.isHidden=true;emptyFilesButton=files

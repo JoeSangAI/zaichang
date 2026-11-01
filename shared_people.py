@@ -125,16 +125,58 @@ def search_people(query, *, module_path=None, focus_root=None):
                 candidates=[row[1] for row in found[:MAX_RESULTS]], truncated=len(found)>MAX_RESULTS)
 
 
+def name_variants(name):
+    """The whole name first, then its parts: 示例甲（示例公司） and 错字 Alias."""
+    bare = re.sub(r'[（(].*?[)）]', '', name).strip()
+    return list(dict.fromkeys([name, bare, *bare.split()]))
+
+
+def resolve_names(names, *, module_path=None, focus_root=None, rows=None):
+    """Map each name to its one authoritative spelling, when there is exactly one.
+
+    People owners decide first; a term table's alias or known misspelling applies
+    only to a whole name. An ambiguous name stays as it is.
+    """
+    people, focus = load_authoritative_people(module_path, focus_root)
+    owners = {}
+    for person in people:
+        candidate, spellings = validated_person(person, focus)
+        for spelling in spellings:
+            owners.setdefault(spelling.casefold(), set()).add(candidate['reference']['name'])
+    terms = {}
+    if rows is None:
+        from shared_terms import compiled_owners
+        rows = [row for owner in compiled_owners() if owner['layer'] in ('people', 'project') for row in owner['rows']]
+    for row in rows:
+        for spelling in [row['term'], *row['aliases'], *row['misheard']]:
+            terms.setdefault(spelling.casefold(), set()).add(row['term'])
+    resolved = {}
+    for name in names:
+        checked_text(name, 80)
+        for variant in name_variants(name):
+            found = owners.get(variant.casefold(), set())
+            if not found and variant == name:
+                found = terms.get(name.casefold(), set())
+            if found:
+                if len(found) == 1:
+                    resolved[name] = next(iter(found))
+                break
+    return dict(schema=1, status='ok', resolved=resolved)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--query', required=True)
+    parser.add_argument('--query')
+    parser.add_argument('--resolve-names', help='JSON list of names to map to authoritative spellings')
     args = parser.parse_args()
+    if bool(args.query) == bool(args.resolve_names):
+        parser.error('give exactly one of --query or --resolve-names')
     def timeout(*_):
         raise SharedPeopleUnavailable('shared_people_timeout')
     signal.signal(signal.SIGALRM, timeout)
-    signal.setitimer(signal.ITIMER_REAL, 2.5)
+    signal.setitimer(signal.ITIMER_REAL, 8 if args.resolve_names else 2.5)
     try:
-        output = search_people(args.query)
+        output = search_people(args.query) if args.query else resolve_names(json.loads(args.resolve_names))
         encoded = json.dumps(output, ensure_ascii=False)
         if len(encoded.encode()) > 128 * 1024:
             raise SharedPeopleUnavailable('shared_people_result_limit')

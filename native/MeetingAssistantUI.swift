@@ -343,7 +343,7 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
         guard recordingControlInFlight==nil,
               (action=="pause" ? phase.phase == .recording:phase.phase == .paused),
               let command=recordingControlCommand(action:action) else{return}
-        if action=="resume" {cancelSpeakerRefinementForResume();invalidateMeetingArchivePreparationOnResume()}
+        if action=="resume" {(workspaceOwner ?? self).stopSpeakerAudioPreview();cancelSpeakerRefinementForResume();invalidateMeetingArchivePreparationOnResume()}
         recordingControlInFlight=action;recordingControlTimeout?.cancel()
         // The worker owns the hardware safety cutoff and observes ACKs before
         // UI delivery. A delayed UI queue must not terminate an already-paused
@@ -1414,6 +1414,10 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
         text.append(NSAttributedString(attachment:avatar))
         let base:[NSAttributedString.Key:Any]=[.paragraphStyle:header,.toolTip:tooltip]
         text.append(NSAttributedString(string:"  "+speaker,attributes:base.merging([.font:MeetingVisualStyle.nameFont,.foregroundColor:unresolved ? MeetingVisualStyle.muted:MeetingVisualStyle.ink]){$1}))
+        // Clicking a name renames that person, including what they say next.
+        if !unresolved,let known=turn.parts.first(where:{readingIdentity($0.0,$0.1) != nil})?.0 ?? turn.parts.first?.0 {
+            text.addAttributes([.link:speakerLinkPrefix+known,.toolTip:"点名字改名，这个人本场的发言一起改 · "+tooltip],range:NSRange(location:text.length-speaker.utf16.count,length:speaker.utf16.count))
+        }
         if originalLabel=="待确认",let id=turn.parts.first?.0 {
             let who=(text.string as NSString).range(of:"是谁？",options:.backwards)
             if who.location != NSNotFound {text.addAttributes([.link:id,.toolTip:"确认这句话的发言人"],range:who)}
@@ -1472,7 +1476,7 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
         var result=TranscriptReadingPosition()
         guard let output=output,let scroll=scroll else{return result}
         let viewport=scroll.contentView.bounds,selection=output.selectedRange()
-        result.nearBottom=viewport.maxY>=output.bounds.maxY-80 && selection.length==0;result.viewportY=viewport.minY
+        result.nearBottom=viewport.maxY>=output.bounds.maxY-80 && selection.length==0 && confirmationController?.popover.isShown != true;result.viewportY=viewport.minY
         if selection.length>0 {
             result.selectedID=incrementalTranscript.turnID(atCharacter:selection.location);result.selectedOffset=incrementalTranscript.localOffset(atCharacter:selection.location)
             let end=max(selection.location,selection.location+selection.length-1)
@@ -1622,7 +1626,9 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
         guard !fullTranscriptRefreshPending,!fullRefreshBuildInFlight,dirtyTranscriptQueueIndex>=dirtyTranscriptQueue.count else{throw Failure(code:"offline_transcript_settle_timeout")}
     }
     func textView(_ textView:NSTextView,clickedOnLink link:Any,at charIndex:Int)->Bool {
-        guard let id=link as? String,let item=namingItem(id) else{return false};naming.register(segment:id,item:item);showSpeakerConfirmation(id);return true
+        guard let value=link as? String else{return false}
+        let wholeSpeaker=value.hasPrefix(speakerLinkPrefix),id=wholeSpeaker ? String(value.dropFirst(speakerLinkPrefix.count)):value
+        guard let item=namingItem(id) else{return false};naming.register(segment:id,item:item);showSpeakerConfirmation(id,wholeSpeaker:wholeSpeaker);return true
     }
     func beginInlineName(_ id:String) {
         guard !(workspaceOwner ?? self).meetingDeletionBusy else{return}
@@ -1661,12 +1667,15 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
                     let priorObject=previous.flatMap{try? JSONSerialization.jsonObject(with:$0) as? [String:Any]}
                     let priorIDs=Set((priorObject?["voiceConfirmations"] as? [[String:Any]] ?? []).compactMap{$0["id"] as? String})
                     let addedLearningIntent=confirmations.contains{!priorIDs.contains($0.id)}
+                    func namedSpeakers(_ object:[String:Any]?)->NSSet {NSSet(array:object?["speakers"] as? [Any] ?? [])}
+                    let manualNamesChanged=namedSpeakers(priorObject) != namedSpeakers((try? JSONSerialization.jsonObject(with:data)) as? [String:Any])
                     let same=previous.flatMap{try? JSONSerialization.jsonObject(with:$0)}.flatMap{$0 as? NSDictionary}.map{old in (try? JSONSerialization.jsonObject(with:data)).flatMap{$0 as? NSDictionary}.map{old.isEqual(to:$0 as! [AnyHashable:Any])} ?? false} ?? false
                     if !same {try data.write(to:file,options:.atomic);try FileManager.default.setAttributes([.posixPermissions:0o600],ofItemAtPath:file.path)}
                     DispatchQueue.main.async {
                         if self.activeSession==session,self.currentCacheID==id,self.meetingDocumentGeneration==generation,self.naming.correctionRevision==revision {
                             self.synchronizeCommittedVoiceMemory(session:session,confirmations:confirmations,revision:revision)
-                            if addedLearningIntent,VoiceprintLearningPolicy().isEnabled {self.scheduleSavedVoiceRecognition()}
+                            if manualNamesChanged {self.rematchLiveVoices()}
+                            if manualNamesChanged || (addedLearningIntent && VoiceprintLearningPolicy().isEnabled) {self.scheduleSavedVoiceRecognition()}
                         }
                         done?(.success(()))
                         if self.speakerRefinementNeedsRetry,self.activeSession==session,self.currentCacheID==id,
@@ -2385,6 +2394,9 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
         }
         if CommandLine.arguments.count==4,CommandLine.arguments[1]=="--group-voice-replay",Credential.offline {
             do {let result=try voiceprintGroupFrozenReplay(archiveURL:URL(fileURLWithPath:CommandLine.arguments[2]),featureDirectory:URL(fileURLWithPath:CommandLine.arguments[3]));print(String(data:try JSONSerialization.data(withJSONObject:result,options:.sortedKeys),encoding:.utf8)!)}catch{print("group-voice-replay-failed: \(error)");exit(1)};return
+        }
+        if CommandLine.arguments.count==5,CommandLine.arguments[1]=="--voice-align-preview",Credential.offline {
+            do {let result=try voiceAlignPreview(archiveURL:URL(fileURLWithPath:CommandLine.arguments[2]),resolvedURL:URL(fileURLWithPath:CommandLine.arguments[3]),outputURL:URL(fileURLWithPath:CommandLine.arguments[4]));print(String(data:try JSONSerialization.data(withJSONObject:result,options:.sortedKeys),encoding:.utf8)!);exit(0)}catch{FileHandle.standardError.write(Data("voice-align-preview-failed: \(error)\n".utf8));exit(1)}
         }
         if CommandLine.arguments.count==6,CommandLine.arguments[1]=="--saved-voice-naming-replay",Credential.offline {
             do {let result=try savedVoiceNamingReplay(cacheID:CommandLine.arguments[2],cacheRoot:URL(fileURLWithPath:CommandLine.arguments[3]),featuresURL:URL(fileURLWithPath:CommandLine.arguments[4]),archiveURL:URL(fileURLWithPath:CommandLine.arguments[5]));print(String(data:try JSONSerialization.data(withJSONObject:result,options:.sortedKeys),encoding:.utf8)!)}catch{print("saved-voice-naming-replay-failed: \(error)");exit(1)};return

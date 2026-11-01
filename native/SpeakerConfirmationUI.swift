@@ -1,6 +1,8 @@
 import AppKit
 import AVFoundation
 
+let speakerLinkPrefix="speaker\u{1F}"
+
 // One transient editor reuses the document's naming and durable learning owner.
 // Opening, searching, dismissing and model updates never confirm an identity.
 final class SpeakerConfirmationController:NSObject,NSTextFieldDelegate,NSPopoverDelegate,AVAudioPlayerDelegate {
@@ -37,6 +39,13 @@ final class SpeakerConfirmationController:NSObject,NSTextFieldDelegate,NSPopover
     private var quickKey:SessionSpeakerKey?
     private var quickEditing=false
     private var quickSaveInFlight=false
+    // Set when the editor opened from a speaker's name: the name covers that
+    // whole person, past and future turns, rather than one sentence.
+    private var speakerKey:SessionSpeakerKey?
+    private let onlyThis=NSButton(title:"只改这一段",target:nil,action:nil)
+    private let voiceChips=NSStackView()
+    private var voiceSpellings:[(spelling:String,name:String)]=[]
+    private var openedViewportY:CGFloat=0
     private let listen=NSButton(title:"试听",target:nil,action:nil)
     private let changeName=NSButton(title:"更正姓名…",target:nil,action:nil)
     private let reject=NSButton(title:"不是",target:nil,action:nil)
@@ -51,11 +60,11 @@ final class SpeakerConfirmationController:NSObject,NSTextFieldDelegate,NSPopover
         let identity=key.map{[$0.session,$0.source,$0.epoch,$0.identity].joined(separator:"|")} ?? "unknown"
         return [revision,body,identity].joined(separator:"|")
     }
-    func present(segment:String,anchor:NSView?=nil,showPopover:Bool=true) {
+    func present(segment:String,anchor:NSView?=nil,showPopover:Bool=true,wholeSpeaker:Bool=false) {
         guard let owner,let item=owner.namingItem(segment),let current=owner.activeSession else{return}
         session=current;openedCache=owner.currentCacheID;draftKey=current+"|"+segment
         readingPosition=owner.captureTranscriptReadingPosition()
-        readingRevision=owner.transcriptReadingRestoreRevision;documentGeneration=owner.meetingDocumentGeneration;openedSelection=owner.output.selectedRange()
+        readingRevision=owner.transcriptReadingRestoreRevision;documentGeneration=owner.meetingDocumentGeneration;openedSelection=owner.output.selectedRange();openedViewportY=owner.scroll?.contentView.bounds.origin.y ?? 0
         let turn=owner.readingTurns().first{$0.id==segment || $0.parts.contains{$0.0==segment}}
         segmentIDs=turn?.parts.map(\.0) ?? [segment]
         if segmentIDs.isEmpty {segmentIDs=[segment]}
@@ -71,8 +80,13 @@ final class SpeakerConfirmationController:NSObject,NSTextFieldDelegate,NSPopover
         field.stringValue=owner.confirmationDrafts[draftKey] ?? owner.naming.displayName(segment:segment)?.value ?? ""
         if let candidate=quickCandidate {field.stringValue=candidate.name}
         if field.stringValue != selectedPerson?.name {selectedPerson=nil}
+        let distinct=Set(groupIDs.compactMap{owner.naming.name(segment:$0)})
+        groupScopeAllowed = distinct.count<=1
+        // Sentences already named differently keep the careful per-sentence path.
+        if wholeSpeaker,quickCandidate==nil,groupScopeAllowed,!groupIDs.isEmpty {speakerKey=owner.naming.key(segment:segment)}
         let root=MeetingDocumentView();root.translatesAutoresizingMaskIntoConstraints=false
-        let title=NSTextField(labelWithString:quickCandidate.map{$0.name+"？"} ?? "这段是谁说的？");title.font = .systemFont(ofSize:quickCandidate==nil ? 14:18,weight:.semibold)
+        let speakerTitle=speakerKey.map{owner.naming.displayName(speaker:$0)?.value ?? owner.naming.displayLabel(speaker:$0)+" 是谁？"}
+        let title=NSTextField(labelWithString:quickCandidate.map{$0.name+"？"} ?? speakerTitle ?? "这段是谁说的？");title.font = .systemFont(ofSize:quickCandidate==nil ? 14:18,weight:.semibold)
         title.lineBreakMode = .byTruncatingTail;title.setContentCompressionResistancePriority(.defaultLow,for:.horizontal);title.widthAnchor.constraint(lessThanOrEqualToConstant:292).isActive=true
         field.placeholderString="输入姓名，或选择已有的人";field.delegate=self;field.setAccessibilityLabel("发言人姓名")
         field.target=self;field.action=#selector(commit)
@@ -80,8 +94,6 @@ final class SpeakerConfirmationController:NSObject,NSTextFieldDelegate,NSPopover
         candidates.orientation = .vertical;candidates.alignment = .leading;candidates.spacing=4
         scope.title="同时修改本场同组的 \(groupIDs.count) 段";scope.state = .off
         scope.isHidden=groupIDs.count<=segmentIDs.count || groupIDs.isEmpty
-        let distinct=Set(groupIDs.compactMap{owner.naming.name(segment:$0)})
-        groupScopeAllowed = distinct.count<=1
         scope.isEnabled=groupScopeAllowed
         if !groupScopeAllowed {scope.title="同组姓名不一致，请详细复核";scope.toolTip="这组已有不同人工姓名，请从详细复核逐段核对。"}
         let continuousLearningEnabled=VoiceprintLearningPolicy().isEnabled
@@ -117,7 +129,7 @@ final class SpeakerConfirmationController:NSObject,NSTextFieldDelegate,NSPopover
             field.target=nil;field.action=nil
             environmentField.isHidden=true;candidates.isHidden=true
             status.stringValue="";status.isHidden=true
-            listen.target=self;listen.action=#selector(listenQuickVoice);listen.bezelStyle = .inline;listen.controlSize = .small;listen.image=NSImage(systemSymbolName:"play.fill",accessibilityDescription:nil);listen.imagePosition = .imageLeading;listen.toolTip="播放一小段匹配到的声音";listen.isEnabled = !owner.voiceprintManagementOwner.recordingBusy
+            listen.target=self;listen.action=#selector(listenQuickVoice);listen.bezelStyle = .inline;listen.controlSize = .small;listen.image=NSImage(systemSymbolName:"play.fill",accessibilityDescription:nil);listen.imagePosition = .imageLeading;listen.toolTip="播放一小段匹配到的声音";listen.isEnabled = !owner.voiceprintManagementOwner.audioPreviewBlocked
             changeName.target=self;changeName.action=#selector(editQuickName);changeName.bezelStyle = .inline;changeName.controlSize = .small
             reject.target=self;reject.action=#selector(rejectQuickVoice);reject.bezelStyle = .inline
             more.title="详细查看…";undo.isHidden=true
@@ -150,7 +162,15 @@ final class SpeakerConfirmationController:NSObject,NSTextFieldDelegate,NSPopover
                 }
                 context.append(chips)
             }
-            fields=[title]+context+[field,candidates,scope,learn,status,buttons]
+            voiceChips.orientation = .horizontal;voiceChips.spacing=6;voiceChips.isHidden=true
+            if speakerKey != nil {
+                scope.isHidden=true;learn.isHidden=true
+                status.stringValue="这个人本场的发言都会改，后面说的也一样。"
+                onlyThis.target=self;onlyThis.action=#selector(narrowToThisTurn);onlyThis.bezelStyle = .inline
+                buttons.insertArrangedSubview(onlyThis,at:0)
+                more.title="更多…"
+            }
+            fields=[title]+context+[field,voiceChips,candidates,scope,learn,status,buttons]
         }
         let column=NSStackView(views:fields);column.orientation = .vertical;column.alignment = .leading;column.spacing=12;column.translatesAutoresizingMaskIntoConstraints=false
         root.addSubview(column)
@@ -168,7 +188,35 @@ final class SpeakerConfirmationController:NSObject,NSTextFieldDelegate,NSPopover
             if quickCandidate==nil {service=SharedPersonIdentityService(root:owner.root);search()}
         }
         refreshValidity()
+        if quickCandidate==nil {
+            owner.voiceprintManagementOwner.voiceprintService?.profiles { [weak self] archive,_ in
+                self?.voiceSpellings=(archive?.knownPeople ?? []).flatMap{person in ([person.name]+person.aliases).map{($0,person.name)}};self?.refreshVoiceChips()
+            }
+        }
         _ = item
+    }
+    // Everyone the voice library knows, under any spelling, so typing an old name
+    // reaches that person instead of quietly starting a second one.
+    private func refreshVoiceChips() {
+        let query=field.stringValue.trimmingCharacters(in:.whitespacesAndNewlines).lowercased()
+        var seen=Set<String>()
+        let matches=query.isEmpty ? []:voiceSpellings.filter{$0.spelling.lowercased().contains(query) && $0.name != field.stringValue && seen.insert($0.name).inserted}.prefix(3).map(\.name)
+        for view in voiceChips.arrangedSubviews {voiceChips.removeArrangedSubview(view);view.removeFromSuperview()}
+        for name in matches {
+            let chip=NSButton(title:name,target:self,action:#selector(pickVoiceName(_:)));chip.bezelStyle = .rounded;chip.controlSize = .small
+            chip.setAccessibilityLabel("选择声音库里的 "+name);voiceChips.addArrangedSubview(chip)
+        }
+        voiceChips.isHidden=matches.isEmpty
+        resizePopover()
+    }
+    @objc private func pickVoiceName(_ sender:NSButton) {
+        field.stringValue=sender.title;selectedPerson=nil;refreshValidity();refreshVoiceChips()
+        if speakerKey != nil {commit()} else {popover.contentViewController?.view.window?.makeFirstResponder(field)}
+    }
+    func onlyThisForChecks() {narrowToThisTurn()}
+    @objc private func narrowToThisTurn() {
+        speakerKey=nil;onlyThis.isHidden=true
+        status.stringValue="只改这一段，确认后保存在本机。";resizePopover()
     }
     private func historySelectionEligible(_ ids:[String])->Bool {
         guard let owner else{return false}
@@ -189,7 +237,7 @@ final class SpeakerConfirmationController:NSObject,NSTextFieldDelegate,NSPopover
         learn.toolTip=learningAllowed ? "仅本次确认片段，本机处理不上传；环境备注不证明身份。撤销姓名会撤回对应声音参考。":learningExplanation+"姓名仍可保存。"
         status.stringValue=learningAllowed ? "仅学习本次明确勾选的片段。":learningExplanation
     }
-    func controlTextDidChange(_ obj:Notification) {selectedPerson=nil;refreshValidity();if quickCandidate==nil {search()}}
+    func controlTextDidChange(_ obj:Notification) {selectedPerson=nil;refreshValidity();if quickCandidate==nil {search();refreshVoiceChips()}}
     func control(_ control:NSControl,textView:NSTextView,doCommandBy commandSelector:Selector)->Bool {
         if commandSelector==#selector(NSResponder.insertNewline(_:)) {if textView.hasMarkedText(){return false};commit();return true}
         if commandSelector==#selector(NSResponder.cancelOperation(_:)) {cancelDraft=true;popover.close();return true}
@@ -213,6 +261,7 @@ final class SpeakerConfirmationController:NSObject,NSTextFieldDelegate,NSPopover
         return owner.activeSession==session && owner.currentCacheID==openedCache && owner.meetingDocumentGeneration==documentGeneration && !(owner.workspaceOwner ?? owner).meetingDeletionBusy
     }
     var pendingQuickName:String? {quickSaveInFlight && currentQuickContext ? quickCandidate?.name:nil}
+    var speakerSaveInFlight:Bool {quickSaveInFlight && currentQuickContext}
     @objc func editQuickName() {
         guard quickCandidate != nil else{return}
         if let draft=owner?.confirmationDrafts[draftKey],!draft.isEmpty {field.stringValue=draft;refreshValidity()}
@@ -246,12 +295,13 @@ final class SpeakerConfirmationController:NSObject,NSTextFieldDelegate,NSPopover
     }
     private func stopQuickPreview() {
         previewRevision &+= 1;previewJob.cancel();previewPlayer?.stop();previewPlayer=nil;listen.title="试听"
-        listen.isEnabled = owner?.voiceprintManagementOwner.recordingBusy != true
+        listen.isEnabled = owner?.voiceprintManagementOwner.audioPreviewBlocked != true
     }
+    func stopPreviewForCapture() {stopQuickPreview()}
     func cancelQuickInteraction() {stopQuickPreview();if quickCandidate != nil {popover.close()}}
     @objc private func listenQuickVoice() {
         if previewPlayer != nil || previewJob.waiting {stopQuickPreview();return}
-        guard currentQuickContext,let owner,!owner.voiceprintManagementOwner.recordingBusy,let cache=openedCache,
+        guard currentQuickContext,let owner,!owner.voiceprintManagementOwner.audioPreviewBlocked,let cache=openedCache,
               let candidate=quickCandidate,let key=quickKey,owner.voiceprintRecommendation(for:key)==candidate,
               let id=candidate.support.first(where:{owner.namingItem($0.id) != nil})?.id,var item=owner.namingItem(id),
               let start=item["start"] as? Double,let end=item["end"] as? Double else{return}
@@ -259,7 +309,7 @@ final class SpeakerConfirmationController:NSObject,NSTextFieldDelegate,NSPopover
         let root=owner.recoveryBase(),savedSession=session,revision=previewRevision
         listen.title="读取中…";listen.isEnabled=false
         previewJob.run(work:{try SpeakerAudioPreview.read(root:root,cacheID:cache,session:savedSession,items:[item])}) { [weak self] result in
-            guard let self,self.currentQuickContext,self.popover.isShown,self.previewRevision==revision,self.owner?.voiceprintManagementOwner.recordingBusy != true else{return}
+            guard let self,self.currentQuickContext,self.popover.isShown,self.previewRevision==revision,self.owner?.voiceprintManagementOwner.audioPreviewBlocked != true else{return}
             do {
                 let clip=try result.get(),player=try AVAudioPlayer(data:SpeakerAudioPreview.listeningData(clip.wav));player.delegate=self
                 guard player.prepareToPlay(),player.play() else{throw Failure(code:"quick_voice_play_failed")}
@@ -285,6 +335,7 @@ final class SpeakerConfirmationController:NSObject,NSTextFieldDelegate,NSPopover
         searchWork=work;DispatchQueue.main.asyncAfter(deadline:.now()+0.2,execute:work)
     }
     private func showQueryStatus(_ message:String) {
+        guard speakerKey==nil else{return}
         status.stringValue=message+(learningExplanation.isEmpty ? "":"\n"+learningExplanation)
         if let view=popover.contentViewController?.view {view.layoutSubtreeIfNeeded();popover.contentSize=NSSize(width:324,height:view.fittingSize.height)}
     }
@@ -317,14 +368,29 @@ final class SpeakerConfirmationController:NSObject,NSTextFieldDelegate,NSPopover
         if let editor=field.currentEditor() as? NSTextView,editor.hasMarkedText(){return}
         let ids=quickCandidate != nil ? groupIDs:(scope.state == .on && groupScopeAllowed && scope.isEnabled && !scope.isHidden ? groupIDs:segmentIDs)
         if let candidate=quickCandidate,let key=quickKey {
-            guard owner.voiceprintRecommendation(for:key)==candidate,!ids.isEmpty,groupScopeAllowed else{showQuickStatus("候选已变化，请重新打开。");confirm.isEnabled=false;return}
+            // A live speaker adds evidence all the time; the question is still about this person.
+            guard let current=owner.voiceprintRecommendation(for:key),current.personID==candidate.personID,current.name==candidate.name,!ids.isEmpty,groupScopeAllowed else{showQuickStatus("候选已变化，请重新打开。");confirm.isEnabled=false;return}
+            quickCandidate=current
         }
-        guard ids.allSatisfy({id in (owner.naming.name(segment:id) ?? "")==openedNames[id] && (owner.namingItem(id).map{stamp($0)==fingerprint[id]} ?? false)}) else{showQuickStatus("这段内容已更新，请重新打开确认。");confirm.isEnabled=false;return}
-        if owner.isHistoryReader && quickCandidate==nil {historyScopeChanged()}
-        let name=field.stringValue.trimmingCharacters(in:.whitespacesAndNewlines)
+        if let key=quickKey ?? speakerKey {
+            // Naming a person does not depend on the words of any turn, and a live
+            // speaker's own newest turn would otherwise block every save.
+            guard segmentIDs.first.flatMap({owner.naming.key(segment:$0)})==key else{showQuickStatus("这段内容已更新，请重新打开确认。");confirm.isEnabled=false;return}
+        } else {
+            guard ids.allSatisfy({id in (owner.naming.name(segment:id) ?? "")==openedNames[id] && (owner.namingItem(id).map{stamp($0)==fingerprint[id]} ?? false)}) else{showQuickStatus("这段内容已更新，请重新打开确认。");confirm.isEnabled=false;return}
+        }
+        if owner.isHistoryReader && quickCandidate==nil && speakerKey==nil {historyScopeChanged()}
+        let typed=field.stringValue.trimmingCharacters(in:.whitespacesAndNewlines)
+        let name=voiceSpellings.first{$0.spelling.lowercased()==typed.lowercased()}?.name ?? typed
         let previous=owner.naming
         let continuousLearningEnabled=VoiceprintLearningPolicy().isEnabled
-        if let key=quickKey {
+        if let key=speakerKey {
+            // Everyone already under this name moves together, so a correction reaches them all.
+            let keys=owner.naming.name(speaker:key).map{current in owner.naming.choices(session:session).filter{owner.naming.name(speaker:$0)==current}} ?? [key]
+            guard owner.naming.renameSpeaker(keys:keys,name:name) else{showQuickStatus("姓名未保存，请重试。");return}
+            owner.cancelPendingVoiceprintMemory()
+            for key in keys {owner.rememberManualVoiceprint(key:key,name:name)}
+        }else if let key=quickKey {
             guard !owner.naming.values.contains(where:{owner.naming.key(segment:$0.key)==key && $0.value != name}),owner.naming.renameSpeaker(key:key,name:name) else{showQuickStatus("这组已有人工姓名，请详细查看。");return}
             if let candidate=quickCandidate,continuousLearningEnabled {
                 let learningIDs=candidate.groupConsistent ? groupIDs : candidate.support.map(\.id).filter{groupIDs.contains($0)}
@@ -334,7 +400,8 @@ final class SpeakerConfirmationController:NSObject,NSTextFieldDelegate,NSPopover
         }else {guard owner.naming.confirmSegments(ids,name:name,person:selectedPerson,learn:continuousLearningEnabled && learningAllowed && learn.state == .on) else{return}}
         let revision=owner.naming.correctionRevision
         let savedSession=session,savedDraftKey=draftKey,savedCache=owner.currentCacheID,savedGeneration=owner.meetingDocumentGeneration
-        quickSaveInFlight=quickCandidate != nil;confirm.isEnabled=false;field.isEnabled=false;scope.isEnabled=false;learn.isEnabled=false;reject.isEnabled=false;changeName.isEnabled=false;showQuickStatus("正在保存…");stopQuickPreview();owner.refreshQuickVoiceCandidate()
+        let turnCount=speakerKey.map{key in owner.readingTurns().filter{turn in turn.parts.contains{owner.naming.key(segment:$0.0)==key}}.count} ?? 0
+        quickSaveInFlight=quickCandidate != nil || speakerKey != nil;confirm.isEnabled=false;field.isEnabled=false;scope.isEnabled=false;learn.isEnabled=false;reject.isEnabled=false;changeName.isEnabled=false;showQuickStatus("正在保存…");stopQuickPreview();owner.refreshQuickVoiceCandidate()
         owner.persistSessionNames { [weak self,weak owner] result in
             self?.quickSaveInFlight=false
             guard let owner,owner.activeSession==savedSession,owner.currentCacheID==savedCache,owner.meetingDocumentGeneration==savedGeneration else{return}
@@ -343,7 +410,8 @@ final class SpeakerConfirmationController:NSObject,NSTextFieldDelegate,NSPopover
                 self?.committed=true;owner.confirmationDrafts.removeValue(forKey:savedDraftKey)
                 if let key=self?.quickKey {owner.voiceprintCandidates.removeValue(forKey:key)}
                 if self?.quickCandidate != nil,let cache=savedCache,owner.naming.correctionRevision==revision {owner.quickVoiceUndoScope=(savedSession,cache,savedGeneration,revision)}
-                self?.popover.close();owner.showTransientFeedback(self?.quickCandidate==nil ? "姓名已保存":name+" · 已确认",nameUndo:true);owner.refreshOpenSpeakerReview();owner.reloadLibraryAfterVoiceprintNameWrite()
+                let confirmation=self?.speakerKey != nil ? "已改为「"+name+"」：本场 \(turnCount) 轮，后面的发言也会用这个名字":self?.quickCandidate==nil ? "姓名已保存":name+" · 已确认"
+                self?.popover.close();owner.showTransientFeedback(confirmation,nameUndo:true);owner.refreshOpenSpeakerReview();owner.reloadLibraryAfterVoiceprintNameWrite()
             case .failure:
                 if owner.naming.correctionRevision==revision {owner.naming=previous;owner.markAllTranscriptParentsDirty()}
                 self?.field.isEnabled=true;self?.learn.isEnabled=self?.learningAllowed ?? false;self?.scope.isEnabled=self?.groupScopeAllowed ?? false;self?.reject.isEnabled=true;self?.changeName.isEnabled=true;self?.refreshValidity();self?.showQuickStatus("姓名未保存，请重试。");owner.refreshOpenSpeakerReview()
@@ -355,6 +423,7 @@ final class SpeakerConfirmationController:NSObject,NSTextFieldDelegate,NSPopover
     @objc private func undo() {owner?.undoName();popover.close()}
     @objc private func pickMeetingName(_ sender:NSButton) {
         field.stringValue=sender.title;selectedPerson=nil;refreshValidity()
+        if speakerKey != nil {commit();return}
         popover.contentViewController?.view.window?.makeFirstResponder(field)
     }
     @objc private func openDetails() {popover.close();owner?.openSpeakerReview(for:segmentIDs.first.flatMap{owner?.naming.key(segment:$0)})}
@@ -372,6 +441,11 @@ final class SpeakerConfirmationController:NSObject,NSTextFieldDelegate,NSPopover
            owner.transcriptReadingRestoreRevision==readingRevision,
            owner.output.selectedRange()==openedSelection {
             owner.restoreTranscriptReadingPosition(position)
+        } else if readingPosition?.nearBottom==true,owner.activeSession==session,owner.meetingDocumentGeneration==documentGeneration,
+                  abs((owner.scroll?.contentView.bounds.origin.y ?? 0)-openedViewportY)<2 {
+            // The transcript stood still under the editor and live text arrived
+            // meanwhile (each render moves the revision); go back to following it.
+            owner.goLatest()
         }
     }
 }
@@ -421,9 +495,9 @@ extension Delegate {
         confirmationController?.popover.close()
         let controller=SpeakerConfirmationController(owner:self);confirmationController=controller;controller.present(segment:id,anchor:anchor)
     }
-    func showSpeakerConfirmation(_ segment:String) {
+    func showSpeakerConfirmation(_ segment:String,wholeSpeaker:Bool=false) {
         guard !(workspaceOwner ?? self).meetingDeletionBusy else{return}
         confirmationController?.popover.close()
-        let controller=SpeakerConfirmationController(owner:self);confirmationController=controller;controller.present(segment:segment)
+        let controller=SpeakerConfirmationController(owner:self);confirmationController=controller;controller.present(segment:segment,wholeSpeaker:wholeSpeaker)
     }
 }

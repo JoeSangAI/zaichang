@@ -328,6 +328,31 @@ func savedVoiceRecognitionReview(resultURL:URL,archiveURL:URL)throws->[String:An
 // the other restores the saved human labels as ground truth. The same saved
 // features go through the production matcher and naming reconciliation, so the
 // counts show what a meeting would have displayed, without touching originals.
+// What alignment would do to a library, written beside the build for replay. Never touches the input.
+func voiceAlignPreview(archiveURL:URL,resolvedURL:URL,outputURL:URL)throws->[String:Any] {
+    guard Credential.offline,let root=Bundle.main.object(forInfoDictionaryKey:"AdapterRoot") as? String,outputURL.standardizedFileURL.path.hasPrefix(root+"/.runtime/") else{throw Failure(code:"voice_align_preview_scope")}
+    let old=try JSONDecoder().decode(VoiceprintArchive.self,from:Data(contentsOf:archiveURL)).validated(domain:"consented_live_audio")
+    let resolved=try JSONDecoder().decode([String:String].self,from:Data(contentsOf:resolvedURL))
+    let next=try archiveAligningVoiceNames(old,resolved:resolved,domain:"consented_live_audio")
+    try JSONEncoder().encode(next).write(to:outputURL,options:.atomic)
+    let idempotent=try archiveAligningVoiceNames(next,resolved:resolved,domain:"consented_live_audio").revision==next.revision
+    // The launch path: reconcile the library with saved meetings, in isolation.
+    let isolated=outputURL.deletingLastPathComponent(),store=VoiceprintArchiveStore(folder:isolated.appendingPathComponent("align-launch/Voiceprints"),domain:"consented_live_audio")
+    try? FileManager.default.removeItem(at:store.folder.deletingLastPathComponent())
+    try FileManager.default.createDirectory(at:store.folder,withIntermediateDirectories:true)
+    try FileManager.default.copyItem(at:isolated.appendingPathComponent("isolated"),to:store.folder.deletingLastPathComponent().appendingPathComponent("SessionCache"))
+    try JSONEncoder().encode(next).write(to:store.file)
+    var loaded:VoiceprintArchive?,failure:String?,finished=false
+    VoiceprintRecommendationService(store:store).profiles{value,error in loaded=value;failure=error;finished=true}
+    let end=Date().addingTimeInterval(120)
+    while !finished,Date()<end {_=RunLoop.current.run(mode:.default,before:Date().addingTimeInterval(0.05))}
+    return ["launch_failure":failure as Any? ?? NSNull(),"launch_people_unchanged":loaded?.people==next.people,"launch_revision_delta":(loaded?.revision ?? 0)-next.revision,
+            "before":old.knownPeople.count,"after":next.knownPeople.count,"ready":next.people.count,"idempotent":idempotent,
+            "people":next.knownPeople.map{person->[String:Any] in
+                let ready=next.people.first{$0.id==person.id}
+                return ["name":person.name,"aliases":person.aliases,"samples":ready?.samples.count ?? 0,"scenes":Set(ready?.samples.map{VoiceprintAcousticContext.channel(for:$0.source)} ?? []).sorted()]
+            }]
+}
 @MainActor func savedVoiceNamingReplay(cacheID:String,cacheRoot:URL,featuresURL:URL,archiveURL:URL)throws->[String:Any] {
     guard Credential.offline,let root=Bundle.main.object(forInfoDictionaryKey:"AdapterRoot") as? String,
           UUID(uuidString:cacheID) != nil,cacheRoot.standardizedFileURL.path.hasPrefix(root+"/.runtime/") else{throw Failure(code:"saved_naming_replay_scope")}
@@ -356,7 +381,7 @@ func savedVoiceRecognitionReview(resultURL:URL,archiveURL:URL)throws->[String:An
         _ = automatic.naming.reconcileAutoVoiceprint(key:key,candidate:candidate,conflictingEvidence:conflict)
         _ = guarded.naming.reconcileAutoVoiceprint(key:key,candidate:candidate,conflictingEvidence:conflict)
         groups.append(["key":label(key),"samples":result.evidence.filter{$0.key==key}.count,"candidate":candidate?.name as Any? ?? NSNull(),
-                       "whole_group":candidate?.groupConsistent as Any? ?? NSNull(),"conflict":conflict,
+                       "whole_group":candidate?.groupConsistent as Any? ?? NSNull(),"question_only":candidate.map{!$0.groupConsistent && $0.recognizedSupport==nil} as Any? ?? NSNull(),"conflict":conflict,
                        "displayed_group_name":automatic.naming.autoName(for:key)?.name as Any? ?? NSNull(),
                        "span_suggestion":automatic.naming.voiceSuggestion(for:key)?.name as Any? ?? NSNull(),
                        "manual_name":truth.naming.name(speaker:key) as Any? ?? NSNull()])
@@ -373,6 +398,21 @@ func savedVoiceRecognitionReview(resultURL:URL,archiveURL:URL)throws->[String:An
             if label?.origin == .manual,guarded.naming.displayName(segment:rowID)?.value != label?.value {overwritten+=1}
         }
     }
-    return ["cache_id":cacheID,"session":session,"groups":groups,"rows":counts,"chars":chars,"wrong_examples":wrong,"manual_overwritten":overwritten,
+    // Name only each person's largest group, as if done live; do the other groups follow?
+    let live=try view(human:false)
+    var linker=VoiceprintMatcher();linker.reset(session:session);linker.importSavedEvidence(result.evidence)
+    var manualNames:[SessionSpeakerKey:String]=[:]
+    let labelled=Dictionary(grouping:Set(result.evidence.map(\.key)).filter{truth.naming.name(speaker:$0) != nil},by:{truth.naming.name(speaker:$0)!})
+    for (name,keys) in labelled {
+        let largest=keys.sorted{a,b in (truth.naming.segmentIDs(for:a).count,label(a))>(truth.naming.segmentIDs(for:b).count,label(b))}[0]
+        if live.naming.renameSpeaker(key:largest,name:name) {manualNames[largest]=name}
+    }
+    var followed:[[String:Any]]=[]
+    for key in Set(result.evidence.map(\.key)).sorted(by:{label($0)<label($1)}) where manualNames[key]==nil {
+        let candidate=linker.sessionLink(key,manualNames:manualNames)
+        _ = live.naming.reconcileAutoVoiceprint(key:key,candidate:candidate)
+        followed.append(["key":label(key),"linked":candidate?.name as Any? ?? NSNull(),"shown":live.naming.autoName(for:key)?.name as Any? ?? NSNull(),"truth":truth.naming.name(speaker:key) as Any? ?? NSNull(),"turns":truth.naming.segmentIDs(for:key).count])
+    }
+    return ["cache_id":cacheID,"session":session,"groups":groups,"rows":counts,"chars":chars,"wrong_examples":wrong,"manual_overwritten":overwritten,"followed_after_live_naming":followed,
             "archive_revision":archive.revision,"capture":false,"cloud":false,"original_files_modified":false]
 }

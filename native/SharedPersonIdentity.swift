@@ -82,6 +82,25 @@ final class SharedPersonIdentityService {
         lock.lock();generation=UUID();let process=active;active=nil;lock.unlock()
         if let process,process.isRunning {process.terminate()}
     }
+    // The one authoritative spelling of each name that has exactly one; nil if the source is unavailable.
+    func resolveNames(_ names:[String],completion:@escaping([String:String]?)->Void) {
+        let script=URL(fileURLWithPath:root,isDirectory:true).appendingPathComponent("shared_people.py"),python=pythonExecutable
+        DispatchQueue.global(qos:.utility).async {
+            guard let list=try? JSONSerialization.data(withJSONObject:names),let argument=String(data:list,encoding:.utf8) else{completion(nil);return}
+            let process=Process(),pipe=Pipe()
+            process.executableURL=URL(fileURLWithPath:python);process.arguments=["-B",script.path,"--resolve-names",argument]
+            var environment=RuntimeConfiguration.childEnvironment();environment["PYTHONDONTWRITEBYTECODE"]="1"
+            for key in ["PYTHONPATH","PYTHONHOME","PYTHONSTARTUP"] {environment.removeValue(forKey:key)}
+            process.environment=environment;process.standardInput=FileHandle.nullDevice;process.standardOutput=pipe;process.standardError=FileHandle.nullDevice
+            guard (try? process.run()) != nil else{completion(nil);return}
+            let deadline=DispatchWorkItem{if process.isRunning {process.terminate()}}
+            DispatchQueue.global(qos:.utility).asyncAfter(deadline:.now()+10,execute:deadline)
+            let data=pipe.fileHandleForReading.readDataToEndOfFile();process.waitUntilExit();deadline.cancel()
+            guard process.terminationStatus==0,let object=(try? JSONSerialization.jsonObject(with:data)) as? [String:Any],object["status"] as? String=="ok",
+                  let resolved=object["resolved"] as? [String:String],resolved.values.allSatisfy({sharedPersonTextValid($0,limit:80)}) else{completion(nil);return}
+            completion(resolved)
+        }
+    }
     func search(query:String,completion:@escaping(Result<[SharedPersonCandidate],Error>)->Void) {
         guard RuntimeConfiguration.peopleEnabled else{completion(.success([]));return}
         cancel()

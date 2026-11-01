@@ -45,6 +45,18 @@ class SharedPeopleChecks(unittest.TestCase):
         self.assertEqual(self.search('Alphz')['candidates'],[])
         self.assertEqual(self.search('示例组织')['candidates'],[])
 
+    def test_resolve_names_only_when_exactly_one_owner(self):
+        rows=[{'term':'合成正','aliases':[],'misheard':['合成误']},{'term':'词甲','aliases':['同词'],'misheard':[]},{'term':'词乙','aliases':['同词'],'misheard':[]}]
+        def resolved(*names):
+            return subject.resolve_names(list(names),focus_root=self.focus,rows=rows)['resolved']
+        self.assertEqual(resolved('Alpha')['Alpha'],'合成甲')
+        self.assertEqual(resolved('alpha')['alpha'],'合成甲')
+        self.assertEqual(resolved('合成甲（阿里云）')['合成甲（阿里云）'],'合成甲')
+        self.assertEqual(resolved('错字 Alpha')['错字 Alpha'],'合成甲')
+        self.assertEqual(resolved('合成误')['合成误'],'合成正')
+        # A term applies to a whole name only, and an ambiguous spelling stays as it is.
+        self.assertEqual(resolved('合成误 其他','同词','没有的人','共用别名'),{})
+
     def test_invalid_queries(self):
         for query in ['', '  ', '\nAlpha', 'Alpha\x00', '\u202eAlpha', 'a'*81, None]:
             with self.subTest(query=query),self.assertRaises(ValueError):self.search(query)

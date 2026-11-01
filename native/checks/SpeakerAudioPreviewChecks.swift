@@ -35,8 +35,20 @@ func speakerAudioPreviewChecks(directory:URL)throws->[String] {
     try reject("preview_unknown_end_rejected"){_=try SpeakerAudioPreview.read(root:root,cacheID:id,session:session,items:[row(2,3,known:false)])}
     try reject("preview_cross_source_selection_rejected"){_=try SpeakerAudioPreview.read(root:root,cacheID:id,session:session,items:[row(2,3),row(2,3,source:"remote")])}
     try reject("preview_negative_source_clock_range_rejected"){_=try SpeakerAudioPreview.read(root:root,cacheID:id,session:session,items:[row(0,0.5)])}
-    var unsealed=manifest;unsealed["ended"]=false;try json(unsealed,folder.appendingPathComponent("mic-manifest.json"))
-    try reject("preview_unsealed_recording_rejected"){_=try SpeakerAudioPreview.read(root:root,cacheID:id,session:session,items:[row(2,3)])}
+    // A paused recording: sealed chunks verify, the chunk still being filled is
+    // read up to what the manifest says is complete, and nothing else lacks a digest.
+    var unsealed=manifest;unsealed["ended"]=false
+    var open=chunks;open[3]["bytes"]=64000;open[3].removeValue(forKey:"sha256")
+    unsealed["chunks"]=open;unsealed["written_bytes"]=960000+64000;try json(unsealed,folder.appendingPathComponent("mic-manifest.json"))
+    let paused=try SpeakerAudioPreview.read(root:root,cacheID:id,session:session,items:[row(2,3)])
+    try check(paused.wav.dropFirst(44)==pcm[32000..<64000],"preview_reads_sealed_audio_of_a_paused_recording")
+    let tail=try SpeakerAudioPreview.read(root:root,cacheID:id,session:session,items:[row(31,32)])
+    try check(tail.wav.dropFirst(44)==pcm[960000..<992000],"preview_reads_the_chunk_still_being_filled")
+    try reject("preview_past_what_the_paused_recording_holds_rejected"){_=try SpeakerAudioPreview.read(root:root,cacheID:id,session:session,items:[row(34,35)])}
+    open=chunks;open[1].removeValue(forKey:"sha256");unsealed["chunks"]=open;unsealed["written_bytes"]=pcm.count;try json(unsealed,folder.appendingPathComponent("mic-manifest.json"))
+    try reject("preview_earlier_chunk_without_digest_rejected"){_=try SpeakerAudioPreview.read(root:root,cacheID:id,session:session,items:[row(11,12)])}
+    var endedOpen=manifest;open=chunks;open[3].removeValue(forKey:"sha256");endedOpen["chunks"]=open;try json(endedOpen,folder.appendingPathComponent("mic-manifest.json"))
+    try reject("preview_sealed_recording_needs_every_digest"){_=try SpeakerAudioPreview.read(root:root,cacheID:id,session:session,items:[row(31,32)])}
     try json(manifest,folder.appendingPathComponent("mic-manifest.json"))
     // Mic previews select the original retained lane rather than an enhanced
     // or possibly empty ASR lane, preserving timing and recorded bytes.

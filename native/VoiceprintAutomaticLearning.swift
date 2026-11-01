@@ -51,7 +51,7 @@ private func automaticKeyIsValid(_ key:SessionSpeakerKey)->Bool {
     return true
 }
 
-private func automaticContributionID(personID:String,key:SessionSpeakerKey,support:[VoiceprintEvidenceRef])->String {
+func automaticContributionID(personID:String,key:SessionSpeakerKey,support:[VoiceprintEvidenceRef])->String {
     let refs=support.map{"\($0.id)@\($0.revision)"}.sorted().joined(separator:"\u{1f}")
     let material=["voiceprint-auto-v1",personID,key.session,key.source,key.epoch,key.identity,refs].joined(separator:"\u{1e}")
     var bytes=Array(SHA256.hash(data:Data(material.utf8)).prefix(16))

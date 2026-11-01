@@ -2,6 +2,26 @@ import AppKit
 
 // One serial utility queue owns matching and disk I/O. It never shares the
 // capture/control queue, so archive reads or scoring cannot delay pause.
+enum VoiceMemoryEdit {case rename(String,String),merge(String,String)}
+// Rename and merge choices on the voice memory panel; saved together with it.
+private final class VoiceMemoryEditor:NSObject {
+    var edits:[VoiceMemoryEdit]=[]
+    var boxes:[String:NSButton]=[:]
+    var rows:[String:NSView]=[:]
+    @objc func choose(_ sender:NSPopUpButton) {
+        guard let action=sender.selectedItem?.representedObject as? [String],action.count>=2 else{return}
+        let id=action[1]
+        if action[0]=="rename" {
+            let ask=NSAlert();ask.messageText="改名";ask.informativeText="以后认出这个人都用新名字；已有会议里的文字不变。"
+            let field=NSTextField(frame:NSRect(x:0,y:0,width:260,height:24));field.stringValue=boxes[id]?.title.components(separatedBy:" · ").first ?? "";ask.accessoryView=field
+            ask.addButton(withTitle:"改名");ask.addButton(withTitle:"取消")
+            let name=ask.runModal() == .alertFirstButtonReturn ? field.stringValue.trimmingCharacters(in:.whitespacesAndNewlines):""
+            if !name.isEmpty {edits.append(.rename(id,name));boxes[id]?.title=name}
+        } else if action.count==3 {
+            edits.append(.merge(id,action[2]));rows[id]?.isHidden=true
+        }
+    }
+}
 final class VoiceprintRecommendationService {
     let queue=DispatchQueue(label:"meeting.voiceprint.recommendations",qos:.utility)
     let store:VoiceprintArchiveStore
@@ -248,7 +268,7 @@ final class VoiceprintRecommendationService {
         let activeIDs=Set(records.suffix(1).map(\.id))
         let contributions=next?.learning?.contributions.filter{activeIDs.contains($0.confirmationID)} ?? []
         let hasReady=contributions.contains {row in next?.people.contains(where:{$0.id==row.personID && $0.enabled && $0.samples.contains(where:{s in row.samples.contains(where:{$0.session==s.session && $0.source==s.source && $0.epoch==s.epoch && $0.start==s.start && $0.end==s.end})})})==true}
-        return hasReady ? "姓名已保存，已在本机记住声音。":"姓名已保存；声音参考还不足，暂未用于识别。"
+        return hasReady ? "姓名已保存，已在本机记住声音。":"姓名已保存；再多听几段，就能记住这个声音。"
     }
     func synchronize(session:String,confirmations:[SessionVoiceConfirmation],sourceFolder:URL?=nil,sourceNames:Data?=nil,done:@escaping(Result<String,Error>)->Void) {
         queue.async {
@@ -271,33 +291,75 @@ final class VoiceprintRecommendationService {
                     let status=try self.applyApproved(session:session,records:self.approved)
                     if status != self.previousLearningStatus {self.previousLearningStatus=status;DispatchQueue.main.async{self.learningUpdate?(session,status)}}
                 }
-                var result:[SessionSpeakerKey:VoiceprintRecommendation]=[:];var conflicts=Set<SessionSpeakerKey>()
-                for key in keys {result[key]=self.matcher.suggestion(key);if self.matcher.conflictingEvidence(key){conflicts.insert(key)}}
+                let (result,conflicts)=Self.matches(self.matcher,keys:keys,manualNames:confirmedManualNames)
                 DispatchQueue.main.async{done(keys,result,conflicts,nil)}
             }catch{self.matcher.archive=nil;self.loaded=false;DispatchQueue.main.async{done([],[:],[],"声音记忆暂未更新；请在发言人处重试，姓名标注不受影响。")}}
+        }
+    }
+    private static func matches(_ matcher:VoiceprintMatcher,keys:Set<SessionSpeakerKey>,manualNames:[SessionSpeakerKey:String])->([SessionSpeakerKey:VoiceprintRecommendation],Set<SessionSpeakerKey>) {
+        var result:[SessionSpeakerKey:VoiceprintRecommendation]=[:];var conflicts=Set<SessionSpeakerKey>()
+        for key in keys {
+            let conflict=matcher.conflictingEvidence(key)
+            if conflict {conflicts.insert(key)}
+            result[key]=matcher.suggestion(key) ?? (conflict ? nil:matcher.sessionLink(key,manualNames:manualNames))
+        }
+        return (result,conflicts)
+    }
+    // A name a human just changed can settle other groups of the live meeting.
+    func rematch(session:String,manualNames:[SessionSpeakerKey:String],done:@escaping(Set<SessionSpeakerKey>,[SessionSpeakerKey:VoiceprintRecommendation],Set<SessionSpeakerKey>)->Void) {
+        queue.async {
+            guard self.matcher.session==session else{return}
+            let keys=Set(self.matcher.evidencedKeys)
+            let (result,conflicts)=Self.matches(self.matcher,keys:keys,manualNames:manualNames)
+            DispatchQueue.main.async{done(keys,result,conflicts)}
         }
     }
     func cancelPendingMemory(session:String?=nil) {queue.async{if session==nil || self.approvedSession==session {self.approved=[];self.approvedSession=nil}}}
     func dismiss(_ key:SessionSpeakerKey) {queue.async{self.matcher.dismiss(key)}}
     func discard(_ ids:[String]) {queue.async{for id in ids {self.matcher.remove(id)}}}
     func profiles(done:@escaping(VoiceprintArchive?,String?)->Void) {queue.async{do{try self.load();let archive=self.matcher.archive;DispatchQueue.main.async{done(archive,nil)}}catch{DispatchQueue.main.async{done(nil,"声音记忆暂时无法读取，请重试。")}}}}
-    func updateEnabled(_ enabled:[String:Bool],revision:Int,done:@escaping(Bool)->Void) {
+    func updateEnabled(_ enabled:[String:Bool],edits:[VoiceMemoryEdit]=[],revision:Int,done:@escaping(Bool)->Void) {
         queue.async {
             do {guard var archive=try self.store.load(),archive.revision==revision else{throw ProfileStoreError.invalid};let oldRevision=archive.revision
-                for (id,value) in enabled {archive=try archiveSettingVoiceEnabled(archive,personID:id,enabled:value,domain:self.store.domain)}
+                for edit in edits {
+                    switch edit {
+                    case .rename(let id,let name):archive=try archiveRenamingVoicePerson(archive,personID:id,name:name,domain:self.store.domain)
+                    case .merge(let from,let into):archive=try archiveMergingVoicePeople(archive,from:from,into:into,domain:self.store.domain)
+                    }
+                }
+                let remaining=Set(archive.knownPeople.map(\.id))
+                for (id,value) in enabled where remaining.contains(id) {archive=try archiveSettingVoiceEnabled(archive,personID:id,enabled:value,domain:self.store.domain)}
                 if archive.revision != oldRevision {try self.store.save(archive,expectedRevision:oldRevision)}
                 self.matcher.archive=archive;self.loaded=true;DispatchQueue.main.async{done(true)}
             }catch{DispatchQueue.main.async{done(false)}}
         }
     }
-    func recognizeSaved(_ result:SavedVoiceRecognitionResult,done:@escaping([SessionSpeakerKey:VoiceprintRecommendation],Set<SessionSpeakerKey>)->Void) {
+    // Runs once a launch and is a no-op once names agree. Reads names here, asks
+    // the people source off this queue, then applies against what is current.
+    func alignNames(resolve:@escaping([String],@escaping([String:String]?)->Void)->Void,done:@escaping(Bool)->Void) {
+        queue.async {
+            guard let names=try? {()throws->[String]? in try self.load();return try self.store.load()?.knownPeople.map(\.name)}() else{DispatchQueue.main.async{done(false)};return}
+            resolve(names) { resolved in
+                self.queue.async {
+                    do {
+                        guard let resolved,let old=try self.store.load() else{throw ProfileStoreError.invalid}
+                        let next=try archiveAligningVoiceNames(old,resolved:resolved,domain:self.store.domain)
+                        guard next.revision != old.revision else{DispatchQueue.main.async{done(false)};return}
+                        try self.store.save(next,expectedRevision:old.revision)
+                        self.matcher.archive=next;self.loaded=true
+                        DispatchQueue.main.async{done(true)}
+                    }catch{DispatchQueue.main.async{done(false)}}
+                }
+            }
+        }
+    }
+    func recognizeSaved(_ result:SavedVoiceRecognitionResult,manualNames:[SessionSpeakerKey:String]=[:],done:@escaping([SessionSpeakerKey:VoiceprintRecommendation],Set<SessionSpeakerKey>)->Void) {
         queue.async {
             do {
                 let archive=try self.store.load()
-                guard archive?.inputKind==result.inputKind else{DispatchQueue.main.async{done([:],[])};return}
+                guard archive == nil || archive?.inputKind==result.inputKind else{DispatchQueue.main.async{done([:],[])};return}
                 var matcher=VoiceprintMatcher(archive:archive);matcher.reset(session:result.session);matcher.importSavedEvidence(result.evidence)
-                var values:[SessionSpeakerKey:VoiceprintRecommendation]=[:],conflicts=Set<SessionSpeakerKey>()
-                for key in Set(result.evidence.map(\.key)) {values[key]=matcher.suggestion(key);if matcher.conflictingEvidence(key){conflicts.insert(key)}}
+                let (values,conflicts)=Self.matches(matcher,keys:Set(result.evidence.map(\.key)),manualNames:manualNames)
                 DispatchQueue.main.async{done(values,conflicts)}
             }catch{DispatchQueue.main.async{done([:],[])}}
         }
@@ -341,7 +403,21 @@ extension Delegate {
             panel.addArrangedSubview(continuous)
             let people=NSStackView();people.orientation = .vertical;people.alignment = .leading;people.spacing=6
             var boxes:[(String,NSButton)]=[]
-            for person in archive?.people ?? [] {let conditions=Set(person.samples.compactMap(\.context));let label=person.name+(conditions.isEmpty ? "":" · \(conditions.count) 种声音条件");let box=NSButton(checkboxWithTitle:label,target:nil,action:nil);box.state=person.enabled ? .on:.off;people.addArrangedSubview(box);boxes.append((person.id,box))}
+            let editor=VoiceMemoryEditor(),known=archive?.knownPeople ?? []
+            for person in archive?.people ?? [] {
+                let conditions=Set(person.samples.compactMap(\.context))
+                let scenes=Set(person.samples.map{VoiceprintAcousticContext.channel(for:$0.source)}).count
+                let aliases=known.first{$0.id==person.id}?.aliases ?? []
+                let label=person.name+(aliases.isEmpty ? "":"（也叫 "+aliases.prefix(3).joined(separator:"、")+"）")+(scenes>1 ? " · 麦克风和电脑声音都认得":"")+(conditions.isEmpty ? "":" · \(conditions.count) 种声音条件")
+                let box=NSButton(checkboxWithTitle:label,target:nil,action:nil);box.state=person.enabled ? .on:.off
+                let menu=NSPopUpButton(frame:.zero,pullsDown:true);menu.controlSize = .small;menu.isBordered=false;menu.addItem(withTitle:"…")
+                menu.addItem(withTitle:"改名…");menu.lastItem?.representedObject=["rename",person.id]
+                for other in (archive?.people ?? []) where other.id != person.id {menu.addItem(withTitle:"合并到 "+other.name);menu.lastItem?.representedObject=["merge",person.id,other.id]}
+                menu.target=editor;menu.action=#selector(VoiceMemoryEditor.choose(_:));menu.setAccessibilityLabel("调整 "+person.name)
+                let row=NSStackView(views:[box,menu]);row.orientation = .horizontal;row.spacing=6
+                editor.boxes[person.id]=box;editor.rows[person.id]=row
+                people.addArrangedSubview(row);boxes.append((person.id,box))
+            }
             if archive?.people.isEmpty != false {
                 let empty=NSTextField(wrappingLabelWithString:"目前还没有声音记忆。确认姓名后，符合质量条件的声音会逐步积累。")
                 empty.textColor = .secondaryLabelColor;empty.maximumNumberOfLines=3;people.addArrangedSubview(empty)
@@ -349,12 +425,13 @@ extension Delegate {
             let scroll=NSScrollView(frame:NSRect(x:0,y:0,width:380,height:300));scroll.hasVerticalScroller=true;scroll.drawsBackground=false;scroll.borderType = .noBorder
             people.frame=NSRect(x:0,y:0,width:360,height:max(64,(archive?.people.count ?? 0)*30+8));scroll.documentView=people;panel.addArrangedSubview(scroll)
             panel.frame=NSRect(x:0,y:0,width:400,height:340);notice.accessoryView=panel;notice.addButton(withTitle:"保存");notice.addButton(withTitle:"取消")
-            guard notice.runModal() == .alertFirstButtonReturn else{return}
+            let chosen=withExtendedLifetime(editor){notice.runModal()}
+            guard chosen == .alertFirstButtonReturn else{return}
             let nextPolicy=continuous.state == .on
             if nextPolicy != policy.isEnabled {self.setContinuousVoiceLearning(nextPolicy)}
             let values=Dictionary(uniqueKeysWithValues:boxes.map{($0.0,$0.1.state == .on)})
             guard let archive,!values.isEmpty else{return}
-            service.updateEnabled(values,revision:archive.revision) { [weak self] ok in
+            service.updateEnabled(values,edits:editor.edits,revision:archive.revision) { [weak self] ok in
                 guard let self else{return}
                 if ok {self.revokeDisabledVoiceprintNames(Set(values.filter{!$0.value}.map(\.key)))}
                 else{self.voiceprintStatus="声音记忆未保存，请重试。"}
@@ -368,6 +445,11 @@ extension Delegate {
         voiceprintService?.learningUpdate={ [weak self] session,status in
             guard let self,self.activeSession==session else{return};self.voiceprintStatus=status;self.showTransientFeedback(status,nameUndo:true)
         }
+        guard !offlineQA,RuntimeConfiguration.peopleEnabled else{return}
+        let people=SharedPersonIdentityService(root:root)
+        voiceprintService?.alignNames(resolve:{names,done in people.resolveNames(names,completion:done)}) { [weak self] changed in
+            if changed {self?.voiceprintSuggestionArchive=nil;self?.refreshOpenSpeakerReview()}
+        }
     }
     func resetVoiceprintRecommendations(session:String?) {
         confirmationController?.cancelQuickInteraction()
@@ -378,8 +460,7 @@ extension Delegate {
     func observeVoiceprint(_ event:[String:Any]) {
         guard !replayingHistory,let service=voiceprintService,let session=activeSession,event["session"] as? String==session else{return}
         let generation=voiceprintGeneration
-        var manualNames:[SessionSpeakerKey:String]=[:]
-        for key in naming.choices(session:session) {if let name=naming.name(speaker:key) {manualNames[key]=name}}
+        let manualNames=manualSpeakerNames
         var contextualEvent=event
         if let sourceID=event["source_id"] as? String,VoiceprintAcousticContext.channel(for:sourceID)=="microphone",
            let input=(sourceActivity.signal[sourceID] ?? sourceActivity.signal["mic"])?["input_diagnostics"] as? [String:Any],
@@ -390,16 +471,35 @@ extension Delegate {
         service.observe(contextualEvent,confirmedManualNames:manualNames) { [weak self] keys,result,conflicts,error in
             guard let self,self.activeSession==session,self.voiceprintGeneration==generation else{return}
             if let error {self.voiceprintStatus=error;return}
-            var changed=Set<SessionSpeakerKey>();var namesChanged=false
-            for key in keys {
-                let old=self.voiceprintCandidates[key],next=result[key]
-                if old != next {changed.insert(key)}
-                self.voiceprintCandidates[key]=next
-                if self.naming.reconcileAutoVoiceprint(key:key,candidate:next,conflictingEvidence:conflicts.contains(key)) {namesChanged=true;changed.insert(key)}
-            }
-            if namesChanged {self.persistSessionNames();self.markAllTranscriptParentsDirty();self.reloadLibraryAfterVoiceprintNameWrite()}
-            for key in changed {self.refreshVoiceprintHeading(key)}
-            if !changed.isEmpty {self.refreshOpenSpeakerReview()}
+            self.applyLiveVoiceMatches(keys:keys,result:result,conflicts:conflicts)
+        }
+    }
+    private func applyLiveVoiceMatches(keys:Set<SessionSpeakerKey>,result:[SessionSpeakerKey:VoiceprintRecommendation],conflicts:Set<SessionSpeakerKey>) {
+        var changed=Set<SessionSpeakerKey>();var namesChanged=false
+        for key in keys {
+            let old=voiceprintCandidates[key],next=result[key]
+            if old != next {changed.insert(key)}
+            voiceprintCandidates[key]=next
+            if naming.reconcileAutoVoiceprint(key:key,candidate:next,conflictingEvidence:conflicts.contains(key)) {namesChanged=true;changed.insert(key)}
+        }
+        if namesChanged {persistSessionNames();markAllTranscriptParentsDirty();reloadLibraryAfterVoiceprintNameWrite()}
+        for key in changed {refreshVoiceprintHeading(key)}
+        if !changed.isEmpty {refreshOpenSpeakerReview()}
+    }
+    var manualSpeakerNames:[SessionSpeakerKey:String] {
+        guard let session=activeSession else{return [:]}
+        var names:[SessionSpeakerKey:String]=[:]
+        for key in naming.choices(session:session) {if let name=naming.name(speaker:key) {names[key]=name}}
+        return names
+    }
+    // After a saved person-level name change: the same voice elsewhere in this
+    // recording follows at once, instead of waiting for that person to speak again.
+    func rematchLiveVoices() {
+        guard !replayingHistory,let service=voiceprintService,let session=activeSession else{return}
+        let generation=voiceprintGeneration
+        service.rematch(session:session,manualNames:manualSpeakerNames) { [weak self] keys,result,conflicts in
+            guard let self,self.activeSession==session,self.voiceprintGeneration==generation else{return}
+            self.applyLiveVoiceMatches(keys:keys,result:result,conflicts:conflicts)
         }
     }
     // Call only after the person-level name was explicitly saved by the user.
@@ -413,7 +513,7 @@ extension Delegate {
         let owner=voiceprintManagementOwner
         if owner.voiceprintService==nil {owner.configureVoiceprintRecommendations()}
         let generation=meetingDocumentGeneration
-        let quietConfirmation=confirmationController?.pendingQuickName != nil || quickVoiceUndoPending
+        let quietConfirmation=confirmationController?.speakerSaveInFlight==true || quickVoiceUndoPending
         let namesData=try? naming.snapshot(session:session)
         let sourceFolder=currentCacheID.map{recoveryBase().appendingPathComponent($0)}
         owner.voiceprintService?.synchronize(session:session,confirmations:confirmations,sourceFolder:sourceFolder,sourceNames:namesData) { [weak self] result in
@@ -445,11 +545,11 @@ extension Delegate {
         guard !turn.parts.contains(where:{naming.displayName(segment:$0.0) != nil}) else{return ""}
         let keys=Set(turn.parts.compactMap{naming.key(segment:$0.0) ?? SessionSpeakerKey.from($0.1)})
         guard keys.count==1,let key=keys.first,let candidate=voiceprintRecommendation(for:key) else{return ""}
-        if !candidate.groupConsistent {
+        if !candidate.groupConsistent,candidate.recognizedSupport != nil {
             let supported=Set(candidate.support.map(\.id))
             guard turn.parts.contains(where:{supported.contains($0.0)}) else{return ""}
         }
-        return candidate.groupConsistent ? " · 可能是"+candidate.name:" · 部分声音像"+candidate.name
+        return candidate.groupConsistent || candidate.recognizedSupport==nil ? " · 可能是"+candidate.name:" · 部分声音像"+candidate.name
     }
     func refreshVoiceprintHeading(_ key:SessionSpeakerKey) {
         let identity=[key.session,key.source,key.epoch,key.identity].joined(separator:"\u{001F}")

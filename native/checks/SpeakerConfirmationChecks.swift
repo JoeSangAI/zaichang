@@ -108,6 +108,137 @@ import AppKit
     let cleanReader=VoiceprintRecommendationService(store:store);var cleanDone=false;var cleanArchive:VoiceprintArchive?
     cleanReader.profiles{value,_ in cleanArchive=value;cleanDone=true};try pump{cleanDone}
     try check(cleanArchive != nil,"unrelated_damaged_history_does_not_disable_voice_memory")
+    // Clicking a speaker's name: the whole person, later turns included, in one step.
+    func voice(_ cosine:Double,_ axis:Int=0)->[Double] {
+        var vector=[Double](repeating:0,count:192);vector[axis]=cosine;vector[axis+1]=(1-cosine*cosine).squareRoot();return vector
+    }
+    let wholeSession="whole-speaker-fixture",wholeCache=UUID().uuidString
+    try FileManager.default.createDirectory(at:cacheRoot.appendingPathComponent(wholeCache),withIntermediateDirectories:true)
+    try JSONSerialization.data(withJSONObject:["session":wholeSession,"cache_id":wholeCache]).write(to:cacheRoot.appendingPathComponent(wholeCache).appendingPathComponent("meeting.json"))
+    func spoken(_ index:Int,slot:Int,source:String="mic",vector:[Double],revision:Int=1,text:String?=nil)->[String:Any] {
+        let lo=Double(index*4),hi=lo+2.2
+        return ["type":"segment","session":wholeSession,"source_id":source,"track":source,"epoch":"whole-epoch","segment_id":"w-\(index)","revision":revision,"start":lo,"end":hi,"end_time_known":true,"final":true,"quality_flags":[],"text":text ?? "这是第\(index)段合成发言。","speaker":["basis":"anonymous_cluster","cluster_id":slot,"source_id":source,"epoch":"whole-epoch"],"identity_features":["partition":SpeakerEmbeddingBackend.partition,"input_kind":"synthetic_model_output","source_id":source,"epoch":"whole-epoch","evidence_start":lo,"evidence_end":hi,"quality_gate":"single_model_slot_asr_final_unclipped","values":vector]]
+    }
+    let whole=Delegate();whole.previewRenderOnly=true;whole.applicationDidFinishLaunching(Notification(name:NSApplication.didFinishLaunchingNotification))
+    whole.recoveryRootOverride=cacheRoot
+    whole.voiceprintService=VoiceprintRecommendationService(store:VoiceprintArchiveStore(folder:fixtureDirectory.appendingPathComponent("whole/Voiceprints"),domain:"synthetic_model_output"))
+    whole.receive(["type":"started","session":wholeSession,"cache_id":wholeCache,"mode":"cloud"])
+    for i in 0..<3 {whole.receive(spoken(i,slot:0,vector:voice(1)))}
+    for i in 3..<6 {whole.receive(spoken(i,slot:1,vector:voice(0.9)))}
+    for i in 6..<9 {whole.receive(spoken(i,slot:2,vector:voice(1,5)))}
+    whole.voiceprintService!.queue.sync{};_=RunLoop.current.run(mode:.default,before:Date().addingTimeInterval(0.01))
+    try whole.settleTranscriptForOfflineReview()
+    let slot0=SessionSpeakerKey(session:wholeSession,source:"mic",epoch:"whole-epoch",identity:"slot:0")
+    let slot1=SessionSpeakerKey(session:wholeSession,source:"mic",epoch:"whole-epoch",identity:"slot:1")
+    let slot2=SessionSpeakerKey(session:wholeSession,source:"mic",epoch:"whole-epoch",identity:"slot:2")
+    var speakerLinks:[String]=[]
+    whole.output.textStorage?.enumerateAttribute(.link,in:NSRange(location:0,length:whole.output.textStorage!.length)){value,_,_ in if let value=value as? String,value.hasPrefix(speakerLinkPrefix) {speakerLinks.append(value)}}
+    try check(speakerLinks.contains(speakerLinkPrefix+"w-0"),"speaker_name_in_transcript_is_a_link_to_rename_the_person")
+    try check(whole.textView(whole.output,clickedOnLink:speakerLinkPrefix+"w-0",at:0),"clicking_a_speaker_name_opens_the_editor")
+    let wholeEditor=whole.confirmationController!
+    try check(wholeEditor.scope.isHidden && wholeEditor.learn.isHidden && wholeEditor.status.stringValue.contains("后面说的也一样"),"speaker_name_editor_defaults_to_the_whole_person_without_options")
+    if let content=wholeEditor.popover.contentViewController?.view {
+        content.frame=NSRect(origin:.zero,size:content.fittingSize);content.layoutSubtreeIfNeeded()
+        if let bitmap=content.bitmapImageRepForCachingDisplay(in:content.bounds) {content.cacheDisplay(in:content.bounds,to:bitmap);try bitmap.representation(using:.png,properties:[:])!.write(to:directory.appendingPathComponent("whole-speaker-popover.png"))}
+        try check(content.fittingSize.width<=360,"speaker_name_editor_stays_compact")
+    }
+    // While someone keeps talking their own newest turn is revised; that must not block naming them.
+    whole.receive(spoken(1,slot:0,vector:voice(1),revision:2,text:"这是修订后的合成发言。"))
+    wholeEditor.field.stringValue="合成甲";wholeEditor.controlTextDidChange(Notification(name:NSControl.textDidChangeNotification,object:wholeEditor.field));wholeEditor.commit()
+    func wholePump(_ until:()->Bool)throws {
+        let end=Date().addingTimeInterval(5)
+        while !until(),Date()<end {whole.voiceprintService?.queue.sync{};_=RunLoop.current.run(mode:.default,before:Date().addingTimeInterval(0.01))}
+        guard until() else{throw Failure(code:"whole_speaker_async_timeout")}
+    }
+    try check(whole.naming.name(speaker:slot0)=="合成甲" && whole.naming.name(segment:"w-2")=="合成甲","naming_from_the_heading_renames_every_turn_of_that_person")
+    try wholePump{whole.diagnostic.stringValue.contains("后面的发言也会用这个名字")}
+    whole.receive(spoken(9,slot:0,vector:voice(1)));try whole.settleTranscriptForOfflineReview()
+    try check(whole.naming.displayName(segment:"w-9")?.value=="合成甲" && whole.naming.displayName(segment:"w-9")?.origin == .manual,"later_turns_of_a_named_person_carry_the_name")
+    try wholePump{whole.naming.displayName(speaker:slot1)?.value=="合成甲"}
+    try check(whole.naming.displayName(speaker:slot1)?.origin == .voiceprint && whole.naming.name(speaker:slot1)==nil,"same_voice_in_another_slot_follows_as_a_rejectable_automatic_name")
+    try check(whole.naming.displayName(speaker:slot2)==nil,"a_different_voice_does_not_follow")
+    try check(whole.naming.voiceConfirmations.allSatisfy{record in record.segmentIDs.allSatisfy{whole.naming.key(segment:$0)==slot0}},"a_followed_slot_is_never_a_training_label")
+    try check(!whole.naming.voiceConfirmations.contains{$0.segmentIDs.contains("w-9")},"turns_after_naming_wait_for_the_end_of_capture")
+    try check(whole.naming.extendSpeakerConfirmations(session:wholeSession) && whole.naming.voiceConfirmations.contains{$0.segmentIDs.contains("w-9")} && !whole.naming.extendSpeakerConfirmations(session:wholeSession),"end_of_capture_covers_turns_said_since_naming_once")
+    try check(whole.textView(whole.output,clickedOnLink:speakerLinkPrefix+"w-0",at:0) && whole.confirmationController!.field.stringValue=="合成甲","reopening_a_named_person_prefills_the_name")
+    whole.confirmationController!.field.stringValue="合成乙";whole.confirmationController!.commit()
+    try check(whole.naming.name(segment:"w-2")=="合成乙","correcting_the_name_reaches_every_turn")
+    try wholePump{whole.naming.displayName(speaker:slot1)?.value=="合成乙"}
+    try wholePump{!whole.diagnostic.stringValue.isEmpty && whole.confirmationController?.speakerSaveInFlight != true}
+    whole.undoName()
+    try wholePump{whole.naming.name(speaker:slot0)=="合成甲" && whole.naming.displayName(speaker:slot1)?.value=="合成甲"}
+    whole.undoName()
+    try wholePump{whole.naming.name(speaker:slot0)==nil && whole.naming.displayName(speaker:slot1)==nil}
+    try check(!whole.naming.autoNameIsSuppressed(slot1),"undoing_the_name_releases_the_followed_group")
+    _=whole.textView(whole.output,clickedOnLink:speakerLinkPrefix+"w-0",at:0)
+    whole.confirmationController!.field.stringValue="合成丙";whole.confirmationController!.controlTextDidChange(Notification(name:NSControl.textDidChangeNotification,object:whole.confirmationController!.field));whole.confirmationController!.commit()
+    try wholePump{whole.naming.displayName(speaker:slot1)?.value=="合成丙" && whole.confirmationController?.speakerSaveInFlight != true}
+    whole.rejectVoiceprintRecommendation(slot1)
+    try check(whole.naming.displayName(speaker:slot1)==nil && whole.naming.autoNameIsSuppressed(slot1),"rejecting_a_followed_name_sticks")
+    try check(whole.textView(whole.output,clickedOnLink:speakerLinkPrefix+"w-6",at:0),"another_person_opens_too")
+    let narrowed=whole.confirmationController!
+    narrowed.onlyThisForChecks();narrowed.field.stringValue="只这一段";narrowed.controlTextDidChange(Notification(name:NSControl.textDidChangeNotification,object:narrowed.field));narrowed.commit()
+    try check(whole.naming.name(segment:"w-6")=="只这一段" && whole.naming.name(segment:"w-7")==nil && whole.naming.name(speaker:slot2)==nil,"only_this_turn_stays_available")
+    whole.window.close()
+    // The link is deliberately narrow; these are the shapes real meetings produced.
+    func linkMatcher(_ rows:[(SessionSpeakerKey,Int,[Double])])->VoiceprintMatcher {
+        var matcher=VoiceprintMatcher();matcher.reset(session:wholeSession)
+        matcher.importSavedEvidence(rows.map{key,index,vector in SavedVoiceRecognitionEvidence(id:"m-\(key.identity)-\(key.source)-\(index)",revision:1,key:key,sample:VoiceprintSample(session:wholeSession,source:key.source,epoch:key.epoch,start:Double(index*4),end:Double(index*4)+3,vector:vector))})
+        return matcher
+    }
+    func rows(_ key:SessionSpeakerKey,_ vector:[Double],from:Int)->[(SessionSpeakerKey,Int,[Double])] {(from..<from+3).map{(key,$0,vector)}}
+    try check(linkMatcher(rows(slot0,voice(1),from:0)+rows(slot1,voice(0.74),from:3)).sessionLink(slot1,manualNames:[slot0:"甲"])==nil,"similar_but_different_voices_do_not_link")
+    try check(linkMatcher(rows(slot0,voice(1),from:0)+rows(slot1,voice(0.86),from:3)).sessionLink(slot1,manualNames:[slot0:"甲"])?.name=="甲","same_voice_links_across_slots")
+    try check(linkMatcher(rows(slot0,voice(1),from:0)+rows(slot1,voice(0.9),from:3)).sessionLink(slot1,manualNames:[:])==nil,"nothing_links_before_a_human_names_someone")
+    let otherChannel=SessionSpeakerKey(session:wholeSession,source:"app-1",epoch:"whole-epoch",identity:"slot:0")
+    try check(linkMatcher(rows(otherChannel,voice(1),from:0)+rows(slot1,voice(0.65),from:3)).sessionLink(slot1,manualNames:[otherChannel:"甲"])?.name=="甲","same_person_links_across_microphone_and_computer_audio")
+    try check(linkMatcher(rows(otherChannel,voice(1),from:0)+rows(slot1,voice(0.3),from:3)).sessionLink(slot1,manualNames:[otherChannel:"甲"])==nil,"different_people_do_not_link_across_microphone_and_computer_audio")
+    try check(linkMatcher(rows(slot0,voice(1),from:0)+rows(slot2,voice(0.95),from:6)+rows(slot1,voice(0.9),from:3)).sessionLink(slot1,manualNames:[slot0:"甲",slot2:"乙"])==nil,"two_named_people_both_close_withhold_the_link")
+    // The voice library follows the authoritative names; nothing is lost in a merge.
+    let voiceDomain="synthetic_model_output"
+    func confirmed(_ name:String,person:String,session:String,source:String,vector:[Double],first:Int=0)->VoiceprintLearningContribution {
+        VoiceprintLearningContribution(confirmationID:UUID().uuidString,personID:person,name:name,confirmedAt:ISO8601DateFormatter().string(from:Date()),
+            samples:(first..<first+3).map{VoiceprintSample(session:session,source:source,epoch:"lib",start:Double($0*4),end:Double($0*4)+3,vector:vector)})
+    }
+    let aliasID=UUID().uuidString,canonicalID=UUID().uuidString,otherID=UUID().uuidString,typoID=UUID().uuidString
+    var library=try archiveAddingVoiceConfirmation(nil,contribution:confirmed("Alpha",person:aliasID,session:"lib-1",source:"app-37d3b9dbfc68fcaf-g1",vector:voice(1)),domain:voiceDomain)
+    library=try archiveAddingVoiceConfirmation(library,contribution:confirmed("合成甲正名",person:canonicalID,session:"lib-2",source:"mic",vector:voice(0.55)),domain:voiceDomain)
+    library=try archiveAddingVoiceConfirmation(library,contribution:confirmed("其他人",person:otherID,session:"lib-3",source:"app-37d3b9dbfc68fcaf-g1",vector:voice(1,9)),domain:voiceDomain)
+    library=try archiveAddingVoiceConfirmation(library,contribution:confirmed("合成错字 Beta",person:typoID,session:"lib-4",source:"app-37d3b9dbfc68fcaf-g1",vector:voice(1,20)),domain:voiceDomain)
+    library=try archiveAddingVoiceConfirmation(library,contribution:confirmed("beta",person:UUID().uuidString,session:"lib-5",source:"app-37d3b9dbfc68fcaf-g1",vector:voice(0.55,20)),domain:voiceDomain)
+    let aligned=try archiveAligningVoiceNames(library,resolved:["Alpha":"合成甲正名","合成错字 Beta":"合成乙正名","beta":"合成乙正名"],domain:voiceDomain)
+    let canonical=aligned.people.first{$0.name=="合成甲正名"},misspelt=aligned.people.first{$0.name=="合成乙正名"}
+    try check(aligned.people.count==3 && canonical?.samples.count==6 && Set(canonical?.samples.map{VoiceprintAcousticContext.channel(for:$0.source)} ?? []).count==2,"alias_merges_a_person_across_scenes_keeping_every_sample")
+    try check(misspelt?.samples.count==6 && aligned.people.first{$0.name.contains("合成错字")}==nil && aligned.knownPeople.first{$0.name=="合成乙正名"}?.aliases.sorted()==["beta","合成错字 Beta"].sorted(),"misspelling_is_renamed_and_later_spellings_join_it")
+    try check(aligned.learning?.contributions.contains{$0.name=="Alpha"}==true,"contributions_keep_the_name_their_meeting_confirmed")
+    try check(try archiveAligningVoiceNames(aligned,resolved:["Alpha":"合成甲正名","合成错字 Beta":"合成乙正名","beta":"合成乙正名"],domain:voiceDomain).revision==aligned.revision,"alignment_is_idempotent")
+    try check(try JSONDecoder().decode(VoiceprintArchive.self,from:JSONEncoder().encode(aligned)).validated(domain:voiceDomain).people==aligned.people,"aligned_library_survives_save_and_validation")
+    let survivors=aligned.learning!.contributions.filter{$0.name=="Alpha"}.map(\.confirmationID)
+    let reconciled=try archiveReconcilingVoiceConfirmations(aligned,session:"lib-1",activeIDs:Set(survivors),domain:voiceDomain)
+    try check(reconciled.revision==aligned.revision,"restart_reconciliation_accepts_merged_contributions")
+    let revoked=try archiveReconcilingVoiceConfirmations(aligned,session:"lib-1",activeIDs:[],domain:voiceDomain)
+    try check(revoked.people.first{$0.name=="合成甲正名"}?.samples.count==3,"undoing_in_the_source_meeting_still_retracts_only_those_samples")
+    let renamed=try archiveRenamingVoicePerson(aligned,personID:otherID,name:"新名字",domain:voiceDomain)
+    try check(renamed.people.contains{$0.id==otherID && $0.name=="新名字"},"a_person_can_be_renamed_by_hand")
+    try check(try archiveRenamingVoicePerson(aligned,personID:otherID,name:"合成甲正名",domain:voiceDomain).people.count==2,"renaming_to_an_existing_person_merges")
+    let optedOut=try archiveSettingVoiceEnabled(aligned,personID:otherID,enabled:false,domain:voiceDomain)
+    try check(try archiveMergingVoicePeople(optedOut,from:otherID,into:canonical!.id,domain:voiceDomain).people.first{$0.name=="合成甲正名"}?.enabled==false,"opting_out_survives_a_merge")
+    // A voice heard only on computer audio, now on the microphone: asked, not asserted.
+    func sceneMatcher(_ archive:VoiceprintArchive)->VoiceprintMatcher {
+        var matcher=VoiceprintMatcher(archive:archive);matcher.reset(session:wholeSession)
+        matcher.importSavedEvidence((0..<3).map{index in SavedVoiceRecognitionEvidence(id:"s-\(index)",revision:1,key:slot0,sample:VoiceprintSample(session:wholeSession,source:"mic",epoch:"whole-epoch",start:Double(index*4),end:Double(index*4)+3,vector:voice(0.55,9)))})
+        return matcher
+    }
+    try check(sceneMatcher(aligned).suggestion(slot0)==nil,"one_meeting_in_the_other_scene_is_not_enough_to_ask")
+    let twoMeetings=try archiveAddingVoiceConfirmation(aligned,contribution:confirmed("其他人",person:otherID,session:"lib-7",source:"app-37d3b9dbfc68fcaf-g1",vector:voice(1,9),first:40),domain:voiceDomain)
+    let question=sceneMatcher(twoMeetings).suggestion(slot0)
+    try check(question?.name=="其他人" && question?.groupConsistent==false && question?.recognizedSupport==nil,"a_voice_from_the_other_scene_is_offered_as_a_question")
+    try check(sceneMatcher(twoMeetings).suggestion(slot0,groupCentroid:false)==nil,"a_question_is_never_automatic_learning")
+    var questionNames=SessionNames();for index in 0..<3 {questionNames.register(segment:"s-\(index)",item:["session":wholeSession,"source_id":"mic","epoch":"whole-epoch","revision":1,"speaker":["basis":"anonymous_cluster","cluster_id":0,"source_id":"mic","epoch":"whole-epoch"]])}
+    _=questionNames.reconcileAutoVoiceprint(key:slot0,candidate:question)
+    try check(questionNames.displayName(segment:"s-0")==nil && questionNames.autoName(for:slot0)==nil,"a_question_shows_no_name_until_answered")
+    let hasMic=try archiveAddingVoiceConfirmation(twoMeetings,contribution:confirmed("其他人",person:otherID,session:"lib-6",source:"mic",vector:voice(1,30)),domain:voiceDomain)
+    try check(sceneMatcher(hasMic).suggestion(slot0)==nil,"someone_with_references_in_this_scene_is_judged_by_them")
     let isolatedStore=VoiceprintArchiveStore(folder:fixtureDirectory.appendingPathComponent("cross-session/Voiceprints"),domain:"synthetic_model_output")
     let concurrentService=VoiceprintRecommendationService(store:isolatedStore);concurrentService.reset(session)
     concurrentService.observe(event(0)){_,_,_,_ in};concurrentService.queue.sync{}

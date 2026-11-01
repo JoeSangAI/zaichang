@@ -40,10 +40,14 @@ extension Delegate {
         if owner.voiceprintService==nil {owner.configureVoiceprintRecommendations()}
         guard let service=owner.voiceprintService else{return}
         let continuousLearning=VoiceprintLearningPolicy().isEnabled
-        let keys=Array(naming.choices(session:session).filter{(naming.name(speaker:$0)==nil && !naming.autoNameIsSuppressed($0)) || (continuousLearning && naming.name(speaker:$0) != nil)}.sorted{
+        // Named groups stay in: they are what the same voice elsewhere in this
+        // meeting is compared with, and what learning reads when it is on.
+        let keys=Array(naming.choices(session:session).filter{naming.name(speaker:$0) != nil || !naming.autoNameIsSuppressed($0)}.sorted{
             [$0.source,$0.epoch,$0.identity].joined() < [$1.source,$1.epoch,$1.identity].joined()
         }.prefix(32))
         guard !keys.isEmpty else{return}
+        if continuousLearning,naming.extendSpeakerConfirmations(session:session) {persistSessionNames()}
+        let manualNames=manualSpeakerNames
         let job=savedVoiceRecognitionJob,token=job.reserve(),generation=meetingDocumentGeneration,revision=naming.correctionRevision
         let request=SavedVoiceRecognitionRequest(folder:recoveryBase().appendingPathComponent(cache).path,session:session,inputKind:Credential.offline ? "synthetic_model_output":"consented_live_audio",keys:keys,sampleLimit:24)
         service.profiles { [weak self] archive,error in
@@ -51,7 +55,7 @@ extension Delegate {
             owner.voiceprintSuggestionArchive=archive
             self.naming.validateVoiceprintArchive(archive)
             self.markAllTranscriptParentsDirty()
-            let hasManualLabels=continuousLearning && keys.contains{key in self.naming.segmentIDs(for:key).contains{self.naming.name(segment:$0) != nil}}
+            let hasManualLabels=keys.contains{key in self.naming.segmentIDs(for:key).contains{self.naming.name(segment:$0) != nil}}
             guard (archive.map{!$0.people.isEmpty} ?? false) || hasManualLabels else{job.cancel();if let error {self.voiceprintStatus=error};return}
             self.voiceprintStatus="正在本机识别已保存的声音…";self.refreshOpenSpeakerReview()
             let completed:(UUID,Result<Data,Error>)->Void = { [weak self] returned,value in
@@ -62,7 +66,7 @@ extension Delegate {
                         let result=try JSONDecoder().decode(SavedVoiceRecognitionResult.self,from:value.get())
                         try SavedVoiceRecognition.validate(result,request:request)
                         guard job.isCurrent(returned) else{return}
-                        service.recognizeSaved(result) { [weak self] values,conflicts in
+                        service.recognizeSaved(result,manualNames:manualNames) { [weak self] values,conflicts in
                             guard let self,job.isCurrent(returned),!self.quitting,
                                   self.activeSession==session,self.currentCacheID==cache,self.meetingDocumentGeneration==generation,
                                   self.naming.correctionRevision==revision,[.paused,.stopped,.failed].contains(self.phase.phase) else{return}
@@ -85,7 +89,7 @@ extension Delegate {
                                         // Re-score the already extracted features, without reading audio again.
                                         if !rows.isEmpty {
                                             let rematchRevision=self.naming.correctionRevision
-                                            service.recognizeSaved(result) { [weak self] updated,updatedConflicts in
+                                            service.recognizeSaved(result,manualNames:manualNames) { [weak self] updated,updatedConflicts in
                                                 guard let self,job.isCurrent(returned),self.activeSession==session,self.currentCacheID==cache,
                                                       self.meetingDocumentGeneration==generation,self.naming.correctionRevision==rematchRevision,
                                                       [.paused,.stopped,.failed].contains(self.phase.phase) else{return}

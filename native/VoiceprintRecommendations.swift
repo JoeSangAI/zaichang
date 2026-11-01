@@ -30,6 +30,7 @@ struct VoiceprintArchive:Codable {
                   ledger.revokedConfirmationIDs.allSatisfy({UUID(uuidString:$0) != nil}),
                   ledger.enabledOverrides.count<=128,ledger.enabledOverrides.keys.allSatisfy({UUID(uuidString:$0) != nil}),
                   validAutomaticVoiceLedger(ledger),
+                  (ledger.personNames ?? [:]).allSatisfy({UUID(uuidString:$0.key) != nil && !$0.value.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty && $0.value.count<=80 && !$0.value.unicodeScalars.contains(where:{$0.value<32})}),
                   try projectVoiceLedger(ledger)==people else{throw ProfileStoreError.invalid}
         }
         return self
@@ -126,10 +127,24 @@ final class VoiceprintReferenceCache {
 let voiceprintGroupCentroidThreshold=0.62
 let voiceprintGroupCentroidMargin=0.10
 let voiceprintGroupOutlierFloor=0.50
+// From 14 real meetings (2026-11-01): the same person across two slots scored
+// 0.86-0.95, except 0.56 and 0.74 which stay unlinked; 32 different-person pairs
+// peaked at 0.74. The margin is against the next named person on that channel.
+let voiceprintSessionLinkThreshold=0.80
+let voiceprintSessionLinkMargin=0.10
+// Across microphone and computer audio in one meeting: the same person 0.65-0.71,
+// 24 different-person pairs at most 0.29.
+let voiceprintSessionCrossLinkThreshold=0.55
+// A person known only from the other kind of audio, from at least two meetings
+// (one attracted an unregistered voice in replay, the same lesson as above).
+// Only ever a question ("可能是"), which one click turns into this new scene.
+let voiceprintCrossSceneThreshold=0.50
+let voiceprintCrossSceneMargin=0.10
 struct VoiceprintGroupCentroidScore:Equatable {let id:String;let score:Double;let sessions:Int}
 final class VoiceprintCentroidTable {
     private let order:[String]
     private let sums:[String:[String:(vector:[Double],count:Int)]]
+    private let scenes:[String:[String:[String:(vector:[Double],count:Int)]]]
     // Human references only: baseline plus unrevoked manual confirmations, never
     // automatic support or the bounded 12-sample view. Audio claimed by two
     // people is ambiguous and left out.
@@ -151,6 +166,7 @@ final class VoiceprintCentroidTable {
             for person in archive.people {for sample in person.samples {add(person.id,sample,samePersonOnly:false)}}
         }
         var sums:[String:[String:(vector:[Double],count:Int)]]=[:]
+        var scenes:[String:[String:[String:(vector:[Double],count:Int)]]]=[:]
         for row in rows where ids.contains(row.0) {
             let owners=Set((bySession[row.1.session] ?? []).filter{voiceSampleOverlap(rows[$0].1,row.1)}.map{rows[$0].0})
             guard owners.count==1 else{continue}
@@ -158,8 +174,32 @@ final class VoiceprintCentroidTable {
             for i in entry.vector.indices {entry.vector[i]+=row.1.vector[i]}
             entry.count+=1
             sums[row.0,default:[:]][row.1.session]=entry
+            let channel=VoiceprintAcousticContext.channel(for:row.1.source)
+            var scene=scenes[row.0,default:[:]][channel,default:[:]][row.1.session] ?? (vector:[Double](repeating:0,count:row.1.vector.count),count:0)
+            for i in scene.vector.indices {scene.vector[i]+=row.1.vector[i]}
+            scene.count+=1
+            scenes[row.0,default:[:]][channel,default:[:]][row.1.session]=scene
         }
-        self.sums=sums;self.order=archive.people.map(\.id)
+        self.sums=sums;self.scenes=scenes;self.order=archive.people.map(\.id)
+    }
+    func sceneSampleCount(_ id:String,channel:String,excludingSession:String)->Int {
+        (scenes[id]?[channel] ?? [:]).filter{$0.key != excludingSession}.values.reduce(0){$0+$1.count}
+    }
+    func sceneSessions(_ id:String,channel:String,excludingSession:String)->Int {
+        (scenes[id]?[channel] ?? [:]).keys.filter{$0 != excludingSession}.count
+    }
+    // Each person's references from one kind of audio only.
+    func sceneScores(_ vector:[Double],channel:String,excludingSession:String)->[(id:String,score:Double)] {
+        order.compactMap { id -> (id:String,score:Double)? in
+            var total=[Double](repeating:0,count:vector.count),count=0
+            for (session,entry) in scenes[id]?[channel] ?? [:] where session != excludingSession {
+                for i in total.indices {total[i]+=entry.vector[i]}
+                count+=entry.count
+            }
+            let norm=sqrt(total.reduce(0){$0+$1*$1})
+            guard count>=3,norm>1e-12 else{return nil}
+            return (id,voiceprintDot(total,vector)/norm)
+        }.sorted{$0.score>$1.score}
     }
     func scores(_ vector:[Double],excludingSession:String)->[VoiceprintGroupCentroidScore] {
         order.compactMap { id -> VoiceprintGroupCentroidScore? in
@@ -388,6 +428,32 @@ struct VoiceprintMatcher {
     func suggestion(_ key:SessionSpeakerKey,groupCentroid:Bool=true)->VoiceprintRecommendation? {
         if let complete=recommendation(key) {return complete}
         if groupCentroid,let group=groupCentroidRecommendation(key) {return group}
+        if let partial=partialSuggestion(key) {return partial}
+        return groupCentroid ? crossSceneSuggestion(key):nil
+    }
+    // Someone so far heard only on the other kind of audio, so this scene has
+    // nothing of theirs to compare with. Asked, not asserted: no name is shown
+    // until a click, and that click is what adds the scene to the library.
+    private func crossSceneSuggestion(_ key:SessionSpeakerKey)->VoiceprintRecommendation? {
+        guard key.session==session,!ignored.contains(key),let archive,let rows=evidence[key],rows.count>=3,!conflictingEvidence(key) else{return nil}
+        func centre(_ values:[VoiceprintEvidence])->[Double] {
+            var total=[Double](repeating:0,count:values[0].vector.count)
+            for value in values {for i in total.indices {total[i]+=value.vector[i]}}
+            let norm=sqrt(total.reduce(0){$0+$1*$1})
+            return norm>1e-12 ? total.map{$0/norm}:total
+        }
+        let own=VoiceprintAcousticContext.channel(for:key.source),other=own=="microphone" ? "system":"microphone"
+        let first=centre(rows),kept=rows.filter{voiceprintDot($0.vector,first)>=voiceprintGroupOutlierFloor}
+        guard kept.count>=3 else{return nil}
+        let table=centroids.table(for:archive),scores=table.sceneScores(centre(kept),channel:other,excludingSession:key.session)
+        guard let best=scores.first,best.score>=voiceprintCrossSceneThreshold,
+              best.score-(scores.dropFirst().first?.score ?? 0)>=voiceprintCrossSceneMargin,
+              table.sceneSampleCount(best.id,channel:own,excludingSession:key.session)<3,
+              table.sceneSessions(best.id,channel:other,excludingSession:key.session)>=2,
+              let person=archive.people.first(where:{$0.id==best.id && $0.enabled}) else{return nil}
+        return VoiceprintRecommendation(personID:person.id,name:person.name,archiveRevision:archive.revision,evidenceCount:kept.count,support:kept.prefix(8).map{VoiceprintEvidenceRef(id:$0.id,revision:$0.revision)},groupConsistent:false)
+    }
+    private func partialSuggestion(_ key:SessionSpeakerKey)->VoiceprintRecommendation? {
         guard key.session==session,!ignored.contains(key),let archive,let rows=evidence[key],!conflictingEvidence(key) else{return nil}
         let supported=rows.compactMap {row -> (VoiceprintEvidence,String)? in
             let scores=referenceScores(row.vector,archive,excluding:key.session)
@@ -423,6 +489,39 @@ struct VoiceprintMatcher {
         let recognized=supported.map{$0.0}.filter{row in best.allSatisfy{agrees($0,row)}}
         return VoiceprintRecommendation(personID:person.id,name:person.name,archiveRevision:archive.revision,evidenceCount:best.count,support:best.map{VoiceprintEvidenceRef(id:$0.id,revision:$0.revision)},groupConsistent:false,recognizedSupport:recognized.map{VoiceprintEvidenceRef(id:$0.id,revision:$0.revision)})
     }
+    // A person's voice can land in two slots of one meeting. Once a human names
+    // one, another group whose mean voice clearly matches shows the same name.
+    // Never a training label: only a person's own confirmation enrolls their
+    // voice. See docs/speaker-rename-live-20261101.md.
+    func sessionLink(_ key:SessionSpeakerKey,manualNames:[SessionSpeakerKey:String])->VoiceprintRecommendation? {
+        guard key.session==session,!ignored.contains(key),manualNames[key]==nil,let rows=evidence[key],rows.count>=3 else{return nil}
+        func centre(_ values:[VoiceprintEvidence])->[Double] {
+            var total=[Double](repeating:0,count:values[0].vector.count)
+            for value in values {for i in total.indices {total[i]+=value.vector[i]}}
+            let norm=sqrt(total.reduce(0){$0+$1*$1})
+            return norm>1e-12 ? total.map{$0/norm}:total
+        }
+        let channel=VoiceprintAcousticContext.channel(for:key.source)
+        let voice=centre(rows)
+        func best(sameChannel:Bool,threshold:Double)->(String,[SessionSpeakerKey],Double)? {
+            var byName:[String:[SessionSpeakerKey]]=[:]
+            for (other,name) in manualNames where other != key && other.session==key.session && (VoiceprintAcousticContext.channel(for:other.source)==channel)==sameChannel {byName[name,default:[]].append(other)}
+            let scores=byName.compactMap { name,keys -> (String,[SessionSpeakerKey],Double)? in
+                let references=keys.flatMap{evidence[$0] ?? []}
+                guard references.count>=3 else{return nil}
+                return (name,keys,voiceprintDot(voice,centre(references)))
+            }.sorted{$0.2>$1.2}
+            guard let top=scores.first,top.2>=threshold,top.2-(scores.dropFirst().first?.2 ?? 0)>=voiceprintSessionLinkMargin else{return nil}
+            return top
+        }
+        guard let best=best(sameChannel:true,threshold:voiceprintSessionLinkThreshold) ?? best(sameChannel:false,threshold:voiceprintSessionCrossLinkThreshold) else{return nil}
+        // Stable across renames of the named person, so a correction carries over.
+        let anchor=best.1.map{[$0.source,$0.epoch,$0.identity].joined(separator:"|")}.sorted()[0]
+        let hash=Array(historicalVoiceHash(Data((key.session+"|"+anchor).utf8)).prefix(32))
+        let id=[hash[0..<8],hash[8..<12],hash[12..<16],hash[16..<20],hash[20..<32]].map{String($0)}.joined(separator:"-")
+        return VoiceprintRecommendation(personID:id,name:best.0,archiveRevision:max(1,archive?.revision ?? 1),evidenceCount:rows.count,support:rows.suffix(8).map{VoiceprintEvidenceRef(id:$0.id,revision:$0.revision)})
+    }
+    var evidencedKeys:[SessionSpeakerKey] {Array(evidence.keys)}
     mutating func importSavedEvidence(_ rows:[SavedVoiceRecognitionEvidence]) {
         for row in rows where row.key.session==session {
             guard evidence.count<128 || evidence[row.key] != nil,(evidence[row.key]?.count ?? 0)<24,byID.count<256 else{continue}
@@ -521,6 +620,10 @@ struct VoiceprintLearningLedger:Codable,Equatable {
     var contributions:[VoiceprintLearningContribution]
     var revokedConfirmationIDs:[String]
     var enabledOverrides:[String:Bool]
+    // The name a person goes by, set by alignment or by hand. A contribution
+    // keeps the name it was confirmed under, because the meeting's own record
+    // is checked against it; those names are this person's other spellings.
+    var personNames:[String:String]?=nil
 }
 enum VoiceprintLearningError:Error {
     case invalidConfirmation,conflictingIdentity,conflictingVoice,revokedConfirmation,capacity,disabled
@@ -638,9 +741,16 @@ private func projectVoiceLedger(_ ledger:VoiceprintLearningLedger)throws->[Voice
         let additions=active.filter{$0.personID==id}
         let references=([baseline?.sharedPerson]+additions.map(\.sharedPerson)).compactMap{$0}
         guard Set(references.map(\.id)).count<=1,Set(references.map(\.name)).count<=1 else{throw VoiceprintLearningError.conflictingIdentity}
-        guard let first=additions.first else {if var baseline {if let enabled=ledger.enabledOverrides[id] {baseline.enabled=enabled};result.append(baseline)};continue}
+        guard let first=additions.first else {
+            if var baseline {
+                if let enabled=ledger.enabledOverrides[id] {baseline.enabled=enabled}
+                if let name=ledger.personNames?[id] {baseline=VoiceprintPerson(id:id,name:name,authorizedAt:baseline.authorizedAt,enabled:baseline.enabled,samples:baseline.samples,sharedPerson:baseline.sharedPerson?.name==name ? baseline.sharedPerson:nil)}
+                result.append(baseline)
+            }
+            continue
+        }
         let shared=references.last
-        let name=shared?.name ?? baseline?.name ?? first.name
+        let name=ledger.personNames?[id] ?? shared?.name ?? baseline?.name ?? first.name
         let eligible=learnedVoiceSamples(additions.flatMap(\.samples))
         // Baseline order and sample bytes are preserved. Trimming applies only
         // to this view; undo rebuilds from the complete original and ledger.
@@ -649,7 +759,7 @@ private func projectVoiceLedger(_ ledger:VoiceprintLearningLedger)throws->[Voice
         guard all.count>=3 else{continue}
         let samples=contextBalancedVoiceSamples(all)
         result.append(VoiceprintPerson(id:id,name:name,authorizedAt:baseline?.authorizedAt ?? first.confirmedAt,
-            enabled:ledger.enabledOverrides[id] ?? baseline?.enabled ?? true,samples:samples,sharedPerson:shared))
+            enabled:ledger.enabledOverrides[id] ?? baseline?.enabled ?? true,samples:samples,sharedPerson:shared?.name==name ? shared:nil))
     }
     let sharedIDs=result.compactMap{$0.sharedPerson?.id}
     guard Set(sharedIDs).count==sharedIDs.count else{throw VoiceprintLearningError.conflictingIdentity}
@@ -719,6 +829,78 @@ func archiveRevokingVoiceConfirmation(_ old:VoiceprintArchive,confirmationID:Str
     // not landed yet. Delayed callbacks cannot silently relearn a revoked edit.
     ledger.revokedConfirmationIDs.append(confirmationID)
     return try archiveWithVoiceLedger(old,ledger:ledger,domain:domain)
+}
+extension VoiceprintArchive {
+    // Everyone the ledger knows, including people still collecting their first
+    // three samples, with the other spellings they were confirmed under.
+    var knownPeople:[(id:String,name:String,aliases:[String])] {
+        let ledger=learning,active=(ledger?.contributions ?? []).filter{!(ledger?.revokedConfirmationIDs.contains($0.confirmationID) ?? false)}
+        var ids:[String]=[]
+        for id in (ledger?.baseline.map(\.id) ?? people.map(\.id))+active.map(\.personID) where !ids.contains(id) {ids.append(id)}
+        return ids.compactMap { id in
+            let own=active.filter{$0.personID==id}
+            guard let name=ledger?.personNames?[id] ?? people.first(where:{$0.id==id})?.name ?? ledger?.baseline.first(where:{$0.id==id})?.name ?? own.first?.name else{return nil}
+            var aliases:[String]=[]
+            for other in own.map(\.name) where other != name && !aliases.contains(other) {aliases.append(other)}
+            return (id,name,aliases)
+        }
+    }
+}
+func archiveRenamingVoicePerson(_ old:VoiceprintArchive,personID:String,name raw:String,domain:String)throws->VoiceprintArchive {
+    _ = try old.validated(domain:domain)
+    let name=raw.trimmingCharacters(in:.whitespacesAndNewlines)
+    guard !name.isEmpty,name.count<=80,!name.unicodeScalars.contains(where:{$0.value<32}),old.knownPeople.contains(where:{$0.id==personID}) else{throw VoiceprintLearningError.invalidConfirmation}
+    if let same=old.knownPeople.first(where:{$0.id != personID && $0.name==name}) {return try archiveMergingVoicePeople(old,from:personID,into:same.id,domain:domain)}
+    var ledger=voiceLedger(old),names=ledger.personNames ?? [:]
+    guard names[personID] != name else{return old}
+    names[personID]=name;ledger.personNames=names
+    return try archiveWithVoiceLedger(old,ledger:ledger,domain:domain)
+}
+// Every sample stays and keeps the name it was confirmed under; only who it
+// belongs to changes. A person heard on both microphone and computer audio is
+// exactly what matching needs. Staying off is kept if either side was off.
+func archiveMergingVoicePeople(_ old:VoiceprintArchive,from requestedSource:String,into requestedTarget:String,domain:String)throws->VoiceprintArchive {
+    _ = try old.validated(domain:domain)
+    let known=old.knownPeople
+    guard requestedSource != requestedTarget,known.contains(where:{$0.id==requestedSource}),let name=known.first(where:{$0.id==requestedTarget})?.name else{throw VoiceprintLearningError.invalidConfirmation}
+    var ledger=voiceLedger(old),source=requestedSource,target=requestedTarget
+    // Original references cannot move, so the baseline person keeps its identity.
+    let sourceIsBaseline=ledger.baseline.contains{$0.id==source}
+    if sourceIsBaseline {
+        guard !ledger.baseline.contains(where:{$0.id==target}) else{throw VoiceprintLearningError.conflictingIdentity}
+        swap(&source,&target)
+    }
+    let disabled=[source,target].contains{id in ledger.enabledOverrides[id]==false || (ledger.enabledOverrides[id]==nil && ledger.baseline.first{$0.id==id}?.enabled==false)}
+    var revoked=ledger.revokedConfirmationIDs
+    ledger.contributions=ledger.contributions.map { row in
+        guard row.personID==source else{return row}
+        var id=row.confirmationID
+        if let automatic=row.automatic {
+            id=automaticContributionID(personID:target,key:automatic.key,support:automatic.support)
+            if let index=revoked.firstIndex(of:row.confirmationID) {revoked[index]=id}
+        }
+        return VoiceprintLearningContribution(confirmationID:id,personID:target,name:row.name,sharedPerson:row.sharedPerson,confirmedAt:row.confirmedAt,samples:row.samples,automatic:row.automatic)
+    }
+    ledger.revokedConfirmationIDs=revoked
+    ledger.enabledOverrides.removeValue(forKey:source)
+    if disabled {ledger.enabledOverrides[target]=false}
+    var names=ledger.personNames ?? [:]
+    names.removeValue(forKey:source);names[target]=name;ledger.personNames=names
+    return try archiveWithVoiceLedger(old,ledger:ledger,domain:domain)
+}
+// Follow the authoritative spelling. Someone already known under it absorbs the
+// other spellings; nobody is merged on a guess, because `resolved` holds only
+// names with exactly one authoritative owner.
+func archiveAligningVoiceNames(_ old:VoiceprintArchive,resolved:[String:String],domain:String)throws->VoiceprintArchive {
+    var archive=old
+    for _ in 0..<voiceprintMaximumPeople*2 {
+        guard let person=archive.knownPeople.first(where:{person in resolved[person.name].map{$0 != person.name} ?? false}),
+              let canonical=resolved[person.name] else{break}
+        let next=try archiveRenamingVoicePerson(archive,personID:person.id,name:canonical,domain:domain)
+        guard next.revision != archive.revision else{break}
+        archive=next
+    }
+    return archive
 }
 func archiveSettingVoiceEnabled(_ old:VoiceprintArchive,personID:String,enabled:Bool,domain:String)throws->VoiceprintArchive {
     _ = try old.validated(domain:domain)
