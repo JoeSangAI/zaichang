@@ -49,7 +49,7 @@ enum SpeakerRefinementArtifact {
         SHA256.hash(data:data).map{String(format:"%02x",$0)}.joined()
     }
     private static func jsonData(_ object:Any)throws->Data {
-        try JSONSerialization.data(withJSONObject:object,options:[.sortedKeys])
+        try autoreleasepool {try JSONSerialization.data(withJSONObject:object,options:[.sortedKeys])}
     }
     private static func validDigest(_ value:String)->Bool {
         value.range(of:"^[a-f0-9]{64}$",options:.regularExpression) != nil

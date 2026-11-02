@@ -208,6 +208,7 @@ private final class MeetingLibraryMouseProbe:NSTableView {
     let bNamesBefore=try Data(contentsOf:current.directory.appendingPathComponent("session-names.json"))
     let aHashesBefore=try old.transcriptHashes()
     var appendRequest:[String:Any]?;app.startupWorkerFixture={appendRequest=$0};app.resumeViewedMeeting();try wait{appendRequest != nil}
+    try check(app.appendTailOwedCacheID==(old.pendingBytes>0 ? old.id:nil),"continue_remembers_whether_an_earlier_tail_is_owed")
     try check(appendRequest?["append_capture_cache_id"] as? String==old.id && app.currentCacheID==old.id && app.historyReader==nil,"resume_selected_history_reuses_original_cache_and_starts_capture")
     // The shipped helper is chosen by candidate_mode exactly as for a normal start.
     try check(appendRequest?["candidate_mode"] as? Bool==app.trialCandidate,"resume_request_selects_shipped_helper_like_normal_start")

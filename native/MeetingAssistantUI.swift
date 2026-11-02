@@ -125,7 +125,7 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
     var recordingControlTimeout:DispatchWorkItem?;var recordingControlTimeoutSeconds=3.0
     var meetingDocumentGeneration=0 {didSet {if oldValue != meetingDocumentGeneration {cancelMeetingMinutes()}}};var newMeetingRequested=false;var newMeetingSaveInFlight=false
     var recordingControlInFlight:String?
-    var pendingAutomaticTailRecovery:(reason:String,cacheID:String,session:String)?;var automaticTailRecoveryAttempted=Set<String>()
+    var pendingAutomaticTailRecovery:(reason:String,cacheID:String,session:String)?;var automaticTailRecoveryAttempted=Set<String>();var appendTailOwedCacheID:String?
     var mockRecordingControlHandler:(([String:Any])->Void)?;var mockStopHandler:(()->Void)?;var savePanelURLProvider:(()->URL?)?
     var echoStatusLabel="";var observedAppSources:[String:String]=[:]
     var sourceCaptureGapLabels=Set<String>();var unavailableAppSourceIDs=Set<String>()
@@ -816,7 +816,7 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
     }
     func startAutomaticTailRecovery(reason:String,cacheID:String,session:String) {
         guard ["capture_control_timeout_pause","capture_control_timeout_pause_drain",
-               "capture_control_timeout_finish"].contains(reason),
+               "capture_control_timeout_finish","append_earlier_tail"].contains(reason),
               !quitting,!meetingDeletionBusy,!sessionLocalOnly,!resumeBusy,child==nil,
               currentCacheID==cacheID,activeSession==session,
               automaticTailRecoveryAttempted.insert(cacheID).inserted else{return}
@@ -1125,7 +1125,12 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
             }
             for parent in changedTranscriptParents {markTranscriptParentDirty(parent)}
             if !previewRenderOnly {reloadLibrary()}
-            if shouldRefineAfterStopped(session:activeSession,reason:reason,transcriptionComplete:cachedTranscriptionComplete,localOnly:sessionLocalOnly && !recoverySucceeded,recoverySucceeded:recoverySucceeded) {
+            // Continuing skips whatever an interruption left untranscribed. Catch it up
+            // now the helper is done; speaker refinement then follows the complete text.
+            let earlierTailOwed = !wasRecoveryRun && !sessionLocalOnly && !suppressAutomaticRefinementAfterStop && appendTailOwedCacheID != nil && appendTailOwedCacheID==currentCacheID && ["user_stop","user_finish","input_device_changed","cloud_duration_limit"].contains(reason)
+            appendTailOwedCacheID=nil
+            if earlierTailOwed,let cacheID=currentCacheID,let session=activeSession {pendingAutomaticTailRecovery=("append_earlier_tail",cacheID,session)}
+            else if shouldRefineAfterStopped(session:activeSession,reason:reason,transcriptionComplete:cachedTranscriptionComplete,localOnly:sessionLocalOnly && !recoverySucceeded,recoverySucceeded:recoverySucceeded) {
                 scheduleSpeakerRefinement(trigger:recoverySucceeded ? "manual_recovery":"stopped")
             }
         } else if type=="error" {
@@ -2223,6 +2228,25 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
         precondition(automatic.pendingAutomaticTailRecovery==nil,"a failed recovery is not recursively restarted")
         automatic.startAutomaticTailRecovery(reason:"capture_control_timeout_pause",cacheID:automaticItem.id,session:automaticSession)
         precondition(automaticStarted==[automaticItem.id],"automatic saved-tail recovery is once per meeting")
+        let owedItem=make();let owedMetadata=try! owedItem.metadata();let owedSession=owedMetadata["session"] as! String
+        var owedAuthorized=owedMetadata;owedAuthorized["capture_mode"]="cloud";owedAuthorized["upload_authorized"]=true;owedAuthorized["cloud_session_authorized"]=true
+        try! JSONSerialization.data(withJSONObject:owedAuthorized).write(to:owedItem.directory.appendingPathComponent("meeting.json"),options:.atomic)
+        let owed=delegate();owed.currentCacheID=owedItem.id;owed.activeSession=owedSession;owed.phase.phase = .recording;owed.recoveryBudgetOverride=10
+        var owedStarted:[String]=[];owed.recoveryRunnerOverride={owedStarted.append($0.id)}
+        owed.appendTailOwedCacheID=owedItem.id;owed.workerExitReceived=true;owed.workerEOFReceived=true
+        owed.receive(["type":"stopped","session":owedSession,"reason":"user_stop","transcription_complete":true,"audio_retained":true])
+        precondition(owed.pendingAutomaticTailRecovery?.reason=="append_earlier_tail" && owed.appendTailOwedCacheID==nil,"stopping a continued meeting catches up its earlier tail")
+        owed.completeWorkerIfDrained();waitIO(owed)
+        precondition(owedStarted==[owedItem.id] && owed.resumeBusy && owed.child==nil)
+        owed.receive(["type":"stopped","session":owedSession,"reason":"user_stop","transcription_complete":true,"audio_retained":true])
+        precondition(owed.pendingAutomaticTailRecovery==nil,"the catch-up run does not restart itself")
+        let plain=delegate();plain.currentCacheID=owedItem.id;plain.activeSession=owedSession;plain.phase.phase = .recording
+        plain.receive(["type":"stopped","session":owedSession,"reason":"user_stop","transcription_complete":true,"audio_retained":true])
+        precondition(plain.pendingAutomaticTailRecovery==nil,"an ordinary stop starts no catch-up")
+        let cancelledOwed=delegate();cancelledOwed.currentCacheID=owedItem.id;cancelledOwed.activeSession=owedSession;cancelledOwed.phase.phase = .recording
+        cancelledOwed.appendTailOwedCacheID=owedItem.id;cancelledOwed.suppressAutomaticRefinementAfterStop=true
+        cancelledOwed.receive(["type":"stopped","session":owedSession,"reason":"user_stop","transcription_complete":true,"audio_retained":true])
+        precondition(cancelledOwed.pendingAutomaticTailRecovery==nil,"a meeting being deleted is not caught up")
         let localOnly=delegate();localOnly.currentCacheID=automaticItem.id;localOnly.activeSession=automaticSession;localOnly.sessionLocalOnly=true
         localOnly.startAutomaticTailRecovery(reason:"capture_control_timeout_pause",cacheID:automaticItem.id,session:automaticSession)
         precondition(localOnly.automaticTailRecoveryAttempted.isEmpty,"local-only saved audio is never uploaded automatically")

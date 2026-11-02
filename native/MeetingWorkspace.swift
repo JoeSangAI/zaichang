@@ -573,6 +573,8 @@ extension Delegate {
             diagnostic.stringValue="这场会议暂时无法继续录音；已有内容保留";updateUI();return
         }
         let local=metadata["capture_mode"] as? String=="local_only"
+        // A failed earlier catch-up must not block this continue's own once.
+        appendTailOwedCacheID=(!local && item.pendingBytes>0) ? item.id:nil;automaticTailRecoveryAttempted.remove(item.id)
         // Same helper selection as a normal start: without candidate_mode the
         // worker falls back to a development helper path that is not shipped.
         var request:[String:Any]=["bundle":bundle,"mic_enabled":true,"source_scope_confirmed":true,

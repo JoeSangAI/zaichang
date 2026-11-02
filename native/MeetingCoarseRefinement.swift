@@ -90,8 +90,10 @@ enum MeetingCoarseRefinement {
     private static func validCacheID(_ value:String)->Bool {
         UUID(uuidString:value) != nil && value.count<=64
     }
+    // The pool matters: library reads call this per row, and the writer's temporaries
+    // otherwise pile up until the whole read ends, over 400 MB on a long history.
     private static func jsonData(_ object:Any)throws->Data {
-        try JSONSerialization.data(withJSONObject:object,options:[.sortedKeys,.fragmentsAllowed])
+        try autoreleasepool {try JSONSerialization.data(withJSONObject:object,options:[.sortedKeys,.fragmentsAllowed])}
     }
     static func transcriptSnapshotSHA256(events:[[String:Any]])throws->String {
         digest(try jsonData(events))
@@ -388,11 +390,8 @@ enum MeetingCoarseRefinement {
         guard let value=try JSONSerialization.jsonObject(with:data) as? [String:Any],
               [1,2].contains(value["schema"] as? Int ?? 0),value["session"] as? String==session else{throw MeetingCoarseRefinementError.invalidScope}
         func sortedRows(_ raw:Any?)->[[String:Any]] {
-            (raw as? [[String:Any]] ?? []).sorted {
-                let lhs=(try? String(data:jsonData($0),encoding:.utf8)) ?? ""
-                let rhs=(try? String(data:jsonData($1),encoding:.utf8)) ?? ""
-                return lhs<rhs
-            }
+            (raw as? [[String:Any]] ?? []).map{(key:(try? String(data:jsonData($0),encoding:.utf8)) ?? "",row:$0)}
+                .sorted{$0.key<$1.key}.map{$0.row}
         }
         let stable:[String:Any]=["schema":value["schema"] ?? 0,"session":session,
                                 "sentences":value["sentences"] ?? [:],"speakers":sortedRows(value["speakers"]),
