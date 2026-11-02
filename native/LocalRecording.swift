@@ -67,8 +67,7 @@ func runLocalRecording(config:Config)async throws {
         try JSONSerialization.data(withJSONObject:metadata,options:[.sortedKeys]).write(to:file,options:.atomic)
     }
     capturePaused=0;captureControlRevision=0
-    signal(SIGINT,interruptHandler);signal(SIGTERM,interruptHandler)
-    signal(SIGUSR1,recordingPauseHandler);signal(SIGUSR2,recordingPauseHandler)
+    installCaptureControlSignals([(SIGINT,interruptHandler),(SIGTERM,interruptHandler),(SIGUSR1,recordingPauseHandler),(SIGUSR2,recordingPauseHandler)])
     var reason="user_stop";var elapsed=0.0;var paused=false
     var controlAcknowledgement=CaptureControlAcknowledgement()
     var firstPCMDeadline=ProcessInfo.processInfo.systemUptime+5

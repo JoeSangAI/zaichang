@@ -64,7 +64,7 @@ final class TranscriptTurnHeader:NSObject {
                 header.original=storage.attributedSubstring(from:range)
                 let style=NSMutableParagraphStyle();style.maximumLineHeight=0.01;style.minimumLineHeight=0.01
                 style.paragraphSpacing=0;style.paragraphSpacingBefore=0
-                storage.setAttributes([.zaichangTurnHeader:header,.font:NSFont.systemFont(ofSize:0.01),.foregroundColor:NSColor.clear,.paragraphStyle:style],range:range)
+                storage.setAttributes([.zaichangTurnHeader:header,.font:MeetingVisualStyle.textFont(0.01),.foregroundColor:NSColor.clear,.paragraphStyle:style],range:range)
             } else if let original=header.original,original.length==range.length,original.string==storage.attributedSubstring(from:range).string {
                 storage.setAttributes([:],range:range)
                 original.enumerateAttributes(in:NSRange(location:0,length:original.length),options:[]) {attributes,run,_ in

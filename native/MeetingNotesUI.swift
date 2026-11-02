@@ -234,7 +234,7 @@ final class MeetingNotesController: NSObject, NSTextViewDelegate {
     private var completedSave = 0
     private var baseAttributes: [NSAttributedString.Key: Any] {
         let paragraph = NSMutableParagraphStyle(); paragraph.paragraphSpacing = 10
-        return [.font: NSFont.systemFont(ofSize: 14), .foregroundColor: MeetingVisualStyle.ink, .paragraphStyle: paragraph]
+        return [.font: MeetingVisualStyle.textFont(14), .foregroundColor: MeetingVisualStyle.ink, .paragraphStyle: paragraph]
     }
     init(owner: Delegate) {
         self.owner = owner; super.init()
@@ -248,7 +248,7 @@ final class MeetingNotesController: NSObject, NSTextViewDelegate {
         scroller.hasVerticalScroller = true; scroller.autohidesScrollers = true; scroller.drawsBackground = false
         scroller.borderType = .noBorder
         editor.isRichText = true; editor.importsGraphics = true; editor.allowsUndo = true
-        editor.font = .systemFont(ofSize: 14); editor.textColor = MeetingVisualStyle.ink; editor.backgroundColor = MeetingVisualStyle.surface
+        editor.font = MeetingVisualStyle.textFont(14); editor.textColor = MeetingVisualStyle.ink; editor.backgroundColor = MeetingVisualStyle.surface
         editor.textContainerInset = NSSize(width: 6, height: 12)
         editor.isVerticallyResizable = true; editor.isHorizontallyResizable = false; editor.autoresizingMask = [.width]
         editor.minSize = .zero; editor.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)

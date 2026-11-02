@@ -1380,7 +1380,7 @@ func resumeCachedMeeting(config:Config,id:String,base:URL=meetingCacheRoot(),fac
     let origin=(metadata["capture_origin_uptime"] as? Double).flatMap{$0.isFinite ? $0:nil} ?? stores.values.compactMap{$0.firstOrigin()}.min() ?? ProcessInfo.processInfo.systemUptime
     let uploadBudget:SessionUploadBudget?=config.unlimitedSession==true ? nil:SessionUploadBudget(maxSeconds:config.remainingUploadSeconds ?? config.maxSeconds*Double(meeting.tracks.count))
     let pendingTracks=meeting.tracks.filter{stores[$0]!.committed("asr")<stores[$0]!.bytes()}
-    signal(SIGINT,interruptHandler);signal(SIGTERM,interruptHandler);interrupted=1
+    installCaptureControlSignals([(SIGINT,interruptHandler),(SIGTERM,interruptHandler)]);interrupted=1
     let launcher=getppid()
     var resumedEvent:[String:Any]=["type":"started","audio_frames_received":false,"session":session,"cache_id":id,"capture":false,"resume":true,"model":config.model,"audio_storage":"local_segmented_recoverable"];resumedEvent["absolute_clock"]=metadata["absolute_clock"];emit(resumedEvent)
     emit(["type":"processing_started","session":session,"recording_elapsed_seconds":0,"capture":false,"deadline_seconds":180])
@@ -1420,6 +1420,23 @@ var captureTailDrainAllowed: sig_atomic_t = 0
 @inline(__always) func captureAdmissionOpen() -> Bool { capturePaused == 0 && captureFinishing == 0 && interrupted == 0 && captureHardwareReady != 0 }
 @discardableResult func writeCapturedPCMIfAdmitted(_ pcm:Data,at timestamp:Double,to mailbox:Mailbox)->Bool {
     guard captureAdmissionOpen() else{return false};mailbox.put(pcm,at:timestamp);return true
+}
+// Control signals reach capture through kqueue on their own queue, never through
+// a signal handler. A handler runs only on the one thread the kernel picks; saved
+// recordings show the microphone and capture loop running for the full safety
+// deadline after a delivered pause signal, and then being killed for it.
+let captureControlQueue=DispatchQueue(label:"meeting.capture.control",qos:.userInteractive)
+private var captureControlSources:[DispatchSourceSignal]=[]
+func installCaptureControlSignals(_ controls:[(Int32,(Int32)->Void)]) {
+    captureControlSources.forEach{$0.cancel()}
+    captureControlSources=controls.map { number,handler in
+        signal(number,SIG_IGN)
+        let source=DispatchSource.makeSignalSource(signal:number,queue:captureControlQueue)
+        // Repeats matter: a second stop cancels the tail drain.
+        source.setEventHandler{for _ in 0..<max(1,source.data) {handler(number)}}
+        source.resume()
+        return source
+    }
 }
 func recordingPauseHandler(_ value:Int32) {
     // A stale control signal can arrive after finish/cancel was already
@@ -1701,9 +1718,7 @@ struct CaptureControlAcknowledgement {
             let lanes=["mic":Lane(track:physical["mic"] ?? "mic",config:config,prepared:prepared["mic"],preparedEpoch:preparedEpochs["mic"]),"remote":Lane(track:physical["remote"] ?? "remote",config:config,prepared:prepared["remote"],preparedEpoch:preparedEpochs["remote"])]
             for track in active {await lanes[track]!.attachJournal(journals[track])}
             capturePaused=0;captureUploadPaused=0;captureHardwareReady=0;captureControlRevision=0;capturePauseAcknowledgedRevision = -1;captureFinishing=0;captureTailDrainAllowed=0
-            signal(SIGINT,interruptHandler);signal(SIGTERM,interruptHandler)
-            signal(SIGUSR1,recordingPauseHandler);signal(SIGUSR2,recordingPauseHandler)
-            signal(SIGWINCH,recordingFinishHandler)
+            installCaptureControlSignals([(SIGINT,interruptHandler),(SIGTERM,interruptHandler),(SIGUSR1,recordingPauseHandler),(SIGUSR2,recordingPauseHandler),(SIGWINCH,recordingFinishHandler)])
             func stopCapture(_ reason:String){
                 let elapsed=captureClock.elapsed(ProcessInfo.processInfo.systemUptime)
                 guard state.end(reason:reason,elapsed:elapsed) else{return}

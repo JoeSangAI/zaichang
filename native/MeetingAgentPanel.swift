@@ -251,7 +251,7 @@ final class MeetingAgentPanel: NSView {
         transcriptScroll.translatesAutoresizingMaskIntoConstraints = false
         assistantPage.addSubview(transcriptScroll)
 
-        composer.font = .systemFont(ofSize: 14); composer.textColor = MeetingVisualStyle.ink
+        composer.font = MeetingVisualStyle.textFont(14); composer.textColor = MeetingVisualStyle.ink
         composer.drawsBackground = false; composer.isRichText = false
         composer.isVerticallyResizable = true; composer.isHorizontallyResizable = false
         composer.minSize = NSSize(width: 0, height: 44)
@@ -378,7 +378,7 @@ final class MeetingAgentPanel: NSView {
         overviewTextView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         overviewTextView.autoresizingMask = [.width]
         overviewTextView.textColor = MeetingVisualStyle.ink
-        overviewTextView.font = .systemFont(ofSize: 14)
+        overviewTextView.font = MeetingVisualStyle.textFont(14)
         overviewTextView.textContainerInset = NSSize(width: 18, height: 18)
         overviewTextView.textContainer?.widthTracksTextView = true
         overviewTextView.textContainer?.containerSize = NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude)
@@ -450,7 +450,7 @@ final class MeetingAgentPanel: NSView {
         overviewEvidence.removeAll()
         func paragraph(_ text: String, size: CGFloat = 14, weight: NSFont.Weight = .regular, color: NSColor = MeetingVisualStyle.ink, before: CGFloat = 0, after: CGFloat = 10) {
             let style = NSMutableParagraphStyle(); style.lineSpacing = 4; style.paragraphSpacingBefore = before; style.paragraphSpacing = after
-            rich.append(NSAttributedString(string: text + "\n", attributes: [.font: NSFont.systemFont(ofSize: size, weight: weight), .foregroundColor: color, .paragraphStyle: style]))
+            rich.append(NSAttributedString(string: text + "\n", attributes: [.font: MeetingVisualStyle.textFont(size, weight: weight), .foregroundColor: color, .paragraphStyle: style]))
         }
         // The source quote is a trailing glyph on the same line, not a line of its own.
         func evidenceLink(_ item: [String: Any]) -> NSAttributedString? {
@@ -458,13 +458,13 @@ final class MeetingAgentPanel: NSView {
             let quotes = refs.compactMap { $0["quote"] as? String }.filter { !$0.isEmpty }
             guard !quotes.isEmpty else { return nil }
             let id = String(overviewEvidence.count); overviewEvidence[id] = quotes.map { "“\($0)”" }.joined(separator: "\n\n")
-            return NSAttributedString(string: "\u{00A0}↗", attributes: [.font: NSFont.systemFont(ofSize: 12), .foregroundColor: MeetingVisualStyle.faint,
+            return NSAttributedString(string: "\u{00A0}↗", attributes: [.font: MeetingVisualStyle.textFont(12), .foregroundColor: MeetingVisualStyle.faint,
                                                                  .link: URL(string: "zaichang-evidence://quote/\(id)")!, .toolTip: "查看原话"])
         }
         if let topic = data["current_topic"] as? [String: Any], let text = topic["text"] as? String, !text.isEmpty {
             paragraph("当前议题", size: 11, color: MeetingVisualStyle.muted, after: 4)
             let style = NSMutableParagraphStyle(); style.lineSpacing = 3; style.paragraphSpacing = 6
-            rich.append(NSAttributedString(string: text, attributes: [.font: NSFont.systemFont(ofSize: 19, weight: .semibold), .foregroundColor: MeetingVisualStyle.ink, .paragraphStyle: style]))
+            rich.append(NSAttributedString(string: text, attributes: [.font: MeetingVisualStyle.textFont(19, weight: .semibold), .foregroundColor: MeetingVisualStyle.ink, .paragraphStyle: style]))
             if let link = evidenceLink(topic) { rich.append(link) }
             rich.append(NSAttributedString(string: "\n", attributes: [.paragraphStyle: style]))
         }
@@ -476,9 +476,9 @@ final class MeetingAgentPanel: NSView {
             let style = NSMutableParagraphStyle(); style.lineSpacing = 4; style.paragraphSpacing = 8
             style.firstLineHeadIndent = 0; style.headIndent = 18
             style.tabStops = [NSTextTab(textAlignment: .left, location: 18)]; style.defaultTabInterval = 18
-            let body: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 14), .foregroundColor: MeetingVisualStyle.ink, .paragraphStyle: style]
-            var strong = body; strong[.font] = NSFont.systemFont(ofSize: 14, weight: .semibold)
-            var quiet = body; quiet[.font] = NSFont.systemFont(ofSize: 12); quiet[.foregroundColor] = MeetingVisualStyle.muted
+            let body: [NSAttributedString.Key: Any] = [.font: MeetingVisualStyle.textFont(14), .foregroundColor: MeetingVisualStyle.ink, .paragraphStyle: style]
+            var strong = body; strong[.font] = MeetingVisualStyle.textFont(14, weight: .semibold)
+            var quiet = body; quiet[.font] = MeetingVisualStyle.textFont(12); quiet[.foregroundColor] = MeetingVisualStyle.muted
             for item in items {
                 var text = (item["text"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
                 var lead = ""
@@ -488,7 +488,7 @@ final class MeetingAgentPanel: NSView {
                 } else if let colon = text.firstIndex(where: { $0 == "：" || $0 == ":" }), (2...12).contains(text.distance(from: text.startIndex, to: colon)) {
                     lead = String(text[..<colon]); text = String(text[text.index(after: colon)...]).trimmingCharacters(in: .whitespaces)
                 }
-                var bulletAttributes = quiet; bulletAttributes[.font] = NSFont.systemFont(ofSize: 13)
+                var bulletAttributes = quiet; bulletAttributes[.font] = MeetingVisualStyle.textFont(13)
                 rich.append(NSAttributedString(string: bullet + "\t", attributes: bulletAttributes))
                 if !lead.isEmpty { rich.append(NSAttributedString(string: lead + "：", attributes: strong)) }
                 rich.append(NSAttributedString(string: text, attributes: body))
@@ -1069,7 +1069,7 @@ private final class MessageCell: NSView {
         super.init(frame: frameRect)
         bubble.translatesAutoresizingMaskIntoConstraints = false; bubble.wantsLayer = true; bubble.layer?.cornerRadius = 14
         addSubview(bubble)
-        body.font = .systemFont(ofSize: 14); body.textColor = MeetingVisualStyle.ink
+        body.font = MeetingVisualStyle.textFont(14); body.textColor = MeetingVisualStyle.ink
         detail.font = .systemFont(ofSize: 10); detail.textColor = MeetingVisualStyle.faint
         files.orientation = .vertical; files.alignment = .leading; files.spacing = 16
         let stack = NSStackView(views: [body, files, detail]); stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 8

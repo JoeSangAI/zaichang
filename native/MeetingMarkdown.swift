@@ -4,7 +4,7 @@ import AppKit
 /// Foundation handles inline syntax; AppKit text blocks keep tables selectable and
 /// responsive inside the same native transcript as paragraphs and code.
 enum MeetingMarkdown {
-    static func inline(_ source: String, font: NSFont = .systemFont(ofSize: 14)) -> NSAttributedString {
+    static func inline(_ source: String, font: NSFont = MeetingVisualStyle.textFont(14)) -> NSAttributedString {
         let prepared = cjkStrongBoundaries(source)
         guard let parsed = try? AttributedString(markdown: prepared.text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)) else {
             return NSAttributedString(string: source, attributes: [.font: font, .foregroundColor: MeetingVisualStyle.ink])
@@ -115,7 +115,7 @@ enum MeetingMarkdown {
             return NSTextTableBlock(table: table, startingRow: 0, rowSpan: 1, startingColumn: 0, columnSpan: 1)
         }
         if plain {
-            return NSAttributedString(string: source, attributes: [.font: NSFont.systemFont(ofSize: 14), .foregroundColor: MeetingVisualStyle.ink, .paragraphStyle: style()])
+            return NSAttributedString(string: source, attributes: [.font: MeetingVisualStyle.textFont(14), .foregroundColor: MeetingVisualStyle.ink, .paragraphStyle: style()])
         }
         let lines = source.replacingOccurrences(of: "\r\n", with: "\n").components(separatedBy: "\n")
         var index = 0
@@ -154,7 +154,7 @@ enum MeetingMarkdown {
                         block.backgroundColor = r == 0 ? MeetingVisualStyle.quietFill : NSColor.textBackgroundColor
                         block.verticalAlignment = .topAlignment
                         let p = style(spacing: 0); p.textBlocks = [block]; p.alignment = alignment[c]
-                        append(inline(cell, font: .systemFont(ofSize: 13, weight: r == 0 ? .semibold : .regular)), style: p)
+                        append(inline(cell, font: MeetingVisualStyle.textFont(13, weight: r == 0 ? .semibold : .regular)), style: p)
                     }
                 }
                 // A normal paragraph ends the table, including while streaming.
@@ -163,17 +163,17 @@ enum MeetingMarkdown {
             }
             if let heading = match("^(#{1,6})[ \\t]+(.+?)(?:[ \\t]+#+)?$", trimmed) {
                 let level = heading[0].count, p = style(spacing: 8); p.paragraphSpacingBefore = 8
-                append(inline(heading[1], font: .systemFont(ofSize: level == 1 ? 21 : level == 2 ? 18 : 15, weight: .semibold)), style: p)
+                append(inline(heading[1], font: MeetingVisualStyle.textFont(level == 1 ? 21 : level == 2 ? 18 : 15, weight: .semibold)), style: p)
                 index += 1; continue
             }
             if index + 1 < lines.count, match("^ *(=+|-+) *$", lines[index + 1]) != nil {
                 let p = style(spacing: 8); p.paragraphSpacingBefore = 8
-                append(inline(trimmed, font: .systemFont(ofSize: lines[index + 1].contains("=") ? 21 : 18, weight: .semibold)), style: p)
+                append(inline(trimmed, font: MeetingVisualStyle.textFont(lines[index + 1].contains("=") ? 21 : 18, weight: .semibold)), style: p)
                 index += 2; continue
             }
             if match("^(?:[-*_][ \\t]*){3,}$", trimmed) != nil {
                 let p = style(); p.paragraphSpacingBefore = 4
-                append(NSAttributedString(string: "────────────────", attributes: [.font: NSFont.systemFont(ofSize: 12), .foregroundColor: MeetingVisualStyle.border]), style: p)
+                append(NSAttributedString(string: "────────────────", attributes: [.font: MeetingVisualStyle.textFont(12), .foregroundColor: MeetingVisualStyle.border]), style: p)
                 index += 1; continue
             }
             if let list = match("^([ \\t]*)([-+*]|[0-9]+[.)])[ \\t]+(.*)$", line) {

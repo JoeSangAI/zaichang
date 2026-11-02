@@ -76,7 +76,7 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
     let libraryJob=CacheReadJob();let libraryOpenJob=CacheReadJob();let librarySearchJob=CacheReadJob();let librarySummaryJob=CacheReadJob();var librarySummaryPending:CachedMeeting?;var librarySummaryGeneration=0;var librarySummaryLoaded:Set<String>=[];var libraryFilterWork:DispatchWorkItem?;var pendingLibraryOpen:CachedMeeting?;var libraryReloadPending=false;var librarySelectRecentPending=false
     var liveReturn:NSButton!;var timelineToggle:NSButton!;var historyLiveButton:NSButton!;var showsSpeakerRanges=false
     var speakerReviewButton:NSButton?;var voiceCandidateButton:NSButton?;var speakerReviewWindow:NSWindow?;var libraryParticipants:[String:[String]]=[:]
-    let autoTitle=MeetingAutoTitle();var titleProvider:MeetingTitleProvider?;var titleTextAllowed=false;var titleTask:Task<Void,Never>?;var titleRevision=0
+    let autoTitle=MeetingAutoTitle();var titleProvider:MeetingTitleProvider?;var titleTextAllowed=false;var titleTask:Task<Void,Never>?;var titleRevision=0;var titleProviderFactory:((String)->MeetingTitleProvider)?;var owedTitleTask:Task<Void,Never>?;var owedTitleLastPass=0.0;var owedTitlePassInterval=600.0
     var finalTitleTasks:[String:Task<Void,Never>]=[:]
     var isHistoryReader=false;weak var workspaceOwner:Delegate?;var historyReader:Delegate?;var historyReaderShell:NSWindow?
     var recordingLiveDot:RecordingLiveDot?;var recordingCapsuleWidth:NSLayoutConstraint?;var firstRunGuide:FirstRunGuide?;var recordingModeChip:RecordingModeChip?;var readingAlignedRows:[NSStackView]=[];var settingsLayoutFrames:[(NSView,NSRect)]=[];var notesTransportStack:NSStackView?;var meetingEyebrow:NSTextField?;var emptyFilesButton:NSButton?;var emptyTranscribeButton:NSButton?;var window:NSWindow!;var sheet:NSPanel!;var key:NSSecureTextField!;var keyLabel:NSTextField!;var setupMessage:NSTextField!;var savedLabel:NSTextField!;var save:NSButton!;var change:NSButton!
@@ -176,7 +176,8 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
         buildSettings();configureRecordingStartPreference();cacheReadJob.onStateChange={ [weak self] in self?.updateUI() };cacheExportJob.onStateChange={ [weak self] in self?.updateUI() };qaWriteJob.onStateChange={ [weak self] in self?.updateUI();DispatchQueue.main.async {self?.completeApplicationTerminationIfReady()} };installMenus();if !previewRenderOnly {window.center();if offlineQA {window.orderFront(nil)}else{window.makeKeyAndOrderFront(nil);NSApp.activate(ignoringOtherApps:true)}}
         if mock {fixtureBoard.clearContents();fixtureBoard.setString(fixtures[0],forType:.string)}
         if offlineQA {do {try configureOfflineQA()}catch{phase.phase = .failed;phase.error="离线QA隔离配置错误";updateUI();return}}
-        // No recording or secret retrieval on launch.
+        // No recording on launch. The secret is read only if a saved meeting
+        // still owes a title, and then without a prompt.
         layoutWorkspace();updateUI();configureVoiceprintRecommendations();configureMeetingContext();reconcileDeletedMeetingProjections()
         showMissingCredentialHintIfNeeded()
         if previewRenderOnly {return}
@@ -389,7 +390,6 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
         credentialReadJob.run(timeout:15,work:{if let fixture=fixture {return try fixture()};return try Credential.load()}){[weak self] result in guard let self=self else{return};switch result {case .success(let secret):guard let secret=secret,!secret.isEmpty else{self.phase.phase = .failed;self.phase.error="去设置里填写百炼密钥";self.updateUI();return};self.namelessCloudStart(secret);case .failure:self.phase.phase = .failed;self.phase.error="连接未完成，请处理系统访问提示后重试";self.updateUI()}}
     }
     func namelessCloudStart(_ key:String){
-        titleProvider=DashScopeMeetingTitleProvider(apiKey:key);titleTextAllowed=true
         naming.reset();sourceActivity=SourceActivity();segments=[:];sequence=[];expandedParents=[:];transcriptCapacity.reset();transcriptLimitHit=false;currentCacheID=nil;activeSession=nil;absoluteTime=nil;resetVoiceprintRecommendations(session:nil);recoveredArchiveText=nil;showWholeTranscript=true;output.string="";empty.isHidden=false;sessionSource=sourceName;source.stringValue=sourceName+" · 实时转写";confirmedScope=true;useMic=true;phase.phase = .connecting;updateUI()
         let request:[String:Any]=["key":key,"bundle":sourceBundle,"mic_enabled":true,"source_scope_confirmed":true,"user_launch_confirmed":true,"candidate_mode":trialCandidate,"cloud_session_confirmed":true]
         startWorker(key,overrideRequest:request)
@@ -728,7 +728,6 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
                 switch result {
                 case .success(let value):
                     guard let secret=value,!secret.isEmpty else{self.resumeBusy=false;self.processingAudio=false;self.phase.phase = .failed;self.phase.error="已存密钥不可用；原音保留";self.updateUI();return}
-                    self.titleProvider=DashScopeMeetingTitleProvider(apiKey:secret);self.titleTextAllowed=true
                     var request=self.startRequest(secret);request["resume_cache_id"]=item.id
                     if independent {request["cloud_session_confirmed"]=true};if localPending {request["resume_upload_confirmed"]=true}
                     self.startWorker(secret,overrideRequest:request)
@@ -758,6 +757,7 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
         // already cancelled by the user must not clear that cancellation.
         suppressAutomaticRefinementAfterStop=false
         (workspaceOwner ?? self).stopSpeakerAudioPreview()
+        adoptTitleProvider(key:overrideRequest?["key"] as? String ?? secret)
         if Credential.offline && previewRenderOnly,let fixture=startupWorkerFixture,let request=overrideRequest {fixture(request);return}
         guard !Credential.offline else{phase.phase = .failed;phase.error="离线入口禁止启动生产工作进程";updateUI();return}
         let proc=Process();let stdin=Pipe();let stdout=Pipe();proc.executableURL=URL(fileURLWithPath:"/usr/local/bin/python3");proc.arguments=["-u",root+"/gui_worker.py"]
@@ -2079,7 +2079,7 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
         newRecordingPending=false;newMeetingRequested=false
         pendingAutomaticTailRecovery=nil;credentialReadJob.cancel();budgetReadJob.cancel()
         timer?.invalidate();audioLevelTimer?.invalidate()
-        invalidateAutoTitle();for task in finalTitleTasks.values {task.cancel()};finalTitleTasks.removeAll()
+        invalidateAutoTitle();for task in finalTitleTasks.values {task.cancel()};finalTitleTasks.removeAll();owedTitleTask?.cancel();owedTitleTask=nil
         titleProvider=nil;titleTextAllowed=false
         var jobs=Array(savedCoarseJobs.values)+[speakerRefinementJob,savedVoiceRecognitionJob]
         if let historyReader {jobs.append(historyReader.speakerRefinementJob);jobs.append(historyReader.savedVoiceRecognitionJob)}
@@ -2429,6 +2429,9 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
         }
         if CommandLine.arguments.count==3,CommandLine.arguments[1]=="--speaker-consistency-self-test",Credential.offline {
             do {let result=try await speakerConsistencyChecks(directory:URL(fileURLWithPath:CommandLine.arguments[2]));print(String(data:try JSONSerialization.data(withJSONObject:result,options:.sortedKeys),encoding:.utf8)!)}catch{print("speaker-consistency-failed: \(error)");exit(1)};return
+        }
+        if CommandLine.arguments.count==5,CommandLine.arguments[1]=="--transcript-replay-profile",Credential.offline {
+            do {let result=try await transcriptReplayProfile(root:URL(fileURLWithPath:CommandLine.arguments[2]),cacheID:CommandLine.arguments[3],speed:Double(CommandLine.arguments[4]) ?? 20);print(String(data:try JSONSerialization.data(withJSONObject:result,options:.sortedKeys),encoding:.utf8)!)}catch{print("transcript-replay-failed: \(error)");exit(1)};return
         }
         if CommandLine.arguments.count==3,CommandLine.arguments[1]=="--title-sequence-self-test",Credential.offline {
             do {let result=try await meetingTitleSequenceChecks(directory:URL(fileURLWithPath:CommandLine.arguments[2]));print(String(data:try JSONSerialization.data(withJSONObject:result,options:.sortedKeys),encoding:.utf8)!)}catch{print("title-sequence-failed: \(error)");exit(1)};return

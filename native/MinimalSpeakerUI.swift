@@ -152,7 +152,7 @@ private final class MinimalSpeakerReviewController:NSObject,NSWindowDelegate,NST
         selectionLabel.setContentCompressionResistancePriority(.defaultLow,for:.horizontal)
         let scroll=NSScrollView();scroll.hasVerticalScroller=true;scroll.hasHorizontalScroller=false;scroll.autohidesScrollers=true;scroll.drawsBackground=true;scroll.backgroundColor = MeetingVisualStyle.surface;scroll.borderType = .noBorder
         transcriptScroll=scroll
-        textView.isEditable=false;textView.isSelectable=true;textView.allowsUndo=false;textView.drawsBackground=true;textView.backgroundColor = MeetingVisualStyle.surface;textView.font = .systemFont(ofSize:16)
+        textView.isEditable=false;textView.isSelectable=true;textView.allowsUndo=false;textView.drawsBackground=true;textView.backgroundColor = MeetingVisualStyle.surface;textView.font = MeetingVisualStyle.textFont(16)
         textView.setAccessibilityLabel("发言人原文")
         textView.selectedTextAttributes=[.backgroundColor:MeetingVisualStyle.selection,.foregroundColor:MeetingVisualStyle.ink]
         textView.textContainerInset=NSSize(width:0,height:0);textView.isRichText=false;textView.delegate=self
@@ -466,7 +466,7 @@ private final class MinimalSpeakerReviewController:NSObject,NSWindowDelegate,NST
 
     private func render(_ value:String) {
         let paragraph=NSMutableParagraphStyle();paragraph.lineSpacing=7
-        textView.textStorage?.setAttributedString(NSAttributedString(string:value,attributes:[.font:NSFont.systemFont(ofSize:16),.foregroundColor:MeetingVisualStyle.muted,.paragraphStyle:paragraph]))
+        textView.textStorage?.setAttributedString(NSAttributedString(string:value,attributes:[.font:MeetingVisualStyle.textFont(16),.foregroundColor:MeetingVisualStyle.muted,.paragraphStyle:paragraph]))
         mappedParts=[];partItems=[:]
     }
     private func renderEntries(_ entries:[SpeakerReviewEntry]) {
@@ -511,16 +511,16 @@ private final class MinimalSpeakerReviewController:NSObject,NSWindowDelegate,NST
             let reason=contextual ? " · 原句 · 下划线部分待确认":(entry.personKey==nil ? " · "+entryLabel(entry):"")
             let heading=(start+"  ·  "+source+reason+"\n")
             let headingStyle=NSMutableParagraphStyle();headingStyle.lineSpacing=4;headingStyle.paragraphSpacing=4
-            text.append(NSAttributedString(string:heading,attributes:[.font:NSFont.systemFont(ofSize:12),.foregroundColor:MeetingVisualStyle.muted,.paragraphStyle:headingStyle]))
+            text.append(NSAttributedString(string:heading,attributes:[.font:MeetingVisualStyle.textFont(12),.foregroundColor:MeetingVisualStyle.muted,.paragraphStyle:headingStyle]))
             let bodyStyle=NSMutableParagraphStyle();bodyStyle.lineSpacing=7;bodyStyle.paragraphSpacing=24
             for (id,item) in parts {
                 let body=item["text"] as? String ?? ""
                 let manualName=owner?.naming.name(segment:id)
                 if unresolved.contains(id),let manualName {
-                    text.append(NSAttributedString(string:"〔"+manualName+"〕",attributes:[.font:NSFont.systemFont(ofSize:12),.foregroundColor:MeetingVisualStyle.muted]))
+                    text.append(NSAttributedString(string:"〔"+manualName+"〕",attributes:[.font:MeetingVisualStyle.textFont(12),.foregroundColor:MeetingVisualStyle.muted]))
                 }
                 let bodyStart=text.length
-                var bodyAttributes:[NSAttributedString.Key:Any]=[.font:NSFont.systemFont(ofSize:16),.foregroundColor:MeetingVisualStyle.ink,.paragraphStyle:bodyStyle]
+                var bodyAttributes:[NSAttributedString.Key:Any]=[.font:MeetingVisualStyle.textFont(16),.foregroundColor:MeetingVisualStyle.ink,.paragraphStyle:bodyStyle]
                 if contextual && !unresolved.contains(id) {bodyAttributes[.foregroundColor]=MeetingVisualStyle.muted}
                 if unresolved.contains(id),manualName==nil {
                     bodyAttributes[.underlineStyle]=NSUnderlineStyle.single.rawValue

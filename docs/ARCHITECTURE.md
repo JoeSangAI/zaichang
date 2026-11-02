@@ -31,6 +31,8 @@ Swift 使用 macOS 音频接口采集麦克风与电脑声音，并按音轨持�
 
 人物处理包含本地说话人分段、识别建议与人工确认；原文与说话人整理另有云端 Qwen 路径，处理所需音频片段、转写、人物名单与术语提示。人工修订参与后续展示与导出。原始音频、转写事件与修订各有自己的持久化记录。
 
+暂停、继续、结束和停止通过信号送达采集进程，由 kqueue 在独立队列上接收，不使用信号处理函数，因此不依赖进程当时哪个线程能响应。采集确认走独立通道；超过安全期限没有确认，上层才强制结束并从已保存的音频恢复。
+
 主要实现：`native/SourceCaptureSession.swift`、`native/MeetingCapture.swift`、`native/RecordingJournal.swift`、`native/IncrementalTranscript.swift`、`native/SpeakerPipeline.swift`。
 
 ## 会议数据与派生视图
@@ -72,6 +74,8 @@ App Server 使用本机 Codex 可用的模型、Skills 与 MCP 配置。Codex �
 
 英文转中文、自动标题和导出纪要直接调用百炼 `qwen-flash`，使用应用配置的用户凭据。原文与说话人整理由 `coarse_audio.py` 调用 Qwen 多模态模型。这些处理不经过 Codex App Server。
 
+标题属于已保存的会议，不属于录音进程：每条开始路径（新录音、恢复、继续）都接上标题服务；只有看过整场内容的一次生成才算定稿。崩溃、退出或请求失败留下的空标题和临时标题，在下次读取会议库时按需补上，每份转写内容最多三次模型回答，断网不计次，已定稿和手动命名的标题不会变。这一步才读取凭据，不弹授权，只处理原本已授权云端转写的会议。
+
 翻译按最终转写片段处理，并以片段 ID 与原文散列关联结果。开启时可补译已有英文片段；关闭时停止继续请求。译文随本场会议持久化，原始转写保留。
 
 纪要生成时，界面读取最终转写、笔记文字及用户手动选择的 PDF/TXT/Markdown 参考资料，分别作为事实、重点提示与背景传入。输出固定六个字段，决定、待办与关键原话校验逐字原文依据，再保存为 Markdown；不追加笔记或参考资料原文。它与 Codex 概览是独立功能。
@@ -86,7 +90,7 @@ App Server 使用本机 Codex 可用的模型、Skills 与 MCP 配置。Codex �
 
 ## 验证入口
 
-Python 回归位于 `tests/`，原生检查位于 `native/checks/`。`scripts/offline_check.py` 运行隔离检查；本机 Codex 在线调用另有显式验收入口，不属于离线检查。
+Python 回归位于 `tests/`，原生检查位于 `native/checks/`。`scripts/offline_check.py` 运行隔离检查；QA 二进制的 `--transcript-replay-profile <.runtime 内的会议副本目录> <会议ID> <倍速>` 按真实节奏回放一场会议的转写，报告主线程停顿与内存，不采音、不联网；本机 Codex 在线调用另有显式验收入口，不属于离线检查。
 
 构建与安装步骤见[安装指南](INSTALL.md)，数据发送范围见[隐私与权限](PRIVACY.md)。
 

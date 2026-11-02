@@ -823,10 +823,7 @@ func runSourceCaptureSession(config: Config) async throws {
     }
     try persistMetadata()
     interrupted = 0;capturePaused = 0;captureUploadPaused=0;captureControlRevision = 0;capturePauseAcknowledgedRevision = -1;captureHardwareReady=0;captureFinishing=0;captureTailDrainAllowed=0
-    signal(SIGINT, interruptHandler)
-    signal(SIGTERM, interruptHandler)
-    signal(SIGUSR1, recordingPauseHandler);signal(SIGUSR2, recordingPauseHandler)
-    signal(SIGWINCH,recordingFinishHandler)
+    installCaptureControlSignals([(SIGINT,interruptHandler),(SIGTERM,interruptHandler),(SIGUSR1,recordingPauseHandler),(SIGUSR2,recordingPauseHandler),(SIGWINCH,recordingFinishHandler)])
     // Keep control acknowledgement off Swift's cooperative executor. Capture
     // teardown and synchronous SDK work can occupy cooperative threads; the
     // pause receipt must still run independently while capture is stopped.
@@ -1739,6 +1736,23 @@ func sourceCaptureSessionSyntheticChecks() -> [String] {
         interrupted = 0
         capturePaused = 0
         captureUploadPaused = 0
+        captureHardwareReady = 1
+        captureControlRevision = 0
+        // Control must arrive however the process's threads are occupied. With
+        // the signal masked here, a handler could not have run on this thread.
+        var controlMask=sigset_t(),priorMask=sigset_t();sigemptyset(&controlMask);sigaddset(&controlMask,SIGUSR1);sigaddset(&controlMask,SIGUSR2)
+        pthread_sigmask(SIG_BLOCK,&controlMask,&priorMask)
+        installCaptureControlSignals([(SIGUSR1,recordingPauseHandler),(SIGUSR2,recordingPauseHandler)])
+        func awaitControl(_ signalNumber:Int32,_ paused:sig_atomic_t)->Bool {
+            kill(getpid(),signalNumber)
+            let until=ProcessInfo.processInfo.systemUptime+2
+            while capturePaused != paused && ProcessInfo.processInfo.systemUptime<until {Thread.sleep(forTimeInterval:0.002)}
+            return capturePaused==paused
+        }
+        expect(awaitControl(SIGUSR1,1) && captureHardwareReady==0 && captureControlRevision==1,"pause_signal_arrives_through_kqueue")
+        expect(awaitControl(SIGUSR2,0) && captureControlRevision==2,"resume_signal_arrives_through_kqueue")
+        installCaptureControlSignals([]);signal(SIGUSR1,SIG_DFL);signal(SIGUSR2,SIG_DFL);pthread_sigmask(SIG_SETMASK,&priorMask,nil)
+        capturePaused = 0
         captureHardwareReady = 1
         captureControlRevision = 0
         var routeUptime = 80.0

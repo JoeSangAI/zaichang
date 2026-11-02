@@ -4,6 +4,54 @@ extension Delegate {
     func finalizeSessionTitle() {
         scheduleAutoTitle(finalized:true);titleProvider=nil;titleTextAllowed=false
     }
+    // Every start path, new or continued, goes through one place: whoever may
+    // transcribe this meeting may also title it. A stop clears it again.
+    func adoptTitleProvider(key:String?) {
+        titleProvider=(key?.isEmpty==false ? key:nil).flatMap{titleProviderMaker?($0)};titleTextAllowed=titleProvider != nil
+    }
+    // Offline builds never reach the real service unless a check injects one.
+    private var titleProviderMaker:((String)->MeetingTitleProvider)? {
+        if let titleProviderFactory {return titleProviderFactory}
+        return Credential.offline ? nil:{DashScopeMeetingTitleProvider(apiKey:$0)}
+    }
+    // Titles lost to a crash, a quit or a failed final request come back here.
+    // The secret is read only when something is owed, and never with a prompt.
+    func reconcileOwedTitles(_ items:[CachedMeeting]) {
+        guard !isHistoryReader,!quitting,!recordingBusy,owedTitleTask==nil else{return}
+        let now=Date().timeIntervalSince1970
+        guard now-owedTitleLastPass>=owedTitlePassInterval else{return}
+        let injected=titleProviderFactory != nil
+        guard let factory=titleProviderMaker,injected || authorized else{return}
+        let candidates=items.filter{finalTitleTasks[$0.id]==nil}
+        owedTitleLastPass=now
+        let generator=autoTitle
+        owedTitleTask=Task.detached { [weak self] in
+            let owed=Array(candidates.filter{$0.owesTitle}.prefix(5))
+            let secret:String?=owed.isEmpty ? nil:injected ? "synthetic":(try? Credential.load(allowInteraction:false))
+            guard let key=secret,!key.isEmpty else{
+                await MainActor.run {self?.owedTitleTask=nil}
+                return
+            }
+            let provider=factory(key)
+            pass: for item in owed {
+                guard !Task.isCancelled else{break}
+                guard let session=(try? item.metadata())?["session"] as? String,let events=try? item.events() else{continue}
+                let result=await generator.generate(cacheID:item.id,session:session,directory:item.directory,events:events,provider:provider,cloudTextAllowed:true,finalized:true)
+                switch result {
+                case .saved(let title):await MainActor.run {self?.adoptOwedTitle(title,item:item,session:session)}
+                case .unreachable:break pass
+                default:continue
+                }
+            }
+            await MainActor.run {self?.owedTitleTask=nil;self?.reloadLibrary()}
+        }
+    }
+    private func adoptOwedTitle(_ title:String,item:CachedMeeting,session:String) {
+        documentContextPublisher?.updateTitle(session:session,title:title)
+        for document in [self,historyReader].compactMap({$0}) where document.currentCacheID==item.id && !document.recordingBusy {
+            document.meetingTitle=title;document.meetingTitleField.stringValue=title;document.updateWorkspacePresentation()
+        }
+    }
     func invalidateAutoTitle() {
         // Finalization belongs to its saved session, not the next visible meeting.
         titleRevision &+= 1;titleTask?.cancel();titleTask=nil

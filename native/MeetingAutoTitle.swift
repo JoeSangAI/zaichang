@@ -15,9 +15,10 @@ struct MeetingDisplayInfo {
     let sourceDigest: String?
     let attempts: Int
     let attemptedAt: Double?
+    let provisional: Bool
 }
 
-enum MeetingAutoTitleError: Error { case invalidScope, invalidSidecar, invalidTitle, invalidResponse, providerFailure }
+enum MeetingAutoTitleError: Error { case invalidScope, invalidSidecar, invalidTitle, invalidResponse, providerFailure, httpStatus(Int) }
 
 enum MeetingDisplayInfoStore {
     private static let lock = NSLock()
@@ -26,6 +27,19 @@ enum MeetingDisplayInfoStore {
     static func load(in folder: URL) throws -> MeetingDisplayInfo? {
         lock.lock(); defer { lock.unlock() }
         return try read(folder)
+    }
+
+    // A title is owed by the saved meeting, not by the run that recorded it.
+    // Only a run that saw the whole meeting settles it; sidecars from before
+    // this flag are settled, so old meetings are never renamed. Each transcript
+    // snapshot still gets at most three model answers.
+    static func owesTitle(in folder: URL) -> Bool {
+        do {
+            guard let info = try load(in: folder) else { return true }
+            guard info.provenance == .automatic, info.state != .insufficientText else { return false }
+            if info.state == .failed, info.attempts >= 3 { return false }
+            return info.title.isEmpty || info.provisional
+        } catch { return false }
     }
 
     static func saveManual(_ title: String, in folder: URL) throws {
@@ -48,7 +62,16 @@ enum MeetingDisplayInfoStore {
         guard scope.session == session, scope.cacheID == cacheID else { throw MeetingAutoTitleError.invalidScope }
         let old = try read(folder)
         if old?.provenance == .manual { return false }
-        if old?.sourceDigest == digest, old?.state == .ready { return false }
+        if old?.sourceDigest == digest, let old, old.state == .ready {
+            if finalized, old.provisional {
+                // The last provisional text turned out to be the whole meeting.
+                try write(["schema": 2, "title": old.title, "provenance": "automatic", "state": "ready",
+                           "session": session, "cache_id": cacheID, "source_digest": digest,
+                           "attempts": old.attempts, "attempted_at": old.attemptedAt ?? now,
+                           "updated_at": now], in: folder)
+            }
+            return false
+        }
         let finalRefresh = finalized && (old?.sourceDigest != digest || old?.state == .pending || old?.state == .failed)
         let changedSnapshotRefresh = refresh && old?.sourceDigest != digest
         let abandonedSnapshotRefresh = old?.state == .pending && old?.sourceDigest != digest
@@ -56,26 +79,32 @@ enum MeetingDisplayInfoStore {
            let last = old?.attemptedAt, now - last < 60 { return false }
         let attempts = old?.sourceDigest == digest ? (old?.attempts ?? 0) : 0
         if attempts >= 3 { return false }
-        try write(["schema": 2, "title": old?.title ?? "", "provenance": "automatic",
+        var object: [String: Any] = ["schema": 2, "title": old?.title ?? "", "provenance": "automatic",
                    "state": "pending", "session": session, "cache_id": cacheID,
                    "source_digest": digest, "attempts": attempts + 1,
-                   "attempted_at": now, "updated_at": now], in: folder)
+                   "attempted_at": now, "updated_at": now]
+        if !finalized { object["provisional"] = true }
+        try write(object, in: folder)
         return true
     }
 
     fileprivate static func finish(in folder: URL, session: String, cacheID: String,
-                                   digest: String, title: String?, state: MeetingTitleState) throws -> Bool {
+                                   digest: String, title: String?, state: MeetingTitleState,
+                                   failure: String? = nil, chargeAttempt: Bool = true) throws -> Bool {
         lock.lock(); defer { lock.unlock() }
         let scope = try validate(folder)
         guard scope.session == session, scope.cacheID == cacheID else { return false }
         guard let old = try read(folder), old.provenance == .automatic,
               old.state == .pending, old.sourceDigest == digest else { return false }
         let chosen = title ?? old.title
-        try write(["schema": 2, "title": chosen, "provenance": "automatic",
+        var object: [String: Any] = ["schema": 2, "title": chosen, "provenance": "automatic",
                    "state": state.rawValue, "session": session, "cache_id": cacheID,
-                   "source_digest": digest, "attempts": old.attempts,
+                   "source_digest": digest, "attempts": chargeAttempt ? old.attempts : max(0, old.attempts - 1),
                    "attempted_at": old.attemptedAt ?? Date().timeIntervalSince1970,
-                   "updated_at": Date().timeIntervalSince1970], in: folder)
+                   "updated_at": Date().timeIntervalSince1970]
+        if old.provisional { object["provisional"] = true }
+        if let failure { object["last_failure"] = failure }
+        try write(object, in: folder)
         return true
     }
 
@@ -92,6 +121,7 @@ enum MeetingDisplayInfoStore {
                    "attempts": old?.attempts ?? 0,
                    "updated_at": Date().timeIntervalSince1970]
         if let attemptedAt = old?.attemptedAt { object["attempted_at"] = attemptedAt }
+        if old?.provisional == true { object["provisional"] = true }
         try write(object, in: folder)
         return true
     }
@@ -124,7 +154,7 @@ enum MeetingDisplayInfoStore {
             guard !title.isEmpty else { throw MeetingAutoTitleError.invalidSidecar }
             return MeetingDisplayInfo(title: title, provenance: .manual, state: .ready,
                                       session: nil, cacheID: nil, sourceDigest: nil,
-                                      attempts: 0, attemptedAt: nil)
+                                      attempts: 0, attemptedAt: nil, provisional: false)
         }
         guard schema == 2,
               let provenance = (value["provenance"] as? String).flatMap(MeetingTitleProvenance.init(rawValue:)),
@@ -140,7 +170,8 @@ enum MeetingDisplayInfoStore {
         }
         return MeetingDisplayInfo(title: title, provenance: provenance, state: state,
                                   session: session, cacheID: cacheID, sourceDigest: digest,
-                                  attempts: attempts, attemptedAt: value["attempted_at"] as? Double)
+                                  attempts: attempts, attemptedAt: value["attempted_at"] as? Double,
+                                  provisional: value["provisional"] as? Bool == true)
     }
 
     private static func write(_ object: [String: Any], in folder: URL) throws {
@@ -152,6 +183,12 @@ enum MeetingDisplayInfoStore {
         try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]).write(to: path, options: .atomic)
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path.path)
     }
+}
+
+extension CachedMeeting {
+    // Meeting text may go to the title service only where the recording's own
+    // transcription was authorized to.
+    var owesTitle: Bool { recordingMode == "record_and_transcribe" && MeetingDisplayInfoStore.owesTitle(in: directory) }
 }
 
 protocol MeetingTitleProvider {
@@ -175,7 +212,8 @@ struct DashScopeMeetingTitleProvider: MeetingTitleProvider {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONSerialization.data(withJSONObject: Self.requestBody(transcript: transcript))
         let (data, response) = try await session.data(for: request)
-        guard let http = response as? HTTPURLResponse, http.statusCode == 200, data.count <= 64_000,
+        if let http = response as? HTTPURLResponse, http.statusCode != 200 { throw MeetingAutoTitleError.httpStatus(http.statusCode) }
+        guard data.count <= 64_000,
               let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               let choices = object["choices"] as? [[String: Any]],
               let message = choices.first?["message"] as? [String: Any],
@@ -275,7 +313,7 @@ struct MeetingTitleInput {
     }
 }
 
-enum MeetingTitleOutcome { case saved(String), unchanged, manual, stale, unavailable, insufficientText, failed }
+enum MeetingTitleOutcome { case saved(String), unchanged, manual, stale, unavailable, insufficientText, failed, unreachable }
 
 actor MeetingAutoTitle {
     private var generation: [String: Int] = [:]
@@ -329,13 +367,25 @@ actor MeetingAutoTitle {
             return .saved(title)
         } catch {
             if Task.isCancelled { return .stale }
+            // A model that never heard the request has not spent an attempt.
+            let unreachable = error is URLError
+            let failure = Self.failureCode(error)
+            NSLog("zaichang-title: failed cache=%@ reason=%@", cacheID, failure)
             if let reservedToken, generation[cacheID] == reservedToken {
                 _ = try? MeetingDisplayInfoStore.finish(in: directory, session: session,
                                                        cacheID: cacheID, digest: input.digest,
-                                                       title: nil, state: .failed)
+                                                       title: nil, state: .failed,
+                                                       failure: failure, chargeAttempt: !unreachable)
             }
-            return .failed
+            return unreachable ? .unreachable : .failed
         }
+    }
+
+    // Kept with the meeting so a missing title can be explained after a reboot.
+    private static func failureCode(_ error: Error) -> String {
+        if let error = error as? URLError { return "network_\(error.code.rawValue)" }
+        if let error = error as? MeetingAutoTitleError { return String(describing: error) }
+        return error is DecodingError ? "invalidResponse" : "unknown"
     }
 
     fileprivate static func cleanTitle(_ raw: String) throws -> String {

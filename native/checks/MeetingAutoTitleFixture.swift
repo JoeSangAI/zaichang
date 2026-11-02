@@ -204,6 +204,75 @@ private struct GroundedTermTitleProvider:MeetingTitleProvider {
     try check(try bridgeTitle("title-retry")==view.meetingTitle,"retry_title_updates_bridge_after_failure")
     view.renameMeeting("本人确认的最终会议名称");view.cacheWriteQueue.sync{}
     try check((try MeetingLibraryInfo.loadTitle(in:third))=="本人确认的最终会议名称" && (try bridgeTitle("title-retry"))=="本人确认的最终会议名称","manual_title_and_bridge_remain_authoritative")
+    // Continuing a saved meeting: the stop above cleared the provider, and the
+    // title must still be generated. A failed first attempt must not end it.
+    view.newMeeting()
+    let continued=SequenceTitleProvider("接续会议｜继续后生成标题")
+    let continuedFolder=try prepare("title-continued",provider:SequenceTitleProvider("",failures:9))
+    view.phase.phase = .failed;view.updateUI();view.finalizeSessionTitle()
+    try await wait({view.finalTitleTasks.isEmpty})
+    try check(view.titleProvider==nil && (try MeetingDisplayInfoStore.load(in:continuedFolder))?.title.isEmpty==true,"stop_clears_title_provider_after_failed_title")
+    view.titleProviderFactory={_ in continued};view.previewRenderOnly=true;view.startupWorkerFixture={_ in}
+    view.startWorker(nil,overrideRequest:["key":"offline-fixture","append_capture_cache_id":continuedFolder.lastPathComponent])
+    view.startupWorkerFixture=nil;view.previewRenderOnly=false;view.phase.phase = .recording;view.titleTask=nil
+    try ageTitle(continuedFolder)
+    try check(view.titleProvider != nil,"continuing_a_saved_meeting_restores_title_provider")
+    view.scheduleAutoTitle()
+    try await wait({view.meetingTitle=="接续会议｜继续后生成标题" && view.titleTask==nil})
+    try check((try MeetingDisplayInfoStore.load(in:continuedFolder))?.provisional==true,"title_during_recording_stays_owed_until_the_meeting_ends")
+    view.titleProviderFactory=nil
+    view.startWorker(nil,overrideRequest:["local_only":true,"key":""])
+    try check(view.titleProvider==nil && !view.titleTextAllowed,"local_only_start_never_gets_title_provider")
+    view.titleProvider=continued;view.titleTextAllowed=true;view.phase.phase = .stopped;view.finalizeSessionTitle()
+    try await wait({view.finalTitleTasks.isEmpty})
+    try check((try MeetingDisplayInfoStore.load(in:continuedFolder))?.provisional==false,"stop_settles_title_when_text_did_not_change")
+
+    // What a crash or quit leaves behind heals on the next library load.
+    view.newMeeting();view.phase=UIState()
+    let owedRoot=directory.appendingPathComponent("owed");try FileManager.default.createDirectory(at:owedRoot,withIntermediateDirectories:true)
+    func saved(_ name:String,sidecar:[String:Any]?,local:Bool=false)throws->URL {
+        let id=UUID().uuidString,folder=owedRoot.appendingPathComponent(id)
+        let journal=try RecordingJournal(directory:folder,track:"mic",freeSpace:{1_000_000_000})
+        try journal.enqueue(Data(repeating:0,count:3200),at:0)
+        journal.record(["type":"segment","session":name,"segment_id":name,"source_id":"mic","track":"mic","epoch":"owed","revision":1,"start":0.0,"end":3.0,"final":true,"text":"这场合成会议讨论产品人物标注、名称保存和下一轮验收计划。","speaker":["basis":"unknown"]])
+        journal.finish();journal.wait()
+        var meta:[String:Any]=["session":name,"cache_id":id,"bundle":"*microphone*","asr_destination":"dashscope.aliyuncs.com"]
+        if local {meta["capture_mode"]="local_only"}
+        try JSONSerialization.data(withJSONObject:meta).write(to:folder.appendingPathComponent("meeting.json"))
+        if let sidecar {try JSONSerialization.data(withJSONObject:sidecar.merging(["schema":2,"session":name,"cache_id":id],uniquingKeysWith:{$1})).write(to:folder.appendingPathComponent("display-info.json"))}
+        return folder
+    }
+    let emptyFailed=try saved("owed-failed",sidecar:["title":"","provenance":"automatic","state":"failed","attempts":2])
+    let provisional=try saved("owed-provisional",sidecar:["title":"开场｜寒暄","provenance":"automatic","state":"ready","attempts":1,"provisional":true])
+    let missing=try saved("owed-missing",sidecar:nil)
+    let settled=try saved("owed-settled",sidecar:["title":"旧会议｜人工看过的标题","provenance":"automatic","state":"ready","attempts":1])
+    let manual=try saved("owed-manual",sidecar:["title":"本人写的标题","provenance":"manual","state":"ready","attempts":0])
+    let exhausted=try saved("owed-exhausted",sidecar:["title":"","provenance":"automatic","state":"failed","attempts":3])
+    let localOnly=try saved("owed-local",sidecar:nil,local:true)
+    let items=try cachedMeetings(in:owedRoot,recoverInterrupted:false)
+    func owes(_ folder:URL)->Bool {items.first{$0.id==folder.lastPathComponent}?.owesTitle==true}
+    try check(owes(emptyFailed) && owes(provisional) && owes(missing),"empty_failed_provisional_and_missing_titles_are_owed")
+    try check(!owes(settled) && !owes(manual) && !owes(exhausted) && !owes(localOnly),"settled_manual_exhausted_and_local_only_are_not_owed")
+    let healing=SequenceTitleProvider("补标题｜产品人物标注与验收")
+    view.titleProviderFactory={_ in healing};view.recoveryRootOverride=owedRoot
+    view.reconcileOwedTitles(items)
+    let passStarted=view.owedTitleTask != nil
+    view.reconcileOwedTitles(items)
+    try await wait({view.owedTitleTask==nil})
+    let healCalls=await healing.calls
+    try check(passStarted && healCalls==3 && (try MeetingLibraryInfo.loadTitle(in:emptyFailed))=="补标题｜产品人物标注与验收" && (try MeetingLibraryInfo.loadTitle(in:provisional))=="补标题｜产品人物标注与验收" && (try MeetingLibraryInfo.loadTitle(in:missing))=="补标题｜产品人物标注与验收","next_library_load_heals_owed_titles_once")
+    try check((try MeetingLibraryInfo.loadTitle(in:settled))=="旧会议｜人工看过的标题" && (try MeetingLibraryInfo.loadTitle(in:manual))=="本人写的标题" && !MeetingDisplayInfoStore.owesTitle(in:emptyFailed),"healing_leaves_settled_titles_alone")
+    view.owedTitleLastPass=0;view.reconcileOwedTitles(try cachedMeetings(in:owedRoot,recoverInterrupted:false))
+    try await wait({view.owedTitleTask==nil})
+    try check(await healing.calls==healCalls,"healed_titles_make_no_further_requests")
+    struct DownProvider:MeetingTitleProvider {func title(for transcript:String) async throws->String {throw URLError(.notConnectedToInternet)}}
+    let down=try saved("owed-down",sidecar:["title":"","provenance":"automatic","state":"failed","attempts":2])
+    view.titleProviderFactory={_ in DownProvider()};view.owedTitleLastPass=0
+    view.reconcileOwedTitles(try cachedMeetings(in:owedRoot,recoverInterrupted:false))
+    try await wait({view.owedTitleTask==nil})
+    let downInfo=try MeetingDisplayInfoStore.load(in:down)
+    try check(downInfo?.attempts==0 && MeetingDisplayInfoStore.owesTitle(in:down),"network_outage_does_not_spend_title_attempts")
+    view.titleProviderFactory=nil;view.recoveryRootOverride=directory
     view.previewRenderOnly=true;view.window.orderOut(nil)
     return ["type":"title_sequence_checks","passed":checks.count,"checks":checks,"provider_calls_after_one_failure":calls,"capture":false,"cloud":false,"keychain":false]
 }

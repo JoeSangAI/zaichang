@@ -56,8 +56,23 @@ enum MeetingVisualStyle {
     static func titleFont(_ size:CGFloat=32)->NSFont {NSFontManager.shared.font(withFamily:"Songti SC",traits:.boldFontMask,weight:9,size:size) ?? .systemFont(ofSize:size,weight:.semibold)}
     static let taskTitleFont=NSFontManager.shared.font(withFamily:"Songti SC",traits:.boldFontMask,weight:6,size:15) ?? .systemFont(ofSize:15,weight:.semibold)
     static let bodyFont=NSFont(name:"PingFangSC-Regular",size:16) ?? .systemFont(ofSize:16)
-    static let nameFont=NSFont.systemFont(ofSize:14,weight:.semibold)
-    static let auxiliaryFont=NSFont.systemFont(ofSize:12)
+    // Text views hold Chinese, which the system font does not cover. For every such
+    // run AppKit builds a new fallback font with its own glyph cache and keeps it:
+    // one long meeting reached about 2000 of them, over 600 MB. Long text uses a
+    // font that covers it; each font is made once.
+    private static let textFontLock=NSLock()
+    private static var textFonts:[String:NSFont]=[:]
+    static func textFont(_ size:CGFloat,weight:NSFont.Weight = .regular)->NSFont {
+        let face=weight>=NSFont.Weight.semibold ? "Semibold":weight>=NSFont.Weight.medium ? "Medium":"Regular"
+        let key="\(face)-\(size)"
+        textFontLock.lock();defer{textFontLock.unlock()}
+        if let font=textFonts[key] {return font}
+        let font=NSFont(name:"PingFangSC-"+face,size:size) ?? .systemFont(ofSize:size,weight:weight)
+        textFonts[key]=font
+        return font
+    }
+    static let nameFont=textFont(14,weight:.semibold)
+    static let auxiliaryFont=textFont(12)
     static var reducesMotion:Bool {NSWorkspace.shared.accessibilityDisplayShouldReduceMotion}
     static let speakerHex:[UInt32]=[0x3F5F8A,0x3E7A64,0x9A6229,0x6E5A8C,0x9C4A5F]
     // Lift each dark avatar only as far as white text's 4.5:1 limit permits.
