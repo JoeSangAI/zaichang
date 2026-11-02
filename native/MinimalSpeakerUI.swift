@@ -92,6 +92,9 @@ private final class MinimalSpeakerReviewController:NSObject,NSWindowDelegate,NST
     private let cardsRefine=NSButton(title:"重新整理",target:nil,action:nil)
     private var cardDrafts:[String:String]=[:]
     private var cardNamingOpen=Set<String>()
+    private var cardFocusRequest:String?
+    private weak var cardFocusField:NSTextField?
+    private var cardSaveInFlight:(id:String,name:String)?
     private var cardPlaying:String?
     private(set) var showingDetail=false
 
@@ -106,6 +109,8 @@ private final class MinimalSpeakerReviewController:NSObject,NSWindowDelegate,NST
         window.contentView=buildContent()
         refresh(preferred:key)
         window.center();window.makeKeyAndOrderFront(nil)
+        // AppKit focuses the first text field on opening; that would count as typing and freeze the cards.
+        window.makeFirstResponder(nil)
         window.contentView?.layoutSubtreeIfNeeded();updateTextGeometry()
     }
 
@@ -194,7 +199,7 @@ private final class MinimalSpeakerReviewController:NSObject,NSWindowDelegate,NST
             // A document switch invalidates this window's pending UI transaction. The
             // queued writer still targets its captured file, but its callback must not
             // alter the newly displayed document.
-            persistenceToken &+= 1;persistenceInFlight=false
+            persistenceToken &+= 1;persistenceInFlight=false;cardSaveInFlight=nil
             persistenceSession=nil;persistenceCacheID=nil;persistenceDocumentGeneration=nil
         }
         guard let owner=owner,let session=owner.activeSession else {
@@ -807,6 +812,7 @@ private final class MinimalSpeakerReviewController:NSObject,NSWindowDelegate,NST
 
     private func persistMutation(_ owner:Delegate,previous:SessionNames,preferred:SessionSpeakerKey?,success:String,failure:String,preserveDraft:Bool=false) {
         guard !persistenceInFlight else{return}
+        endCardEditing()
         guard let session=owner.activeSession,let cache=owner.currentCacheID else {
             owner.naming=previous;owner.markAllTranscriptParentsDirty();nameDraftChanged=preserveDraft
             refresh(preferred:preferred);scopeLabel.stringValue=failure;return
@@ -826,17 +832,20 @@ private final class MinimalSpeakerReviewController:NSObject,NSWindowDelegate,NST
             self.persistenceInFlight=false;self.persistenceSession=nil;self.persistenceCacheID=nil
             self.persistenceDocumentGeneration=nil
             guard owner.activeSession==session,owner.currentCacheID==cache,owner.meetingDocumentGeneration==generation else {
-                self.refresh();return
+                self.cardSaveInFlight=nil;self.refresh();return
             }
             switch result {
             case .success:
                 guard owner.naming.correctionRevision==revision else {
                     self.scopeLabel.stringValue="本场人物已更新，请重新核对后保存。";self.refresh(preferred:preferred);return
                 }
+                self.cardSaveInFlight=nil
                 self.nameDraftChanged=false;self.refresh(preferred:preferred)
                 self.scopeLabel.stringValue=success;(owner.workspaceOwner ?? owner).reloadLibrary()
             case .failure:
                 if owner.naming.correctionRevision==revision {owner.naming=previous}
+                if let saved=self.cardSaveInFlight {self.cardDrafts[saved.id]=saved.name;self.cardNamingOpen.insert(saved.id)}
+                self.cardSaveInFlight=nil
                 owner.markAllTranscriptParentsDirty();self.nameDraftChanged=preserveDraft
                 self.refresh(preferred:preferred);self.scopeLabel.stringValue=failure
             }
@@ -904,6 +913,9 @@ private final class MinimalSpeakerReviewController:NSObject,NSWindowDelegate,NST
         guard !showingDetail,let editor=window?.firstResponder as? NSTextView,editor.isFieldEditor,let field=editor.delegate as? NSView else{return false}
         return field.isDescendant(of:cardsStack)
     }
+    // Only passive refreshes wait for typing. Buttons never take focus, so a click
+    // on a card must leave the field itself (its draft stays) or nothing redraws.
+    private func endCardEditing() {if cardsBeingEdited {window?.makeFirstResponder(nil)}}
     func controlTextDidEndEditing(_ notification:Notification) {
         guard cardsRebuildPending else{return}
         DispatchQueue.main.async { [weak self] in
@@ -997,20 +1009,28 @@ private final class MinimalSpeakerReviewController:NSObject,NSWindowDelegate,NST
         }
         return card
     }
-    private func namingRow(_ person:SpeakerReviewPerson,candidate:String?,people:[SpeakerReviewPerson])->NSView {
+    private func namingRow(_ person:SpeakerReviewPerson,candidate:String?,people:[SpeakerReviewPerson],renaming current:String?=nil)->NSView {
         let id=personID(person.key)
-        let prompt=NSTextField(labelWithString:"这是谁？");prompt.font = .systemFont(ofSize:13);prompt.textColor=MeetingVisualStyle.muted
-        let field=SpeakerNameField(string:cardDrafts[id] ?? "");field.placeholderString="输入姓名";field.setAccessibilityLabel("这位发言人的姓名")
-        field.onChange={[weak self] text in self?.cardDrafts[id]=text}
-        field.onEndEditing={[weak self] in self?.controlTextDidEndEditing(Notification(name:NSControl.textDidEndEditingNotification))}
+        let prompt=NSTextField(labelWithString:current==nil ? "这是谁？":"改成");prompt.font = .systemFont(ofSize:13);prompt.textColor=MeetingVisualStyle.muted
+        let field=SpeakerNameField(string:cardDrafts[id] ?? current ?? "");field.placeholderString="输入姓名";field.setAccessibilityLabel("这位发言人的姓名")
+        if cardFocusRequest==id {cardFocusField=field}
+        // An empty field is no draft: it must never hide the current name.
+        field.onChange={[weak self] text in self?.cardDrafts[id]=text.isEmpty ? nil:text}
+        field.onEndEditing={[weak self,weak field] in
+            if let text=field?.stringValue {self?.cardDrafts[id]=text.isEmpty ? nil:text}
+            self?.controlTextDidEndEditing(Notification(name:NSControl.textDidEndEditingNotification))
+        }
         let save=SpeakerPillButton(title:"确认",primary:true){[weak self,weak field] in self?.confirm(person,name:field?.stringValue ?? "")}
         field.onSubmit={[weak self,weak field] in self?.confirm(person,name:field?.stringValue ?? "")}
         let entry=NSStackView(views:[prompt,field,save]);entry.orientation = .horizontal;entry.spacing=10;entry.alignment = .centerY
         field.setContentHuggingPriority(.defaultLow,for:.horizontal)
         var choices:[(String,String)]=[]
         if let candidate {choices.append((candidate+" · 声音像",candidate))}
-        for other in people where other.key != person.key {
-            if let name=owner?.naming.name(speaker:other.key),!choices.contains(where:{$0.1==name}) {choices.append((name,name))}
+        // Fixing a spelling offers no other people: one stray click would merge two.
+        if current==nil {
+            for other in people where other.key != person.key {
+                if let name=owner?.naming.name(speaker:other.key),!choices.contains(where:{$0.1==name}) {choices.append((name,name))}
+            }
         }
         let suggestions=NSStackView();suggestions.orientation = .horizontal;suggestions.spacing=6;suggestions.alignment = .centerY
         let hint=NSTextField(labelWithString:choices.isEmpty ? "":"可能是");hint.font = .systemFont(ofSize:12);hint.textColor=MeetingVisualStyle.muted
@@ -1022,7 +1042,7 @@ private final class MinimalSpeakerReviewController:NSObject,NSWindowDelegate,NST
             merge.handler={[weak self,weak merge] in guard let self,let merge else{return};self.showMergeMenu(person,others:others,from:merge)}
             suggestions.addArrangedSubview(merge)
         }
-        let note=NSTextField(labelWithString:VoiceprintLearningPolicy().isEnabled ? "确认后会记住这个声音，以后自动认出。":"这个人本场的发言都会改，后面说的也一样。");note.font = .systemFont(ofSize:12);note.textColor=MeetingVisualStyle.muted
+        let note=NSTextField(labelWithString:current==nil && VoiceprintLearningPolicy().isEnabled ? "确认后会记住这个声音，以后自动认出。":"这个人本场的发言都会改，后面说的也一样。");note.font = .systemFont(ofSize:12);note.textColor=MeetingVisualStyle.muted
         let column=NSStackView(views:[entry,suggestions,note]);column.orientation = .vertical;column.alignment = .leading;column.spacing=8
         entry.widthAnchor.constraint(equalTo:column.widthAnchor).isActive=true
         if suggestions.arrangedSubviews.isEmpty {suggestions.isHidden=true}
@@ -1032,15 +1052,17 @@ private final class MinimalSpeakerReviewController:NSObject,NSWindowDelegate,NST
         let id=personID(person.key)
         let title=NSTextField(labelWithString:name);title.font = .systemFont(ofSize:14,weight:.semibold);title.textColor=MeetingVisualStyle.ink
         let meta=NSTextField(labelWithString:"\(person.entries.count) 轮 · 已确认");meta.font = .monospacedDigitSystemFont(ofSize:12,weight:.regular);meta.textColor=MeetingVisualStyle.muted
-        let rename=SpeakerLinkButton(title:"改名",target:self,action:#selector(openRenameFromRow(_:)));rename.identifier=NSUserInterfaceItemIdentifier(id)
+        let rename=SpeakerLinkButton(title:cardNamingOpen.contains(id) ? "收起":"改名",target:self,action:#selector(openRenameFromRow(_:)));rename.identifier=NSUserInterfaceItemIdentifier(id)
         var views:[NSView]=[avatar(person.key,name:name,diameter:28),title,meta,NSView()]
         if let entry=representative(person.entries) {views.append(playButton(id,size:28){[weak self] in self?.play(entry,id:id)})}
         views.append(rename)
         let row=NSStackView(views:views);row.orientation = .horizontal;row.spacing=12;row.alignment = .centerY
         row.edgeInsets=NSEdgeInsets(top:divider ? 10:0,left:0,bottom:0,right:0)
         if cardNamingOpen.contains(id),let value=index {
-            let column=NSStackView(views:[row,namingRow(person,candidate:nil,people:value.people)]);column.orientation = .vertical;column.alignment = .leading;column.spacing=10
+            let naming=namingRow(person,candidate:nil,people:value.people,renaming:name)
+            let column=NSStackView(views:[row,naming]);column.orientation = .vertical;column.alignment = .leading;column.spacing=10
             row.widthAnchor.constraint(equalTo:column.widthAnchor).isActive=true
+            naming.widthAnchor.constraint(equalTo:column.widthAnchor).isActive=true
             return column
         }
         return row
@@ -1077,36 +1099,53 @@ private final class MinimalSpeakerReviewController:NSObject,NSWindowDelegate,NST
 
     /// Puts the editor on the same state a manual click would: the person (or the
     /// loose list) chosen, and the given turn's text selected.
-    private func focus(_ choice:SpeakerReviewChoice,entry:SpeakerReviewEntry?) {
-        guard let index=choices.firstIndex(where:{choiceIdentity($0)==choiceIdentity(choice)}) else{return}
+    /// False when that choice no longer exists. The selection then still points at
+    /// someone else, so an action must stop instead of landing on the wrong person.
+    @discardableResult private func focus(_ choice:SpeakerReviewChoice,entry:SpeakerReviewEntry?)->Bool {
+        guard let index=choices.firstIndex(where:{choiceIdentity($0)==choiceIdentity(choice)}) else{return false}
         if filter.indexOfSelectedItem != index {filter.selectItem(at:index)}
         stopPreview();nameDraftChanged=false;displayCurrentChoice();updateControls()
-        guard let entry else{return}
+        guard let entry else{return true}
         let ids=Set(entry.partIDs)
         let ranges=mappedParts.filter{ids.contains($0.id)}.map(\.range)
-        guard let first=ranges.map(\.location).min(),let last=ranges.map(NSMaxRange).max() else{return}
+        guard let first=ranges.map(\.location).min(),let last=ranges.map(NSMaxRange).max() else{return true}
         textView.setSelectedRange(NSRange(location:first,length:last-first));updateSelection()
+        return true
     }
+    private func cardsChanged() {cardsStatus.stringValue="发言人刚有变化，请重新操作。";rebuildCards()}
     private func play(_ entry:SpeakerReviewEntry,id:String) {
+        endCardEditing()
         if cardPlaying==id {stopPreview();cardPlaying=nil;updateControls();rebuildCards();return}
         let choice:SpeakerReviewChoice=entry.personKey.flatMap{key in index?.people.first{$0.keys.contains(key) || $0.key==key}.map{.person($0.key)}} ?? .unassigned
-        focus(choice,entry:entry)
+        guard focus(choice,entry:entry) else {cardsChanged();return}
         guard !selectedPartIDs.isEmpty else {cardsStatus.stringValue="这一段的原音无法单独试听。";return}
         cardPlaying=id;cardsStatus.stringValue="";listenSelection();rebuildCards()
     }
     private func confirm(_ person:SpeakerReviewPerson,name raw:String) {
-        let name=raw.trimmingCharacters(in:.whitespacesAndNewlines)
+        let name=raw.trimmingCharacters(in:.whitespacesAndNewlines),id=personID(person.key)
         guard !name.isEmpty else {cardsStatus.stringValue="先填一个名字。";return}
         // End editing first: saving rebuilds the cards, and this field goes with them.
         window?.makeFirstResponder(nil)
-        focus(.person(person.key),entry:nil)
+        guard !persistenceInFlight else {cardsStatus.stringValue="上一个名字还在保存，稍等再点确认。";rebuildCards();return}
+        guard focus(.person(person.key),entry:nil) else {cardDrafts[id]=name;cardsChanged();return}
+        if owner?.naming.name(speaker:person.key)==name {
+            cardDrafts.removeValue(forKey:id);cardNamingOpen.remove(id);rebuildCards();return
+        }
         nameField.stringValue=name;nameDraftChanged=true;updateControls()
-        cardDrafts.removeValue(forKey:personID(person.key));cardNamingOpen.remove(personID(person.key))
+        cardDrafts.removeValue(forKey:id);cardNamingOpen.remove(id)
+        cardSaveInFlight=(id,name)
         renameSelectedPerson()
-        if !persistenceInFlight && cardsStatus.stringValue.isEmpty {cardsStatus.stringValue=scopeLabel.stringValue}
+        // Refused before any save started: put the name back and say why.
+        if !persistenceInFlight {
+            cardSaveInFlight=nil;cardDrafts[id]=name;cardNamingOpen.insert(id)
+            let reason=scopeLabel.stringValue
+            cardsStatus.stringValue=reason.hasPrefix("这组已有") || reason.hasPrefix("姓名未保存") ? reason:"名字没有保存，请重试。"
+            rebuildCards()
+        }
     }
     private func rejectSuggestion(_ person:SpeakerReviewPerson) {
-        focus(.person(person.key),entry:nil)
+        endCardEditing()
+        guard focus(.person(person.key),entry:nil) else {cardsChanged();return}
         cardNamingOpen.insert(personID(person.key))
         rejectVoice()
         rebuildCards()
@@ -1123,7 +1162,9 @@ private final class MinimalSpeakerReviewController:NSObject,NSWindowDelegate,NST
     @objc private func mergeFromMenu(_ sender:NSMenuItem) {
         guard let ids=sender.representedObject as? [String],ids.count==2,let value=index,
               let source=value.people.first(where:{personID($0.key)==ids[0]}),let target=value.people.first(where:{personID($0.key)==ids[1]}) else{return}
-        focus(.person(source.key),entry:nil);mergePersonGroup(to:target.key)
+        endCardEditing()
+        guard focus(.person(source.key),entry:nil) else {cardsChanged();return}
+        mergePersonGroup(to:target.key)
     }
     private func showAssignMenu(_ entry:SpeakerReviewEntry,people:[SpeakerReviewPerson],from view:NSView) {
         let menu=NSMenu()
@@ -1139,21 +1180,39 @@ private final class MinimalSpeakerReviewController:NSObject,NSWindowDelegate,NST
     }
     @objc private func assignFromMenu(_ sender:NSMenuItem) {
         guard let values=sender.representedObject as? [String],values.count==2,let entry=index?.unassigned.first(where:{$0.id==values[0]}) else{return}
-        focus(.unassigned,entry:entry)
+        endCardEditing()
+        guard focus(.unassigned,entry:entry) else {cardsChanged();return}
         guard !selectedPartIDs.isEmpty else {cardsStatus.stringValue="这一轮含有已归属的部分，请在原文里逐段更正。";return}
         nameField.stringValue=values[1];nameDraftChanged=true;updateControls()
         renameSelectedPerson()
+        if !persistenceInFlight {cardsStatus.stringValue="这一轮没能归给「"+values[1]+"」，请在原文里逐段更正。"}
     }
     @objc private func openRenameFromRow(_ sender:NSButton) {
         guard let id=sender.identifier?.rawValue else{return}
-        if cardNamingOpen.contains(id) {cardNamingOpen.remove(id)} else {cardNamingOpen.insert(id)}
-        rebuildCards()
+        endCardEditing()
+        if cardNamingOpen.contains(id) {
+            cardNamingOpen.remove(id);cardDrafts.removeValue(forKey:id);rebuildCards();return
+        }
+        // Opening starts from the current name, not text left from before it was named.
+        cardNamingOpen.insert(id);cardDrafts.removeValue(forKey:id)
+        cardFocusRequest=id;rebuildCards();cardFocusRequest=nil
+        // Lay out first: a field still at zero size edits empty, and the row may sit
+        // below the fold. Focus then selects the current name, so typing replaces it.
+        guard let field=cardFocusField else{return}
+        window?.contentView?.layoutSubtreeIfNeeded()
+        field.scrollToVisible(field.bounds)
+        window?.makeFirstResponder(field)
     }
     @objc private func openDetailFromCard(_ sender:NSButton) {
         guard let id=sender.identifier?.rawValue,let person=index?.people.first(where:{personID($0.key)==id}) else{return}
-        focus(.person(person.key),entry:nil);showDetail()
+        guard focus(.person(person.key),entry:nil) else {cardsChanged();return}
+        showDetail()
     }
-    @objc private func openLooseDetail() {focus(.unassigned,entry:nil);showDetail()}
+    @objc private func openLooseDetail() {
+        // The link also covers a meeting whose loose turns are all simultaneous speech.
+        guard focus(index?.unassigned.isEmpty==false ? .unassigned:.simultaneous,entry:nil) else {cardsChanged();return}
+        showDetail()
+    }
     private func showDetail() {
         stopPreview();cardPlaying=nil;showingDetail=true
         detailColumn?.isHidden=false;cardsScroll?.superview?.isHidden=true
@@ -1310,6 +1369,7 @@ private final class MinimalSpeakerReviewController:NSObject,NSWindowDelegate,NST
         let window=SpeakerReviewWindow(contentRect:NSRect(x:20,y:20,width:640,height:600),styleMask:[.titled,.closable,.resizable],backing:.buffered,defer:false)
         owner.speakerReviewWindow=window
         present(in:window,for:source.key)
+        guard !cardsBeingEdited else{throw Failure(code:"speaker_cards_field_autofocused_on_open")}
         defer {
             owner.naming=originalNames;owner.persistSessionNames();owner.markAllTranscriptParentsDirty()
             if window.isVisible {window.performClose(nil)}
@@ -1336,6 +1396,7 @@ private final class MinimalSpeakerReviewController:NSObject,NSWindowDelegate,NST
         try saveWindow(window,to:directory.appendingPathComponent("speaker-cards.png"))
         window.setFrame(NSRect(x:20,y:20,width:640,height:620),display:true);window.contentView?.layoutSubtreeIfNeeded();window.displayIfNeeded()
         try saveWindow(window,to:directory.appendingPathComponent("speaker-cards-narrow.png"))
+        try await cardRenameFixture(owner:owner,window:window,directory:directory)
         focus(.person(source.key),entry:nil);showDetail()
         guard showingDetail,detailColumn?.isHidden==false else {throw Failure(code:"speaker_cards_detail_not_reachable")}
         window.setFrame(NSRect(x:20,y:20,width:640,height:600),display:true)
@@ -1697,6 +1758,51 @@ extension Delegate {
     }
 }
 
+extension MinimalSpeakerReviewController {
+    private func cardControls<T:NSView>(_ type:T.Type,in view:NSView)->[T] {
+        view.subviews.flatMap{($0 as? T).map{[$0]} ?? []}+view.subviews.flatMap{cardControls(type,in:$0)}
+    }
+    // Reproduces the dead 改名: focus sits in a pending card's field, and a click on
+    // a confirmed row must still open, keep that draft, and save the new spelling.
+    @MainActor fileprivate func cardRenameFixture(owner:Delegate,window:NSWindow,directory:URL) async throws {
+        let baseline=owner.naming
+        defer {owner.naming=baseline;cardDrafts.removeAll();cardNamingOpen.removeAll();refresh();rebuildCards()}
+        guard let people=index?.people,people.count>=2 else{throw Failure(code:"card_rename_fixture_people")}
+        let renamed=people[0],pending=people[1]
+        owner.naming.renameSpeaker(keys:renamed.keys,name:"拼写有误")
+        for key in pending.keys {if let id=owner.naming.segmentIDs(for:key).first {owner.naming.setSpeaker(segment:id,name:"")}}
+        owner.markAllTranscriptParentsDirty();refresh();rebuildCards();window.contentView?.layoutSubtreeIfNeeded()
+        guard let draftField=cardControls(SpeakerNameField.self,in:cardsStack).first,window.makeFirstResponder(draftField),cardsBeingEdited else{throw Failure(code:"card_rename_fixture_focus")}
+        draftField.stringValue="未写完的名字";draftField.controlTextDidChange(Notification(name:NSControl.textDidChangeNotification))
+        // A passive refresh still waits for the typing.
+        let fieldsBefore=cardControls(SpeakerNameField.self,in:cardsStack).count
+        rebuildCards()
+        guard cardsBeingEdited,cardsRebuildPending,cardControls(SpeakerNameField.self,in:cardsStack).count==fieldsBefore else{throw Failure(code:"card_passive_refresh_interrupted_typing")}
+        guard let link=cardControls(SpeakerLinkButton.self,in:cardsStack).first(where:{$0.title=="改名" && $0.identifier?.rawValue==personID(renamed.key)}) else{throw Failure(code:"card_rename_link_missing")}
+        link.performClick(nil)
+        guard cardNamingOpen.contains(personID(renamed.key)),cardDrafts[personID(pending.key)]=="未写完的名字" else{throw Failure(code:"card_rename_click_dead_while_field_focused")}
+        let fields=cardControls(SpeakerNameField.self,in:cardsStack)
+        guard let renameField=fields.first(where:{$0.stringValue=="拼写有误"}),fields.contains(where:{$0.stringValue=="未写完的名字"}) else{throw Failure(code:"card_rename_field_not_prefilled_or_draft_lost")}
+        guard let editor=window.firstResponder as? NSTextView,editor.delegate as? NSView===renameField else{throw Failure(code:"card_rename_field_not_focused")}
+        window.contentView?.layoutSubtreeIfNeeded();window.displayIfNeeded()
+        guard renameField.bounds.width>=120 else{throw Failure(code:"card_rename_field_collapsed")}
+        try saveWindow(window,to:directory.appendingPathComponent("speaker-cards-rename.png"))
+        renameField.stringValue="正确写法";renameField.controlTextDidChange(Notification(name:NSControl.textDidChangeNotification))
+        confirm(renamed,name:renameField.stringValue)
+        let deadline=Date().addingTimeInterval(5)
+        while persistenceInFlight,Date()<deadline {try await Task.sleep(nanoseconds:20_000_000)}
+        guard !persistenceInFlight,owner.naming.name(speaker:renamed.key)=="正确写法",!cardNamingOpen.contains(personID(renamed.key)),
+              cardDrafts[personID(renamed.key)]==nil,cardDrafts[personID(pending.key)]=="未写完的名字" else{throw Failure(code:"card_rename_not_saved")}
+        guard owner.naming.values.values.contains("拼写有误")==false else{throw Failure(code:"card_rename_left_old_spelling")}
+        // A card built before a merge must not rename whoever happens to be selected.
+        let stale=SpeakerReviewPerson(key:SessionSpeakerKey(session:renamed.key.session,source:"gone",epoch:"gone",identity:"gone"),keys:[],title:"已过期",entries:[])
+        filter.selectItem(at:0);let before=owner.naming.correctionRevision
+        confirm(stale,name:"不该落到别人")
+        guard owner.naming.correctionRevision==before,cardsStatus.stringValue.hasPrefix("发言人刚有变化") else{throw Failure(code:"card_stale_action_landed_on_selected_person")}
+        cardDrafts.removeValue(forKey:personID(stale.key))
+    }
+}
+
 @MainActor func minimalSpeakerUIChecks(owner:Delegate,directory:URL) async throws->[String:Any] {
     let controller=MinimalSpeakerReviewController(owner:owner)
     return try await controller.runFixtureChecks(owner:owner,directory:directory)
@@ -1734,7 +1840,11 @@ extension Delegate {
 
 // MARK: Card views
 
-private final class SpeakerCardsDocument:NSView {override var isFlipped:Bool {true}}
+private final class SpeakerCardsDocument:NSView {
+    override var isFlipped:Bool {true}
+    // Clicking empty space leaves a name field, so live refreshes can resume.
+    override func mouseDown(with event:NSEvent) {window?.makeFirstResponder(nil)}
+}
 
 /// White rounded card (or a quiet filled block inside one).
 private final class SpeakerCardBox:NSView {

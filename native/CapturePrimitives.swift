@@ -160,7 +160,34 @@ func appendCaptureClockChecks() throws {
     precondition(projected.first?["text"] as? String=="旧归档原文")
 }
 // Bounded PCM mailbox. Overflow stops the trial rather than silently losing audio.
+/// One input switched off by hand during a recording. Its PCM becomes digital
+/// silence where it is admitted, so nothing reaches the journal, the echo model
+/// or ASR, while the timeline keeps running and later audio still lines up.
+final class CaptureSourceMute {
+    enum Channel:String {case microphone,computer}
+    static let shared=CaptureSourceMute()
+    private let lock=NSLock()
+    private var muted=Set<Channel>()
+    func reset(_ names:[String]) {lock.lock();muted=Set(names.compactMap(Channel.init(rawValue:)));lock.unlock()}
+    func isMuted(_ channel:Channel)->Bool {lock.lock();defer{lock.unlock()};return muted.contains(channel)}
+    func set(_ channel:Channel,muted value:Bool) {
+        lock.lock();defer{lock.unlock()}
+        if value {muted.insert(channel)} else {muted.remove(channel)}
+    }
+    /// Applies one control line for this session; the returned event confirms it to the UI.
+    func apply(line:String,session:String)->[String:Any]? {
+        guard let command=(try? JSONSerialization.jsonObject(with:Data(line.utf8))) as? [String:Any],
+              command["action"] as? String=="source_mute",command["session"] as? String==session,
+              let channel=(command["channel"] as? String).flatMap(Channel.init(rawValue:)),
+              let value=command["muted"] as? Bool else{return nil}
+        set(channel,muted:value)
+        return ["type":"source_mute","session":session,"channel":channel.rawValue,"muted":value]
+    }
+    static func channel(forTrack track:String)->Channel {VoiceprintAcousticContext.channel(for:track)=="microphone" ? .microphone:.computer}
+}
+
 final class Mailbox {
+    var muteChannel:CaptureSourceMute.Channel?
     let captureClock:CaptureBudgetClock?
     let journal:RecordingJournal?;let producer:Bool;var readCursor=0
     let maxBytes:Int;let maxFrames:Int;let mirror:Mailbox?;let totalByteLimit:Int?;var boundaryTrimmedBytes=0
@@ -195,8 +222,9 @@ final class Mailbox {
         lock.lock(); defer { lock.unlock() }
         if closed { return false }
         let allowed=totalByteLimit.map{max(0,min(input.count,$0-totalBytes))} ?? input.count
-        let data=allowed==input.count ? input:Data(input.prefix(allowed));boundaryTrimmedBytes+=input.count-allowed
+        var data=allowed==input.count ? input:Data(input.prefix(allowed));boundaryTrimmedBytes+=input.count-allowed
         if data.isEmpty {return false}
+        if let muteChannel,CaptureSourceMute.shared.isMuted(muteChannel) {data=Data(count:data.count)}
         let at=rawTimestamp ? (captureClock?.admissionTimestamp(at) ?? at) : at
         if !rawTimestamp {captureClock?.mark(at)}
         let energy=PCM16Energy(data),now=ProcessInfo.processInfo.systemUptime
@@ -235,6 +263,7 @@ final class Mailbox {
         lock.unlock()
         let next = Mailbox(captureClock: captureClock, maxBytes: maxBytes, maxFrames: maxFrames,
                            mirror: mirror, totalByteLimit: totalByteLimit, journal: journal)
+        next.muteChannel = muteChannel
         next.totalBytes = bytes
         next.totalFrames = frames
         next.nonzeroFrames = nonzero

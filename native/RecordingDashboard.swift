@@ -90,9 +90,23 @@ final class RecordingLevelView:NSView {
     private var peak=0.0
     private(set) var status="未开始"
     private var samples=[Double](repeating:0,count:48)
+    /// This input is switched off: nothing from it is recorded until reopened.
+    var muted=false {didSet {if muted != oldValue {setAccessibilityHelp(toggleHelp);needsDisplay=true}}}
+    var onToggle:(()->Void)?
+    private static let iconSize:CGFloat=12
+    private var toggleHelp:String {muted ? name+"已关闭，这一路不录，点一下打开":"点一下关闭"+name+"，这一路不再录"}
+    private var toggleArea:NSRect {NSRect(x:0,y:0,width:Self.iconSize+8,height:bounds.height)}
     override var intrinsicContentSize:NSSize {NSSize(width:150,height:28)}
     override init(frame:NSRect) {super.init(frame:frame);setAccessibilityElement(true);setAccessibilityRole(.levelIndicator)}
     required init?(coder:NSCoder) {fatalError("init(coder:) has not been implemented")}
+    override func acceptsFirstMouse(for event:NSEvent?)->Bool {true}
+    override var mouseDownCanMoveWindow:Bool {false}
+    override func resetCursorRects() {if onToggle != nil && alphaValue>0 {addCursorRect(toggleArea,cursor:.pointingHand)}}
+    override func mouseDown(with event:NSEvent) {
+        guard toggleArea.contains(convert(event.locationInWindow,from:nil)) else{return super.mouseDown(with:event)}
+        onToggle?()
+    }
+    override func accessibilityPerformPress()->Bool {onToggle?();return onToggle != nil}
     func show(rms:Double,peak:Double,status:String) {
         let value=rms.isFinite ? min(1,max(0,rms)):0
         if value==0 {samples=Array(repeating:0,count:48)}
@@ -105,10 +119,16 @@ final class RecordingLevelView:NSView {
     override func draw(_ dirtyRect:NSRect) {
         // Drawn on the charcoal capsule. Name and status live in the tooltip and
         // accessibility value; the plot itself is the visible state.
-        let iconSize:CGFloat=12
+        let iconSize=Self.iconSize
         if let symbol=NSImage(systemSymbolName:name=="麦克风" ? "mic":"desktopcomputer",accessibilityDescription:nil)?
-            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize:10.5,weight:.medium).applying(NSImage.SymbolConfiguration(paletteColors:[NSColor.white.withAlphaComponent(0.72)]))) {
+            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize:10.5,weight:.medium).applying(NSImage.SymbolConfiguration(paletteColors:[NSColor.white.withAlphaComponent(muted ? 0.45:0.72)]))) {
             symbol.draw(in:NSRect(x:0,y:bounds.midY-iconSize/2,width:iconSize,height:iconSize))
+        }
+        if muted {
+            // The red stroke runs across the icon and past its edges, so it reads as struck out.
+            let strike=NSBezierPath();strike.lineWidth=1.6;strike.lineCapStyle = .round
+            strike.move(to:NSPoint(x:-0.5,y:bounds.midY-iconSize/2-1));strike.line(to:NSPoint(x:iconSize+0.5,y:bounds.midY+iconSize/2+1))
+            MeetingVisualStyle.capsuleLive.setStroke();strike.stroke()
         }
         let plot=NSRect(x:iconSize+7,y:bounds.midY-9,width:max(1,bounds.width-iconSize-9),height:18)
         let step:CGFloat=4,barWidth:CGFloat=2
@@ -123,8 +143,9 @@ final class RecordingLevelView:NSView {
             (silent || value<=0 ? NSColor.white.withAlphaComponent(0.22):clipping ? NSColor.systemOrange:barColor).setFill()
             NSBezierPath(roundedRect:NSRect(x:plot.minX+CGFloat(i)*step,y:plot.midY-h/2,width:barWidth,height:h),xRadius:barWidth/2,yRadius:barWidth/2).fill()
         }
-        toolTip=name+" · "+(clipping ? "声音过响":rms>0 ? "\(Int(max(-60,20*log10(rms)))) dB":status)
+        toolTip=onToggle==nil ? name+" · "+levelText(clipping:clipping):muted ? toggleHelp:name+" · "+levelText(clipping:clipping)+"（"+toggleHelp+"）"
     }
+    private func levelText(clipping:Bool)->String {clipping ? "声音过响":rms>0 ? "\(Int(max(-60,20*log10(rms)))) dB":status}
 }
 
 /// The charcoal capsule that holds the recording controls.
@@ -226,6 +247,7 @@ extension Delegate {
         // Controls resolve as on a dark surface; the surface itself follows the window so its charcoal tracks light/dark.
         row.appearance=NSAppearance(named:.darkAqua)
         let mic=RecordingLevelView(),computer=RecordingLevelView();mic.name="麦克风";computer.name="电脑声音";computer.barColor=MeetingVisualStyle.capsuleComputerBar;microphoneLevel=mic;computerLevel=computer
+        mic.onToggle={[weak self] in self?.toggleSourceMute("microphone")};computer.onToggle={[weak self] in self?.toggleSourceMute("computer")}
         // The waveforms take all spare width so the controls stay pinned to the capsule ends.
         mic.setContentHuggingPriority(.defaultLow-1,for:.horizontal);computer.setContentHuggingPriority(.defaultLow-1,for:.horizontal)
         // Left: live dot + timer over the state line, or 开始录音 + mode chip before a meeting.
@@ -296,6 +318,33 @@ extension Delegate {
         }
         let mic=measurement("mic"),remote=measurement("computer")
         microphoneLevel?.show(rms:mic.0,peak:mic.1,status:state);computerLevel?.show(rms:remote.0,peak:remote.1,status:state)
+    }
+    // While capture runs the helper decides: the icon changes on its confirmation,
+    // so it can never show an input as off that is still being recorded.
+    func toggleSourceMute(_ channel:String) {
+        guard !isHistoryReader else{return}
+        let next = !mutedSources.contains(channel)
+        switch phase.phase {
+        case .connecting,.stopping:return
+        case .recording,.paused:
+            guard let session=activeSession else{return}
+            let command:[String:Any]=["action":"source_mute","session":session,"channel":channel,"muted":next]
+            if mock {mockRecordingControlHandler?(command);return}
+            guard child?.isRunning==true,let handle=workerInput,let data=try? JSONSerialization.data(withJSONObject:command),
+                  (try? handle.write(contentsOf:data+Data([10]))) != nil else{showTransientFeedback("没能切换这一路收音，请重试");return}
+        default:setSourceMuted(channel,muted:next)
+        }
+    }
+    func setSourceMuted(_ channel:String,muted:Bool) {
+        if muted {mutedSources.insert(channel)} else {mutedSources.remove(channel)}
+        showSourceMutes()
+    }
+    func showSourceMutes() {
+        microphoneLevel?.muted=mutedSources.contains("microphone");computerLevel?.muted=mutedSources.contains("computer")
+        sourceActivity.microphoneMuted=mutedSources.contains("microphone")
+    }
+    func carryingSourceMutes(_ request:[String:Any])->[String:Any] {
+        mutedSources.isEmpty ? request:request.merging(["muted_sources":mutedSources.sorted()]){$1}
     }
     func updateRecordingDashboard() {
         guard let switcher=recordingModeSwitch else{return}

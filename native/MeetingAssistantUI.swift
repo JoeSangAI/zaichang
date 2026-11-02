@@ -125,6 +125,7 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
     var recordingControlTimeout:DispatchWorkItem?;var recordingControlTimeoutSeconds=3.0
     var meetingDocumentGeneration=0 {didSet {if oldValue != meetingDocumentGeneration {cancelMeetingMinutes()}}};var newMeetingRequested=false;var newMeetingSaveInFlight=false
     var recordingControlInFlight:String?
+    var mutedSources=Set<String>()
     var pendingAutomaticTailRecovery:(reason:String,cacheID:String,session:String)?;var automaticTailRecoveryAttempted=Set<String>();var appendTailOwedCacheID:String?
     var mockRecordingControlHandler:(([String:Any])->Void)?;var mockStopHandler:(()->Void)?;var savePanelURLProvider:(()->URL?)?
     var echoStatusLabel="";var observedAppSources:[String:String]=[:]
@@ -399,6 +400,8 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
         cancelTranscriptReadingRestore()
         guard child==nil,!credentialReadJob.waiting,!processingAudio,!preparingModels,!([.connecting,.recording,.paused,.stopping].contains(phase.phase)) else{diagnostic.stringValue="正在保存上一场录音，请稍候";return}
         meetingDocumentGeneration &+= 1
+        // A switch left off for one meeting must not silently drop the next one.
+        mutedSources=[];showSourceMutes()
         detachSavedCoarseRefinement();speakerRefinementLifecycle.begin(session:nil);speakerRefinementNeedsRetry=false
         invalidateAutoTitle();titleProvider=nil;titleTextAllowed=false;speakerReviewWindow?.close();speakerReviewWindow=nil
         // Clear the old live context before changing the visible title. Any UI
@@ -748,7 +751,7 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
     }
     func sendStartRequest(_ secret:String) {
         guard !quitting,modelsPrepared,let input=workerInput,child?.isRunning==true else {phase.phase = .failed;phase.error="准备已中断，请重试";updateUI();return}
-        do {try input.write(contentsOf:JSONSerialization.data(withJSONObject:startRequest(secret))+Data([10]));modelsPrepared=false}
+        do {try input.write(contentsOf:JSONSerialization.data(withJSONObject:carryingSourceMutes(startRequest(secret)))+Data([10]));modelsPrepared=false}
         catch {phase.phase = .failed;phase.error="未能开始记录，请重试";updateUI()}
     }
     func startWorker(_ secret:String?,overrideRequest:[String:Any]?=nil) {
@@ -771,7 +774,7 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
             guard let self,self.workerGeneration==generation else{return}
             self.workerExitReceived=true;self.completeWorkerIfDrained()
         }}
-        do {try proc.run();child=proc;let request:[String:Any]=overrideRequest ?? secret.map{startRequest($0)} ?? ["mode":"prepare","candidate_mode":true];let data=try JSONSerialization.data(withJSONObject:request);try stdin.fileHandleForWriting.write(contentsOf:data+Data([10]));workerInput=stdin.fileHandleForWriting
+        do {try proc.run();child=proc;let request:[String:Any]=(overrideRequest ?? secret.map{startRequest($0)}).map(carryingSourceMutes) ?? ["mode":"prepare","candidate_mode":true];let data=try JSONSerialization.data(withJSONObject:request);try stdin.fileHandleForWriting.write(contentsOf:data+Data([10]));workerInput=stdin.fileHandleForWriting
             DispatchQueue.global(qos:.userInitiated).async {[weak self] in
                 // One reader owns the pipe through EOF; termination cannot drop
                 // the last batch of events or release a new meeting prematurely.
@@ -900,7 +903,8 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
         if type=="stopped" || type=="error" {recordingControlTimeout?.cancel();recordingControlInFlight=nil}
         if type=="error" {cancelSpeakerRefinement()}
         if type=="audio_levels" {receiveAudioLevels(event);return}
-        if type=="started" {pausedTailStates=[:];pausedTailRevision=nil;lastRecordingControlRevision = -1}
+        if type=="source_mute",let channel=event["channel"] as? String,let muted=event["muted"] as? Bool {setSourceMuted(channel,muted:muted);return}
+        if type=="started" {pausedTailStates=[:];pausedTailRevision=nil;lastRecordingControlRevision = -1;showSourceMutes()}
         if type=="capture_status" {if let incoming=event["session"] as? String,let current=activeSession,incoming != current {return};sourceActivity.receive(event);updateUI();return}
         if type=="recording_paused" || type=="recording_resumed" {
             guard event["session"] as? String == activeSession else{return}

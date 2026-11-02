@@ -41,6 +41,25 @@ import AppKit
     try check(v.localOnlyMode && v.recordingModeSwitch!.selectedSegment==1,"paused_mode_change_cannot_trigger_unapproved_upload")
     try snap("04-paused-local")
     var commands:[String]=[];v.mock=true;v.mockRecordingControlHandler={command in let action=command["action"] as? String ?? "";commands.append(action);v.receive(["type":action=="resume" ? "recording_resumed":"recording_paused","session":command["session"] as? String ?? "","control_revision":commands.count])}
+    // Per-input mute: asked of the helper while capturing, shown only once it confirms.
+    var muteCommands:[[String:Any]]=[];v.mockRecordingControlHandler={muteCommands.append($0)}
+    v.microphoneLevel!.onToggle!()
+    try check(muteCommands.first?["action"] as? String=="source_mute" && muteCommands.first?["channel"] as? String=="microphone" && muteCommands.first?["muted"] as? Bool==true && muteCommands.first?["session"] as? String=="dashboard-fixture" && !v.microphoneLevel!.muted,"mute_waits_for_helper_confirmation")
+    v.receive(["type":"source_mute","session":"another-session","channel":"microphone","muted":true])
+    try check(!v.microphoneLevel!.muted,"another_session_cannot_mute_this_one")
+    v.receive(["type":"source_mute","session":"dashboard-fixture","channel":"microphone","muted":true])
+    try check(v.microphoneLevel!.muted && !v.computerLevel!.muted && v.sourceActivity.microphoneMuted,"confirmed_mute_strikes_out_only_that_input")
+    v.sourceActivity.paused=false;v.sourceActivity.elapsed=30;v.sourceActivity.signal=["mic":["raw_signal":["hardware_pcm_frames":100,"nonzero_samples":0,"last_packet_age_seconds":0.1]]]
+    try check(v.sourceActivity.microphoneWarning==nil,"muted_microphone_raises_no_silence_warning")
+    v.sourceActivity.microphoneMuted=false
+    try check(v.sourceActivity.microphoneWarning != nil,"silence_warning_still_works_when_not_muted")
+    v.sourceActivity.microphoneMuted=true;v.sourceActivity.paused=true;v.sourceActivity.signal=[:]
+    try snap("04b-paused-microphone-muted")
+    v.microphoneLevel!.onToggle!()
+    try check(muteCommands.last?["muted"] as? Bool==false && v.microphoneLevel!.muted,"unmute_also_waits_for_confirmation")
+    v.receive(["type":"source_mute","session":"dashboard-fixture","channel":"microphone","muted":false])
+    try check(!v.microphoneLevel!.muted && !v.sourceActivity.microphoneMuted,"confirmed_unmute_restores_the_input")
+    v.mockRecordingControlHandler={command in let action=command["action"] as? String ?? "";commands.append(action);v.receive(["type":action=="resume" ? "recording_resumed":"recording_paused","session":command["session"] as? String ?? "","control_revision":commands.count])}
     v.updateUI();v.action.performClick(nil)
     try check(commands==["resume"] && v.phase.phase == .recording && v.currentCacheID=="dashboard-fixture" && v.activeSession=="dashboard-fixture","resume_reuses_same_conversation_during_background_work")
     v.action.performClick(nil)

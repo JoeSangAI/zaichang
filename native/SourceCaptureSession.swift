@@ -30,6 +30,7 @@ private final class SourceCaptureEntry {
         sourceID = id
         store = try RecordingJournal(directory: directory, track: id, alignCaptureTime: true)
         producer = Mailbox(captureClock: clock, totalByteLimit: limit, journal: store)
+        producer.muteChannel = CaptureSourceMute.channel(forTrack: id)
         asrBox = Mailbox(journal: store, producer: false)
         modelBox = Mailbox(journal: store, producer: false)
     }
@@ -37,6 +38,7 @@ private final class SourceCaptureEntry {
         sourceID = id
         self.store = store
         self.producer = producer
+        producer.muteChannel = CaptureSourceMute.channel(forTrack: id)
         asrBox = Mailbox(journal: store, producer: false)
         modelBox = Mailbox(journal: store, producer: false)
     }
@@ -717,7 +719,11 @@ func runSourceCaptureSession(config: Config) async throws {
     let referenceStore = try RecordingJournal(directory: directory, track: referenceTrack, alignCaptureTime: true)
     let micStore = try RecordingJournal(directory: directory, track: micTrack, alignCaptureTime: true)
     let rawBox = Mailbox(captureClock: clock, totalByteLimit: limit, journal: rawStore)
+    rawBox.muteChannel = .microphone
     var referenceBox = Mailbox(captureClock: clock, totalByteLimit: limit, journal: referenceStore)
+    // The reference is a saved copy of computer audio. Muted, it must not keep it,
+    // though echo cancellation then has nothing to cancel played sound against.
+    referenceBox.muteChannel = .computer
     // Echo output timestamps have already been normalized by the raw input
     // mailboxes. A second CaptureBudgetClock would subtract pauses twice.
     let cleanBox = Mailbox(totalByteLimit: limit, journal: micStore)
@@ -1451,7 +1457,8 @@ func runSourceCaptureSession(config: Config) async throws {
             // meeting sources whose failed generation is isolated and reopened.
             // Neither kind of secondary failure may stop the raw microphone.
             try rawBox.checkFault()
-            switch silentMicrophone.observe(paused:paused,now:now,signal:rawBox.signalMetrics(now:now)) {
+            // Zeros from a hand-muted microphone say nothing about the device.
+            switch silentMicrophone.observe(paused:paused || CaptureSourceMute.shared.isMuted(.microphone),now:now,signal:rawBox.signalMetrics(now:now)) {
             case .heard: microphone.confirmSignal()
             case .silent:
                 // The followed device (often a just-connected headset) gives no

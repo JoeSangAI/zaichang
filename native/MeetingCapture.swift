@@ -101,6 +101,7 @@ func scopeDescription(global:Bool,ids:[AudioObjectID])->CATapDescription {
     return description
 }
 struct Config: Decodable {
+    var mutedSources: [String]? = nil
     let session: String
     let bundle: String
     let key: String
@@ -1648,6 +1649,13 @@ struct CaptureControlAcknowledgement {
             if Bundle.main.object(forInfoDictionaryKey:"OfflineOnly") as? Bool == true {throw Failure(code:"offline_validation_only")}
             let config = try JSONDecoder().decode(Config.self, from: Data(line.utf8)); try config.validate()
             captureControlAckFD = try configureControlAcknowledgementDescriptor(config.controlAckFD)
+            // Set before any capture opens: what was switched off beforehand never records.
+            CaptureSourceMute.shared.reset(config.mutedSources ?? [])
+            Thread.detachNewThread {
+                while let control=readLine() {
+                    if let confirmed=CaptureSourceMute.shared.apply(line:control,session:config.session) {emit(confirmed)}
+                }
+            }
             if !prepared.isEmpty {guard config.localSpeakerDirectory==preparedDirectory,config.localEmbeddingModel==preparedEmbedding else {throw Failure(code:"prepared_model_scope_changed")}}
             if config.bundle=="*system*",config.resumeCacheID==nil {
                 if config.isLocalOnly {guard Bundle.main.object(forInfoDictionaryKey:"LocalRecordingAllowed") as? Bool==true,config.userLaunchConfirmed==true,config.localRecordingConfirmed==true else{throw Failure(code:"local_recording_not_confirmed")}}
@@ -1713,6 +1721,7 @@ struct CaptureControlAcknowledgement {
             let modelBoxes=["mic":Mailbox(journal:journals["mic"],producer:false),"remote":Mailbox(journal:journals["remote"],producer:false)]
             let micBox=Mailbox(captureClock:captureClock,totalByteLimit:config.unlimitedSession==true ? nil:Int(config.maxSeconds*32000),journal:journals["mic"])
             let remoteBox=Mailbox(captureClock:captureClock,totalByteLimit:config.unlimitedSession==true ? nil:Int(config.maxSeconds*32000),journal:journals["remote"])
+            micBox.muteChannel = .microphone;remoteBox.muteChannel = .computer
             let boxes=["mic":micBox,"remote":remoteBox]
             let mic=Microphone();let tap=ApplicationTap()
             let lanes=["mic":Lane(track:physical["mic"] ?? "mic",config:config,prepared:prepared["mic"],preparedEpoch:preparedEpochs["mic"]),"remote":Lane(track:physical["remote"] ?? "remote",config:config,prepared:prepared["remote"],preparedEpoch:preparedEpochs["remote"])]

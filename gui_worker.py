@@ -62,7 +62,19 @@ def local_recording_config(request):
     config=dict(session=str(uuid.uuid4()),bundle=bundle,key='',confirmed=True,maxSeconds=seconds,unlimitedSession=True,model='qwen-audio-3.0-asr-flash-streaming',silenceMS=1300,micEnabled=True,userLaunchConfirmed=True,localOnly=True,localRecordingConfirmed=True,echoModelDirectory=str(Path(__file__).resolve().parent/'native/local-speaker-install/runtime-models'))
     return append_capture_config(request,config,local_only=True)
 
+SOURCE_MUTE_CHANNELS=('microphone','computer')
+
+def source_mute_command(command,session):
+    """A checked per-input mute for this session, or None for anything else."""
+    if not isinstance(command,dict) or command.get('action')!='source_mute' or command.get('session')!=session:return None
+    if command.get('channel') not in SOURCE_MUTE_CHANNELS or type(command.get('muted')) is not bool:return None
+    return dict(action='source_mute',session=session,channel=command['channel'],muted=command['muted'])
+
 def append_capture_config(request,config,*,local_only):
+    # Inputs switched off before pressing start must never open as recorded.
+    muted=request.get('muted_sources')
+    if isinstance(muted,list) and any(name in SOURCE_MUTE_CHANNELS for name in muted):
+        config['mutedSources']=[name for name in SOURCE_MUTE_CHANNELS if name in muted]
     cache_id=request.get('append_capture_cache_id')
     if cache_id is None:return config
     if request.get('resume_cache_id') is not None or not isinstance(cache_id,str):raise ValueError('append_capture_scope_invalid')
@@ -762,6 +774,12 @@ def run_independent_session(config,binary,cloud=False):
             for command_line in sys.stdin:
                 try:command=json.loads(command_line)
                 except (ValueError,TypeError):continue
+                mute=source_mute_command(command,config['session'])
+                if mute is not None:
+                    # No confirmation comes back on failure, so the UI keeps showing the true state.
+                    try:child.stdin.write(json.dumps(mute)+'\n');child.stdin.flush()
+                    except (OSError,ValueError):pass
+                    continue
                 accepted=supervisor.request(command)
                 if isinstance(command,dict) and command.get('session')==config['session']:
                     remember_request(command.get('action'),accepted,'ui')
@@ -804,8 +822,8 @@ def run_independent_session(config,binary,cloud=False):
                             file=cache/'session-usage.json';temp=file.with_suffix('.tmp');temp.write_text(json.dumps(usage_snapshot,ensure_ascii=False));os.chmod(temp,0o600);os.replace(temp,file)
                         except OSError:
                             pass  # Usage persistence must never interrupt capture or transcription.
-                if kind in {'audio_levels','started','segment','speaker_model','capture_stopped','processing_started','processing_failed','stopped','error','asr_replay','asr_reconnecting','asr_pending','asr_catching_up','asr_resumed','audio_source','echo_status'}:emit_ui(event)
-            elif kind in {'audio_levels','started','meter','capture_stopped','stopped','error','processing_failed','audio_source','echo_status'}:emit_ui(event)
+                if kind in {'audio_levels','started','segment','speaker_model','capture_stopped','processing_started','processing_failed','stopped','error','asr_replay','asr_reconnecting','asr_pending','asr_catching_up','asr_resumed','audio_source','echo_status','source_mute'}:emit_ui(event)
+            elif kind in {'audio_levels','started','meter','capture_stopped','stopped','error','processing_failed','audio_source','echo_status','source_mute'}:emit_ui(event)
         child.wait(timeout=5)
         if supervisor.forced_reason:
             stopped = dict(type='stopped',session=config['session'],reason=supervisor.forced_reason,capture=False,network=False,transcription_complete=False,audio_retained=True)

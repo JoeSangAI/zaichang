@@ -42,6 +42,9 @@ final class SpeakerConfirmationController:NSObject,NSTextFieldDelegate,NSPopover
     // Set when the editor opened from a speaker's name: the name covers that
     // whole person, past and future turns, rather than one sentence.
     private var speakerKey:SessionSpeakerKey?
+    // What was clicked. A live turn can start with someone else's or nobody's
+    // words, so the turn's first part says nothing about this person.
+    private var openedSegment=""
     private let onlyThis=NSButton(title:"只改这一段",target:nil,action:nil)
     private let voiceChips=NSStackView()
     private var voiceSpellings:[(spelling:String,name:String)]=[]
@@ -62,7 +65,7 @@ final class SpeakerConfirmationController:NSObject,NSTextFieldDelegate,NSPopover
     }
     func present(segment:String,anchor:NSView?=nil,showPopover:Bool=true,wholeSpeaker:Bool=false) {
         guard let owner,let item=owner.namingItem(segment),let current=owner.activeSession else{return}
-        session=current;openedCache=owner.currentCacheID;draftKey=current+"|"+segment
+        session=current;openedCache=owner.currentCacheID;draftKey=current+"|"+segment;openedSegment=segment
         readingPosition=owner.captureTranscriptReadingPosition()
         readingRevision=owner.transcriptReadingRestoreRevision;documentGeneration=owner.meetingDocumentGeneration;openedSelection=owner.output.selectedRange();openedViewportY=owner.scroll?.contentView.bounds.origin.y ?? 0
         let turn=owner.readingTurns().first{$0.id==segment || $0.parts.contains{$0.0==segment}}
@@ -214,6 +217,7 @@ final class SpeakerConfirmationController:NSObject,NSTextFieldDelegate,NSPopover
         if speakerKey != nil {commit()} else {popover.contentViewController?.view.window?.makeFirstResponder(field)}
     }
     func onlyThisForChecks() {narrowToThisTurn()}
+    func startTurnWithForChecks(_ id:String) {segmentIDs.insert(id,at:0)}
     @objc private func narrowToThisTurn() {
         speakerKey=nil;onlyThis.isHidden=true
         status.stringValue="只改这一段，确认后保存在本机。";resizePopover()
@@ -375,7 +379,7 @@ final class SpeakerConfirmationController:NSObject,NSTextFieldDelegate,NSPopover
         if let key=quickKey ?? speakerKey {
             // Naming a person does not depend on the words of any turn, and a live
             // speaker's own newest turn would otherwise block every save.
-            guard segmentIDs.first.flatMap({owner.naming.key(segment:$0)})==key else{showQuickStatus("这段内容已更新，请重新打开确认。");confirm.isEnabled=false;return}
+            guard owner.naming.key(segment:openedSegment)==owner.naming.canonical(key) else{showQuickStatus("这段内容已更新，请重新打开确认。");confirm.isEnabled=false;return}
         } else {
             guard ids.allSatisfy({id in (owner.naming.name(segment:id) ?? "")==openedNames[id] && (owner.namingItem(id).map{stamp($0)==fingerprint[id]} ?? false)}) else{showQuickStatus("这段内容已更新，请重新打开确认。");confirm.isEnabled=false;return}
         }
@@ -426,7 +430,7 @@ final class SpeakerConfirmationController:NSObject,NSTextFieldDelegate,NSPopover
         if speakerKey != nil {commit();return}
         popover.contentViewController?.view.window?.makeFirstResponder(field)
     }
-    @objc private func openDetails() {popover.close();owner?.openSpeakerReview(for:segmentIDs.first.flatMap{owner?.naming.key(segment:$0)})}
+    @objc private func openDetails() {popover.close();owner?.openSpeakerReview(for:owner?.naming.key(segment:openedSegment))}
     func popoverDidClose(_ notification:Notification) {
         stopQuickPreview()
         searchWork?.cancel();service?.cancel()

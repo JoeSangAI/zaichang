@@ -961,6 +961,20 @@ func captureSafetyChecks(directory:URL) async throws->[String:Any] {
     precondition(unproven.reject(200,alive:alive,builtIn:120) && unproven.choose(defaultDevice:200,alive:alive,builtIn:120)==120)
     var noFallback=MicrophoneDevicePolicy()
     precondition(!noFallback.reject(120,alive:alive,builtIn:120) && noFallback.choose(defaultDevice:120,alive:alive,builtIn:120)==120)
+    // A muted input admits silence of the same length, then hears again when reopened.
+    let muteBox=Mailbox();muteBox.muteChannel = .microphone;CaptureSourceMute.shared.reset([])
+    let spoken=Data([1,2,3,4,5,6])
+    muteBox.put(spoken,at:1);precondition((try? muteBox.take())??.0==spoken)
+    precondition(CaptureSourceMute.shared.apply(line:"{\"action\":\"source_mute\",\"session\":\"other\",\"channel\":\"microphone\",\"muted\":true}",session:"this")==nil && !CaptureSourceMute.shared.isMuted(.microphone))
+    precondition(CaptureSourceMute.shared.apply(line:"{\"action\":\"source_mute\",\"session\":\"this\",\"channel\":\"speakers\",\"muted\":true}",session:"this")==nil)
+    let muteAck=CaptureSourceMute.shared.apply(line:"{\"action\":\"source_mute\",\"session\":\"this\",\"channel\":\"microphone\",\"muted\":true}",session:"this")
+    precondition(muteAck?["type"] as? String=="source_mute" && muteAck?["muted"] as? Bool==true && CaptureSourceMute.shared.isMuted(.microphone) && !CaptureSourceMute.shared.isMuted(.computer))
+    muteBox.put(spoken,at:2);precondition((try? muteBox.take())??.0==Data(count:spoken.count))
+    let otherInput=Mailbox();otherInput.muteChannel = .computer;otherInput.put(spoken,at:2);precondition((try? otherInput.take())??.0==spoken)
+    _=CaptureSourceMute.shared.apply(line:"{\"action\":\"source_mute\",\"session\":\"this\",\"channel\":\"microphone\",\"muted\":false}",session:"this")
+    muteBox.put(spoken,at:3);precondition((try? muteBox.take())??.0==spoken)
+    precondition(CaptureSourceMute.channel(forTrack:"mic") == .microphone && CaptureSourceMute.channel(forTrack:"mic-g2") == .microphone && CaptureSourceMute.channel(forTrack:"app-fe50def5be5d1bf4-g1") == .computer && CaptureSourceMute.channel(forTrack:"remote-g1") == .computer)
+    CaptureSourceMute.shared.reset(["computer","unknown"]);precondition(CaptureSourceMute.shared.isMuted(.computer) && !CaptureSourceMute.shared.isMuted(.microphone));CaptureSourceMute.shared.reset([])
     var watch=SilentMicrophoneWatch()
     let zeros:[String:Any]=["last_packet_age_seconds":0.01,"last_nonzero_age_seconds":20.0]
     let sound:[String:Any]=["last_packet_age_seconds":0.01,"last_nonzero_age_seconds":0.01]

@@ -350,8 +350,9 @@ struct SourceActivity {
             elapsed=event["elapsed_seconds"] as? Double ?? elapsed;paused=event["paused"] as? Bool ?? false
         }
     }
+    var microphoneMuted=false
     var microphoneWarning:String? {
-        guard !paused,elapsed>=8,let mic=signal["mic"],let raw=mic["raw_signal"] as? [String:Any] else{return nil}
+        guard !paused,!microphoneMuted,elapsed>=8,let mic=signal["mic"],let raw=mic["raw_signal"] as? [String:Any] else{return nil}
         if (raw["hardware_pcm_frames"] as? Int ?? 0)==0 || (raw["last_packet_age_seconds"] as? Double ?? 0)>=3 {return "麦克风未收到音频；请检查输入设备"}
         if (raw["nonzero_samples"] as? Int ?? 0)==0 {
             let input=mic["input_diagnostics"] as? [String:Any] ?? [:]

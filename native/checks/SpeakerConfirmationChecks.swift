@@ -175,6 +175,11 @@ import AppKit
     try wholePump{whole.naming.displayName(speaker:slot1)?.value=="合成丙" && whole.confirmationController?.speakerSaveInFlight != true}
     whole.rejectVoiceprintRecommendation(slot1)
     try check(whole.naming.displayName(speaker:slot1)==nil && whole.naming.autoNameIsSuppressed(slot1),"rejecting_a_followed_name_sticks")
+    // A live turn can open with someone else's words; the name clicked still decides.
+    _=whole.textView(whole.output,clickedOnLink:speakerLinkPrefix+"w-0",at:0)
+    let mixedTurn=whole.confirmationController!
+    mixedTurn.startTurnWithForChecks("w-6");mixedTurn.field.stringValue="合成丁";mixedTurn.controlTextDidChange(Notification(name:NSControl.textDidChangeNotification,object:mixedTurn.field));mixedTurn.commit()
+    try wholePump{whole.naming.name(speaker:slot0)=="合成丁" && whole.naming.name(speaker:slot2)==nil && whole.confirmationController?.speakerSaveInFlight != true}
     try check(whole.textView(whole.output,clickedOnLink:speakerLinkPrefix+"w-6",at:0),"another_person_opens_too")
     let narrowed=whole.confirmationController!
     narrowed.onlyThisForChecks();narrowed.field.stringValue="只这一段";narrowed.controlTextDidChange(Notification(name:NSControl.textDidChangeNotification,object:narrowed.field));narrowed.commit()
@@ -223,6 +228,12 @@ import AppKit
     try check(try archiveRenamingVoicePerson(aligned,personID:otherID,name:"合成甲正名",domain:voiceDomain).people.count==2,"renaming_to_an_existing_person_merges")
     let optedOut=try archiveSettingVoiceEnabled(aligned,personID:otherID,enabled:false,domain:voiceDomain)
     try check(try archiveMergingVoicePeople(optedOut,from:otherID,into:canonical!.id,domain:voiceDomain).people.first{$0.name=="合成甲正名"}?.enabled==false,"opting_out_survives_a_merge")
+    let chained=try archiveApplyingVoiceMemoryEdits(aligned,edits:[.merge(otherID,misspelt!.id),.merge(canonical!.id,otherID)],domain:voiceDomain)
+    try check(chained.people.count==1,"a_merge_into_someone_already_merged_follows_them")
+    let circular=try archiveApplyingVoiceMemoryEdits(aligned,edits:[.merge(otherID,canonical!.id),.merge(canonical!.id,otherID)],domain:voiceDomain)
+    try check(circular.people.count==2,"merging_two_people_back_into_each_other_stays_merged")
+    let renamedThenMerged=try archiveApplyingVoiceMemoryEdits(aligned,edits:[.rename(otherID,"合成甲正名"),.rename(otherID,"再次改名")],domain:voiceDomain)
+    try check(renamedThenMerged.people.count==2 && renamedThenMerged.people.contains{$0.name=="再次改名"},"a_rename_after_a_rename_merge_reaches_the_remaining_person")
     // A voice heard only on computer audio, now on the microphone: asked, not asserted.
     func sceneMatcher(_ archive:VoiceprintArchive)->VoiceprintMatcher {
         var matcher=VoiceprintMatcher(archive:archive);matcher.reset(session:wholeSession)

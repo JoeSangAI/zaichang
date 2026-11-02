@@ -3,20 +3,43 @@ import AppKit
 // One serial utility queue owns matching and disk I/O. It never shares the
 // capture/control queue, so archive reads or scoring cannot delay pause.
 enum VoiceMemoryEdit {case rename(String,String),merge(String,String)}
+// Edits are chosen one by one on one panel, so a later one can name someone an
+// earlier one already merged away; follow them to whoever remains.
+func archiveApplyingVoiceMemoryEdits(_ old:VoiceprintArchive,edits:[VoiceMemoryEdit],domain:String)throws->VoiceprintArchive {
+    var archive=old,movedTo:[String:String]=[:]
+    func current(_ id:String)->String {var value=id;while let next=movedTo[value] {value=next};return value}
+    for edit in edits {
+        switch edit {
+        case .rename(let id,let name):
+            let person=current(id)
+            archive=try archiveRenamingVoicePerson(archive,personID:person,name:name,domain:domain)
+            if !archive.knownPeople.contains(where:{$0.id==person}),let same=archive.knownPeople.first(where:{$0.name==name}) {movedTo[person]=same.id}
+        case .merge(let from,let into):
+            let source=current(from),target=current(into)
+            guard source != target else{continue}
+            archive=try archiveMergingVoicePeople(archive,from:source,into:target,domain:domain)
+            // A baseline person keeps its identity, so either side may be the one gone.
+            if !archive.knownPeople.contains(where:{$0.id==source}) {movedTo[source]=target}
+            else if !archive.knownPeople.contains(where:{$0.id==target}) {movedTo[target]=source}
+        }
+    }
+    return archive
+}
 // Rename and merge choices on the voice memory panel; saved together with it.
 private final class VoiceMemoryEditor:NSObject {
     var edits:[VoiceMemoryEdit]=[]
     var boxes:[String:NSButton]=[:]
+    var names:[String:String]=[:]
     var rows:[String:NSView]=[:]
     @objc func choose(_ sender:NSPopUpButton) {
         guard let action=sender.selectedItem?.representedObject as? [String],action.count>=2 else{return}
         let id=action[1]
         if action[0]=="rename" {
             let ask=NSAlert();ask.messageText="改名";ask.informativeText="以后认出这个人都用新名字；已有会议里的文字不变。"
-            let field=NSTextField(frame:NSRect(x:0,y:0,width:260,height:24));field.stringValue=boxes[id]?.title.components(separatedBy:" · ").first ?? "";ask.accessoryView=field
+            let field=NSTextField(frame:NSRect(x:0,y:0,width:260,height:24));field.stringValue=names[id] ?? "";ask.accessoryView=field
             ask.addButton(withTitle:"改名");ask.addButton(withTitle:"取消")
             let name=ask.runModal() == .alertFirstButtonReturn ? field.stringValue.trimmingCharacters(in:.whitespacesAndNewlines):""
-            if !name.isEmpty {edits.append(.rename(id,name));boxes[id]?.title=name}
+            if !name.isEmpty {edits.append(.rename(id,name));names[id]=name;boxes[id]?.title=name}
         } else if action.count==3 {
             edits.append(.merge(id,action[2]));rows[id]?.isHidden=true
         }
@@ -321,12 +344,7 @@ final class VoiceprintRecommendationService {
     func updateEnabled(_ enabled:[String:Bool],edits:[VoiceMemoryEdit]=[],revision:Int,done:@escaping(Bool)->Void) {
         queue.async {
             do {guard var archive=try self.store.load(),archive.revision==revision else{throw ProfileStoreError.invalid};let oldRevision=archive.revision
-                for edit in edits {
-                    switch edit {
-                    case .rename(let id,let name):archive=try archiveRenamingVoicePerson(archive,personID:id,name:name,domain:self.store.domain)
-                    case .merge(let from,let into):archive=try archiveMergingVoicePeople(archive,from:from,into:into,domain:self.store.domain)
-                    }
-                }
+                archive=try archiveApplyingVoiceMemoryEdits(archive,edits:edits,domain:self.store.domain)
                 let remaining=Set(archive.knownPeople.map(\.id))
                 for (id,value) in enabled where remaining.contains(id) {archive=try archiveSettingVoiceEnabled(archive,personID:id,enabled:value,domain:self.store.domain)}
                 if archive.revision != oldRevision {try self.store.save(archive,expectedRevision:oldRevision)}
@@ -415,7 +433,7 @@ extension Delegate {
                 for other in (archive?.people ?? []) where other.id != person.id {menu.addItem(withTitle:"合并到 "+other.name);menu.lastItem?.representedObject=["merge",person.id,other.id]}
                 menu.target=editor;menu.action=#selector(VoiceMemoryEditor.choose(_:));menu.setAccessibilityLabel("调整 "+person.name)
                 let row=NSStackView(views:[box,menu]);row.orientation = .horizontal;row.spacing=6
-                editor.boxes[person.id]=box;editor.rows[person.id]=row
+                editor.boxes[person.id]=box;editor.rows[person.id]=row;editor.names[person.id]=person.name
                 people.addArrangedSubview(row);boxes.append((person.id,box))
             }
             if archive?.people.isEmpty != false {
@@ -434,7 +452,7 @@ extension Delegate {
             service.updateEnabled(values,edits:editor.edits,revision:archive.revision) { [weak self] ok in
                 guard let self else{return}
                 if ok {self.revokeDisabledVoiceprintNames(Set(values.filter{!$0.value}.map(\.key)))}
-                else{self.voiceprintStatus="声音记忆未保存，请重试。"}
+                else{self.voiceprintStatus="声音记忆未保存，请重试。";self.showTransientFeedback(self.voiceprintStatus)}
             }
         }
     }

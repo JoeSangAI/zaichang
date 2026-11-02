@@ -54,6 +54,18 @@ class GUIContract(unittest.TestCase):
             self.assertFalse(any('Vocabulary' in k for k in config))
             self.assertEqual(path.read_bytes(),before)
 
+    def test_source_mute_accepts_only_this_session_and_known_inputs(self):
+        good=dict(action='source_mute',session='s',channel='microphone',muted=True)
+        self.assertEqual(gui_worker.source_mute_command(good,'s'),good)
+        for bad in (dict(good,session='other'),dict(good,channel='speakers'),dict(good,muted='true'),dict(good,action='pause'),[],None):
+            self.assertIsNone(gui_worker.source_mute_command(bad,'s'))
+
+    def test_inputs_muted_before_start_reach_the_capture_config(self):
+        muted=gui_worker.append_capture_config(dict(muted_sources=['computer','unknown']),dict(session='s'),local_only=True)
+        self.assertEqual(muted['mutedSources'],['computer'])
+        self.assertNotIn('mutedSources',gui_worker.append_capture_config({},dict(session='s'),local_only=True))
+        self.assertNotIn('mutedSources',gui_worker.append_capture_config(dict(muted_sources='computer'),dict(session='s'),local_only=False))
+
     def test_capture_status_exposes_only_valid_per_track_counters(self):
         health={'type':'health','session':'s','mic':{'pcm_bytes':32000,'internal':'hidden'},'remote':{'pcm_bytes':0},'secret':'not-forwarded'}
         self.assertEqual(gui_worker.capture_status_event(health),{'type':'capture_status','session':'s','tracks':{'mic':32000,'remote':0}})

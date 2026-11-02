@@ -33,7 +33,8 @@ final class LocalRecordingSession {
             else {track=(1...999).map{logical+"-g"+String($0)}.first{!reserved.contains($0)} ?? ""}
             guard !track.isEmpty else{throw Failure(code:"source_generation_limit")}
             let store=try RecordingJournal(directory:directory,track:track);stores[logical]=store
-            boxes[logical]=Mailbox(captureClock:clock,totalByteLimit:config.unlimitedSession==true ? nil:Int(config.maxSeconds*32000),journal:store)
+            let box=Mailbox(captureClock:clock,totalByteLimit:config.unlimitedSession==true ? nil:Int(config.maxSeconds*32000),journal:store)
+            box.muteChannel=logical=="mic" ? .microphone:.computer;boxes[logical]=box
         }
         if old.isEmpty {try writeLocalMetadata(config,id:id,directory:directory)}
         else if old["archive_only_before_append"] as? Bool != true,
