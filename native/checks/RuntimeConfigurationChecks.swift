@@ -23,6 +23,7 @@ func runtimeConfigurationChecks() throws -> [String] {
     }
     let env=RuntimeConfiguration.childEnvironment()
     try check(env["ZAICHANG_EDITION"]==RuntimeConfiguration.edition() && env["ZAICHANG_DATA_ROOT"]==RuntimeConfiguration.dataRoot().path,"child_inherits_edition_and_root")
+    try check(env["PYTHONDONTWRITEBYTECODE"]=="1","child_python_cannot_write_into_signed_bundle")
     try check(RuntimeConfiguration.bailianService==(RuntimeConfiguration.standalone ? "com.joesang.zaichang.standalone.bailian":"com.joesang.meeting-assistant.bailian"),"existing_bailian_service")
     try check(RuntimeConfiguration.identityService==(RuntimeConfiguration.standalone ? "com.zaichang.app.identity-v2":"com.joesang.meeting-assistant.identity-v2"),"identity_service_isolation")
     return checks

@@ -65,6 +65,8 @@ enum RuntimeConfiguration {
         var env=ProcessInfo.processInfo.environment
         env["ZAICHANG_DATA_ROOT"]=dataRoot().path
         env["ZAICHANG_EDITION"]=standalone ? "standalone":"joe"
+        // Python must never write bytecode into the signed bundle: one .pyc breaks its seal.
+        env["PYTHONDONTWRITEBYTECODE"]="1"
         return env
     }
 }
