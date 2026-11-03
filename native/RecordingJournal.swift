@@ -295,7 +295,8 @@ final class RecordingJournal {
     // Admission is measured in PCM bytes, not callback count (10 ms callbacks
     // previously exhausted 256 slots in 2.56 seconds). Consumers never share
     // this writer queue. Keep a bounded 65 second reservoir per active source.
-    private let maxPendingPCMBytes=2*1024*1024
+    // About seventeen minutes of one track: writes waiting for an overloaded disk or CPU are kept, not refused.
+    private let maxPendingPCMBytes=32*1024*1024
     private var pendingPCMBytes=0;private var pendingPackets=0;private var peakPendingPCMBytes=0
     private var closing=false;private var checkpointScheduled=false;private var checkpointWrites=0
     private var processingError:String?;private var previousProcessingError:String?
@@ -312,7 +313,7 @@ final class RecordingJournal {
     private var lastSpaceCheck = -Double.infinity;private var bytesSinceSpaceCheck=0
     init(directory:URL,track:String,maxBytes:Int=512*1024*1024,freeSpace:(()->Int64)?=nil,alignCaptureTime:Bool=false,beforeWrite:(()->Void)?=nil)throws {
         guard isMeetingAudioTrack(track),maxBytes>0 else{throw Failure(code:"cache_scope_invalid")}
-        self.directory=directory;self.track=track;self.alignCaptureTime=alignCaptureTime;self.maxBytes=maxBytes;queue=DispatchQueue(label:"meeting.record-journal."+track,qos:.userInitiated)
+        self.directory=directory;self.track=track;self.alignCaptureTime=alignCaptureTime;self.maxBytes=maxBytes;queue=DispatchQueue(label:"meeting.record-journal."+track,qos:.userInteractive)
         transcriptQueue=DispatchQueue(label:"meeting.transcript-journal."+track,qos:.utility)
         self.beforeWrite=beforeWrite
         self.freeSpace=freeSpace ?? {let values=try? FileManager.default.attributesOfFileSystem(forPath:directory.path);return (values?[.systemFreeSize] as? NSNumber)?.int64Value ?? 0}

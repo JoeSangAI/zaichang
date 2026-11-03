@@ -59,6 +59,14 @@ def app_is_running() -> bool:
     return any(Path(name.strip()).name == "MeetingAssistant" for name in output.splitlines())
 
 
+def models_id(runtime: Path) -> str:
+    digest = hashlib.sha256()
+    for folder in ("native/local-speaker-install", "native/local-embedding-install"):
+        for path in sorted(p for p in (runtime / folder).rglob("*") if p.is_file()):
+            digest.update(f"{path.relative_to(runtime)}\0{sha(path)}\n".encode())
+    return digest.hexdigest()
+
+
 def copy_runtime(runtime: Path) -> dict[str, str]:
     runtime.mkdir(parents=True, exist_ok=True)
     result = {}
@@ -95,6 +103,10 @@ def copy_runtime(runtime: Path) -> dict[str, str]:
     shutil.copy2(embedding / "3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx",
                  embedding_target / "3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx")
     shutil.copy2(embedding / "c-api.h", embedding_target / "c-api.h")
+    changelog = next(path for path in (ROOT / "CHANGELOG.md", ROOT / "public/CHANGELOG.md") if path.is_file())
+    shutil.copy2(changelog, runtime / "CHANGELOG.md")
+    # An installed copy with these same models fetches only the small update package.
+    (runtime / "models.id").write_text(models_id(runtime) + "\n")
     for source in [ROOT / name for name in PYTHON_MODULES]:
         compile(source.read_text(encoding="utf-8"), str(source), "exec")
     return result
@@ -208,7 +220,17 @@ def verify(stage: Path) -> dict:
             "source_bundle_embedded": False}
 
 
-def build_stage() -> dict:
+def sign(stage: Path, identity: str) -> None:
+    # A release keeps one identity from version to version, which is what keeps the system permissions.
+    # Nothing may rewrite the models here: the small update package relies on their bytes staying the same.
+    if identity == "-":
+        run("codesign", "--force", "--deep", "--sign", "-", str(stage))
+        return
+    run("codesign", "--force", "--sign", identity, "--timestamp=none", str(stage / HELPER_RELATIVE))
+    run("codesign", "--force", "--sign", identity, "--timestamp=none", str(stage))
+
+
+def build_stage(identity: str = "-") -> dict:
     if platform.system() != "Darwin" or platform.machine() != "arm64":
         raise SystemExit("在场公开版需要安装在 macOS 15+ 的 Apple Silicon 电脑上。")
     if sys.version_info < (3, 12):
@@ -233,7 +255,7 @@ def build_stage() -> dict:
     build_sources = json.loads((WORK / "source-receipt.json").read_text())
     result = rewrite_bundle(STAGE, {name: sha(ROOT / name) for name in PYTHON_MODULES})
     result.update(build_sources=build_sources, install_source=str(QA_APP))
-    run("codesign", "--force", "--deep", "--sign", "-", str(STAGE))
+    sign(STAGE, identity)
     result.update(verify(STAGE))
     STAGE.rename(APP)
 
@@ -288,9 +310,10 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--destination", type=Path, default=default_destination())
     parser.add_argument("--build-only", action="store_true", help="Build and verify the bundle without installing it")
+    parser.add_argument("--sign", default="-", help="Signing identity for a release build; a local install signs ad hoc")
     args = parser.parse_args()
     if args.build_only:
-        result = build_stage()
+        result = build_stage(args.sign)
         print(json.dumps(result, ensure_ascii=False, indent=2))
     else:
         install(args.destination)

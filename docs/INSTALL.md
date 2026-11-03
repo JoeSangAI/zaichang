@@ -1,10 +1,24 @@
 # 在 macOS 上安装
 
-目前提供源码安装。需要一台 Apple Silicon Mac、macOS 15 或更新版本、Python 3.12、Xcode Command Line Tools 和 Swift 6。Codex 助理还需要安装并登录 Codex CLI。
+需要一台 Apple Silicon Mac、macOS 15 或更新版本和 Python 3.12。Codex 助理还需要安装并登录 Codex CLI。
+
+## 安装正式版
+
+1. 从 [Python for macOS](https://www.python.org/downloads/macos/) 下载 Python 3.12 的 universal2 安装器并安装，确认 `/usr/local/bin/python3 --version` 显示 3.12。
+2. 克隆本仓库，在仓库目录运行：
+
+   ```sh
+   /usr/local/bin/python3 -m pip install -r requirements.txt
+   bash install.sh
+   ```
+
+脚本从 GitHub 下载签好名的安装包，校验哈希和签名后装到 `~/Applications/在场.app`。以后的新版本在场会自己下载，退出时换上，系统权限不用重来。在场没有做 Apple 公证，所以要用脚本安装；直接下载的 app 会被系统拦下。
 
 也可直接请你的 agent 按 [AGENT_SETUP.md](AGENT_SETUP.md) 安装。
 
-## 首次安装
+## 从源码构建
+
+只在你要改代码时才需要。还需要 Xcode Command Line Tools 和 Swift 6。
 
 1. 安装 Python 3.12。若本机没有合适版本，可从 [Python for macOS](https://www.python.org/downloads/macos/) 下载 Python 3.12 的 universal2 安装器。
 2. 安装 Xcode Command Line Tools。若尚未安装，在终端运行 `xcode-select --install` 并按 macOS 提示完成。
@@ -30,15 +44,15 @@
 
 应用安装到 `~/Applications/在场.app`，会议数据保存在 `~/Library/Application Support/ZaichangStandalone`。这份安装使用独立数据目录和应用设置，不会替换其他版本的在场。首次启动时，macOS 会在你启用相应声音来源时请求权限；只有按下应用里的“开始录音”后才会开始录音。
 
-源码构建使用本机临时签名，不包含 Apple Developer ID 签名或公证。应用更新通过拉取新源码并重新运行安装脚本完成，不会自动更新。
+源码构建使用本机临时签名。它也会提示新版本，但只在你确认后才换成正式版，这一次系统会重新询问权限；要继续用自己编译的版本，就按下面的步骤更新。
 
 首次打开在场时会有引导，依次连接转写服务和助理；也可以从菜单「使用引导…」再次打开。
 
 转写需要你在应用中配置自己的语音服务凭据。Codex 助理使用你已登录的 Codex CLI 账号和本机权限；Codex 能访问的项目文件取决于该账号和当前机器的配置。
 
-## 更新
+## 更新源码构建
 
-在已克隆的仓库目录中运行：
+正式版会自己更新，不用做什么。自己编译的版本在已克隆的仓库目录中运行：
 
 ```sh
 git pull

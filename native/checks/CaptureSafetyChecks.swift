@@ -648,60 +648,36 @@ func captureSafetyChecks(directory:URL) async throws->[String:Any] {
     precondition(socketCount>=2 && liveConsumer.readCursor==liveStore.bytes() && liveStore.committed("asr")==liveStore.bytes())
     checks.append("paused_live_socket_finishes_saved_audio_then_resumes_same_consumer")
 
-    // Saturation on the microphone conversion queue requests one real pause,
-    // records the frames it could not accept, and leaves the raw mailbox open
-    // long enough to drain callbacks which already passed admission.
+    // A microphone conversion queue that falls behind never pauses or stops the recording: the frames it
+    // could not hold are counted as a gap, the capture stays open, and later audio still reaches the journal.
     do {
         capturePaused=0;captureUploadPaused=0;captureHardwareReady=1
         interrupted=0;captureFinishing=0;captureControlRevision=0
-        let gate=MicrophoneBackpressurePauseGate(),routePause=CaptureInputDeviceChangePause()
-        var requests=0
-        let pause={()->Bool in requests+=1;return routePause.request(reason:"mic_conversion_backpressure")}
-        let overflowBox=Mailbox()
-        for _ in 0..<4 {
-            guard handleMicrophoneConversionBackpressure(gate:gate,frames:2400,sampleRate:24_000,
-                requestPause:pause,mailbox:overflowBox) else{throw Failure(code:"mic_backpressure_pause_rejected")}
+        let gap=MicrophoneConversionGap(),routePause=CaptureInputDeviceChangePause()
+        for _ in 0..<4 {gap.drop(frames:2400,sampleRate:24_000)}
+        guard abs(gap.snapshot().intervalDroppedSeconds-0.4)<0.0001,abs(gap.snapshot().totalDroppedSeconds-0.4)<0.0001 else{
+            throw Failure(code:"mic_backlog_gap_not_counted")
         }
-        guard requests==1 else{throw Failure(code:"mic_backpressure_pause_not_coalesced")}
-        let pressure=gate.snapshot()
-        guard pressure.requested,abs(pressure.intervalDroppedSeconds-0.4)<0.0001 else{
-            throw Failure(code:"mic_backpressure_gap_not_counted")
+        guard routePause.applyPendingPause()==nil,capturePaused==0,captureHardwareReady==1,interrupted==0 else{
+            throw Failure(code:"mic_backlog_paused_the_recording")
         }
-        guard let revision=routePause.applyPendingPause(),capturePaused==1,captureHardwareReady==0,
-              routePause.takeReason(for:revision)=="mic_conversion_backpressure" else{
-            throw Failure(code:"mic_backpressure_pause_not_acknowledgeable")
+        let laterDirectory=directory.appendingPathComponent(UUID().uuidString)
+        let laterStore=try RecordingJournal(directory:laterDirectory,track:"mic-raw",freeSpace:{1_000_000_000},alignCaptureTime:true)
+        let laterClock=CaptureBudgetClock(),laterBox=Mailbox(captureClock:laterClock,journal:laterStore)
+        let tenth=Data(repeating:0x31,count:3200)
+        guard laterBox.put(tenth,at:100.0),laterBox.put(tenth,at:100.5) else{throw Failure(code:"mic_backlog_closed_the_capture")}
+        laterStore.wait()
+        guard (try? laterBox.checkFault()) != nil,laterStore.bytes()==19200 else{throw Failure(code:"mic_backlog_gap_not_kept_in_time")}
+        gap.resetForResume()
+        guard gap.snapshot().intervalDroppedSeconds==0,abs(gap.snapshot().totalDroppedSeconds-0.4)<0.0001 else{
+            throw Failure(code:"mic_backlog_resume_not_reset")
         }
-        let drainDirectory=directory.appendingPathComponent(UUID().uuidString)
-        let drainStore=try RecordingJournal(directory:drainDirectory,track:"mic-raw",freeSpace:{1_000_000_000})
-        let pending=Data(repeating:0x31,count:3200)
-        let pausedClock=CaptureBudgetClock();pausedClock.mark(499.0);pausedClock.pause(at:500.0)
-        let drainBox=Mailbox(captureClock:pausedClock,journal:drainStore)
-        guard pausedClock.isPaused,
-              !writeCapturedPCMIfAdmitted(pending,at:500,to:drainBox),
-              writeQueuedMicrophonePCM(pending,at:499.9,to:drainBox),
-              !writeQueuedMicrophonePCM(pending,at:500.1,to:drainBox),
-              !drainBox.put(pending,at:500.1) else{
-            throw Failure(code:"mic_backpressure_boundary_failed")
-        }
-        drainStore.wait()
-        guard drainStore.bytes()==pending.count else{throw Failure(code:"mic_backpressure_pending_audio_dropped")}
-        recordingPauseHandler(SIGUSR2);captureHardwareReady=1
-        gate.resetForResume()
-        guard handleMicrophoneConversionBackpressure(gate:gate,frames:2400,sampleRate:24_000,
-              requestPause:pause,mailbox:overflowBox),requests==2 else{
-            throw Failure(code:"mic_backpressure_resume_not_reset")
-        }
-        guard let secondRevision=routePause.applyPendingPause(),
-              routePause.takeReason(for:secondRevision)=="mic_conversion_backpressure" else{
-            throw Failure(code:"mic_backpressure_second_pause_missing")
-        }
-        recordingPauseHandler(SIGUSR2);captureHardwareReady=1
-        let fallbackGate=MicrophoneBackpressurePauseGate(),fallbackBox=Mailbox()
-        guard !handleMicrophoneConversionBackpressure(gate:fallbackGate,frames:2400,sampleRate:24_000,
-              requestPause:{false},mailbox:fallbackBox) else{throw Failure(code:"mic_backpressure_fallback_swallowed")}
-        do {try fallbackBox.checkFault();throw Failure(code:"mic_backpressure_fallback_not_fatal")}
-        catch let error as Failure where error.code=="mic_conversion_backpressure" {}
-        checks.append("mic_conversion_backpressure_pauses_once_marks_exact_gap_drains_admitted_audio_and_resets_on_resume")
+        let budget=MicrophoneConversionBudget()
+        var held:[MicrophoneConversionBudget.Ticket]=[]
+        while let ticket=budget.acquire(frames:4800,sampleRate:48_000,channels:1) {held.append(ticket);if held.count>4000 {break}}
+        guard held.count>=2900 else{throw Failure(code:"mic_backlog_budget_under_minutes")}
+        for ticket in held {budget.release(ticket)}
+        checks.append("mic_backlog_never_pauses_counts_the_gap_keeps_time_and_holds_minutes")
     }
 
     // One helper/cache/session must remain live through two user pause/resume
@@ -1076,7 +1052,7 @@ func captureSafetyChecks(directory:URL) async throws->[String:Any] {
     checks += try await echoReliabilityChecks(directory:directory)
     for frames in [480,4800] {
         let budget=MicrophoneConversionBudget()
-        let count=480000/frames
+        let count=14_400_000/frames  // five minutes at 48 kHz
         let tickets=(0..<count).map{_ in budget.acquire(frames:frames,sampleRate:48000,channels:2)!}
         precondition(budget.acquire(frames:frames,sampleRate:48000,channels:2)==nil)
         for ticket in tickets {budget.release(ticket)}

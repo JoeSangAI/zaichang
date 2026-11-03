@@ -277,45 +277,27 @@ func waitForMicrophoneResume(timeout:Double=1,stillRequested:()->Bool,
 // for conversion capacity. Collapse repeated callbacks into one recoverable
 // pause request while keeping the exact duration of buffers that could not be
 // admitted for conversion.
-final class MicrophoneBackpressurePauseGate {
-    private enum State { case idle, pending, accepted, rejected }
+/// What the microphone lost when its conversion queue fell minutes behind. Recording never stops for it
+/// (transcription may lag, the recording must not stop): the stretch is left out, the next
+/// buffer's capture time pads it with silence in the journal, and the meeting records a gap instead.
+final class MicrophoneConversionGap {
     private let lock=NSLock()
-    private var state=State.idle
     private var intervalDroppedSeconds=0.0
     private var totalDroppedSeconds=0.0
 
-    @discardableResult func report(droppedSeconds:Double,request:()->Bool)->Bool {
-        lock.lock()
-        let duration=droppedSeconds.isFinite ? max(0,droppedSeconds):0
-        intervalDroppedSeconds+=duration;totalDroppedSeconds+=duration
-        switch state {
-        case .accepted: lock.unlock();return true
-        case .rejected: lock.unlock();return false
-        case .pending: lock.unlock();return true
-        case .idle: state = .pending;lock.unlock()
-        }
-        let accepted=request()
-        lock.lock();state=accepted ? .accepted:.rejected;lock.unlock()
-        return accepted
+    func drop(frames:Int,sampleRate:Double) {
+        let seconds=sampleRate.isFinite && sampleRate>0 ? Double(max(0,frames))/sampleRate:0
+        lock.lock();intervalDroppedSeconds+=seconds;totalDroppedSeconds+=seconds;lock.unlock()
     }
 
     func resetForResume() {
-        lock.lock();state = .idle;intervalDroppedSeconds=0;lock.unlock()
+        lock.lock();intervalDroppedSeconds=0;lock.unlock()
     }
 
-    func snapshot()->(requested:Bool,intervalDroppedSeconds:Double,totalDroppedSeconds:Double) {
+    func snapshot()->(intervalDroppedSeconds:Double,totalDroppedSeconds:Double) {
         lock.lock();defer{lock.unlock()}
-        return(state != .idle,intervalDroppedSeconds,totalDroppedSeconds)
+        return(intervalDroppedSeconds,totalDroppedSeconds)
     }
-}
-
-@discardableResult func handleMicrophoneConversionBackpressure(
-    gate:MicrophoneBackpressurePauseGate,frames:Int,sampleRate:Double,
-    requestPause:()->Bool,mailbox:Mailbox)->Bool {
-    let seconds=sampleRate.isFinite && sampleRate>0 ? Double(max(0,frames))/sampleRate:0
-    let accepted=gate.report(droppedSeconds:seconds,request:requestPause)
-    if !accepted {mailbox.fail("mic_conversion_backpressure")}
-    return accepted
 }
 
 @discardableResult func writeQueuedMicrophonePCM(_ pcm:Data,at timestamp:Double,to mailbox:Mailbox)->Bool {
@@ -404,27 +386,29 @@ final class MicrophoneConversionBudget {
     private var seconds=0.0,peak=0.0
     private var bytes=0,packets=0
     func acquire(frames:Int,sampleRate:Double,channels:Int)->Ticket? {
-        let memoryLimit=32*1024*1024
+        // Minutes, not seconds: on an overloaded Mac this queue can go unscheduled for a long time,
+        // and everything it holds is audio that would otherwise be lost.
+        let memoryLimit=256*1024*1024
         guard frames>0,channels>0,channels<=256,sampleRate.isFinite,sampleRate>0,
               frames<=memoryLimit/(8*channels) else{return nil}
         let ticket=Ticket(seconds:Double(frames)/sampleRate,bytes:frames*channels*8)
         lock.lock();defer{lock.unlock()}
-        guard seconds+ticket.seconds<=10.000001,bytes+ticket.bytes<=memoryLimit,packets<4096 else{return nil}
+        guard seconds+ticket.seconds<=300.000001,bytes+ticket.bytes<=memoryLimit,packets<65536 else{return nil}
         seconds+=ticket.seconds;bytes+=ticket.bytes;packets+=1;peak=max(peak,seconds)
         return ticket
     }
     func release(_ ticket:Ticket) {lock.lock();seconds=max(0,seconds-ticket.seconds);bytes=max(0,bytes-ticket.bytes);packets=max(0,packets-1);lock.unlock()}
-    func snapshot()->[String:Any] {lock.lock();defer{lock.unlock()};return ["pending_seconds":seconds,"peak_seconds":peak,"pending_bytes_upper_bound":bytes,"capacity_seconds":10]}
+    func snapshot()->[String:Any] {lock.lock();defer{lock.unlock()};return ["pending_seconds":seconds,"peak_seconds":peak,"pending_bytes_upper_bound":bytes,"capacity_seconds":300]}
 }
 
 final class Microphone {
     let engine = AVAudioEngine()
-    let queue = DispatchQueue(label: "meeting.mic.convert",qos:.userInitiated)
+    let queue = DispatchQueue(label: "meeting.mic.convert",qos:.userInteractive)
     private let control = DispatchQueue(label:"meeting.mic.lifecycle",qos:.userInitiated)
     private var generation=UUID()
     private var restartAttempts=0,configurationNotifications=0
     let capacity = MicrophoneConversionBudget()
-    private let backpressurePause=MicrophoneBackpressurePauseGate()
+    private let backpressurePause=MicrophoneConversionGap()
     private let diagnosticLock=NSLock()
     private var deviceInfo:[String:Any]=[:]
     private var inputSamples=0,inputNonzero=0,inputCallbacks=0
@@ -463,7 +447,6 @@ final class Microphone {
         return ["input_device":deviceInfo,"configuration_notifications":configurationNotifications,"engine_restarts":restartAttempts,"input_callback_count":inputCallbacks,
                 "input_samples":inputSamples,"input_nonzero_samples":inputNonzero,
                 "input_peak":inputPeak,"input_rms":inputRMS,"input_channels":lastChannels,"copied_input_channels":copiedChannels,"selected_input_channel":selectedChannel,"channel_policy":"live_channel_without_phase_cancellation",
-                "conversion_backpressure_pause_requested":pressure.requested,
                 "conversion_backpressure_dropped_seconds":pressure.intervalDroppedSeconds,
                 "conversion_backpressure_dropped_seconds_total":pressure.totalDroppedSeconds]
     }
@@ -502,10 +485,7 @@ final class Microphone {
         input.installTap(onBus: 0, bufferSize: AVAudioFrameCount(format.sampleRate * 0.1), format: format) { buffer, time in
             guard captureAdmissionOpen() else { return }
             guard let ticket=self.capacity.acquire(frames:Int(buffer.frameLength),sampleRate:format.sampleRate,channels:Int(format.channelCount)) else {
-                _=handleMicrophoneConversionBackpressure(gate:self.backpressurePause,
-                    frames:Int(buffer.frameLength),sampleRate:format.sampleRate,
-                    requestPause:{self.recoverableFaultHandler?("mic_conversion_backpressure") ?? false},
-                    mailbox:box)
+                self.backpressurePause.drop(frames:Int(buffer.frameLength),sampleRate:format.sampleRate)
                 return
             }
             let hardwareChannels=hardwareChannelEnergy(buffer)
@@ -731,7 +711,7 @@ final class ApplicationTap {
     var device: AudioObjectID = 0
     var io: AudioDeviceIOProcID?
     var selectedPIDs: [pid_t] = []
-    let queue = DispatchQueue(label: "meeting.app.tap",qos:.userInitiated)
+    let queue = DispatchQueue(label: "meeting.app.tap",qos:.userInteractive)
     var outputClock: AudioObjectID = 0
     var excludedAudioObjects:[AudioObjectID]=[]
     var capturedInputFormat:AVAudioFormat?

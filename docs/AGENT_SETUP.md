@@ -2,7 +2,7 @@
 
 用户说“帮我安装在场”时，从这里执行。默认由 Codex 完成；其他有本机终端能力的 agent 也可按同样步骤操作。先完成基础安装，再主动推荐下面的可选增强，每项获得用户同意后才配置。不要因为用户暂时不配置增强而阻止使用。
 
-仓库应放在用户目录下（例如 `~/zaichang` 或 `~/Documents/zaichang`），不要放在 `/tmp`、`/private/tmp` 等系统临时目录：在场的数据安全检查会拒绝这些目录的路径别名。在仓库根目录执行命令，记录每步退出状态。安装涉及联网下载、编译和本机临时签名；先告诉用户这些操作。已有应用运行时，提醒用户保存并退出，再更新。不要替用户开始录音，不改系统隐私授权，不读取凭据文件或钥匙串。
+仓库应放在用户目录下（例如 `~/zaichang` 或 `~/Documents/zaichang`），不要放在 `/tmp`、`/private/tmp` 等系统临时目录：在场的数据安全检查会拒绝这些目录的路径别名。在仓库根目录执行命令，记录每步退出状态。安装会从 GitHub 下载签好名的安装包；先告诉用户。已有应用运行时，提醒用户保存并退出，再更新。不要替用户开始录音，不改系统隐私授权，不读取凭据文件或钥匙串。
 
 ## 必做：逐步安装并核验
 
@@ -11,41 +11,40 @@
    ```sh
    uname -m
    sw_vers -productVersion
-   python3 --version
    /usr/local/bin/python3 --version
-   swift --version
-   xcode-select -p
    ```
 
-   必须是 Apple Silicon（`arm64`）、macOS 15+、Python 3.12、Swift 6、已安装 Xcode Command Line Tools。应用工作进程使用 `/usr/local/bin/python3`，也须确认它是可用的 Python 3.12；推荐 INSTALL 所述官方安装器。若缺少 CLT，运行 `xcode-select --install` 后由用户完成系统安装；Python 安装方法见 [INSTALL](INSTALL.md)。修复缺项后重查，不继续带病构建。
+   必须是 Apple Silicon（`arm64`）、macOS 15+。应用工作进程使用 `/usr/local/bin/python3`，须确认它是可用的 Python 3.12；安装方法见 [INSTALL](INSTALL.md)。修复缺项后重查，不继续带病安装。
 
 2. 安装 Python 依赖：
 
    ```sh
-   python3 -m pip install -r requirements.txt
-   python3 -c "import certifi, numpy; print('certifi', certifi.__version__, 'numpy', numpy.__version__)"
+   /usr/local/bin/python3 -m pip install -r requirements.txt
+   /usr/local/bin/python3 -c "import certifi, numpy; print('certifi', certifi.__version__, 'numpy', numpy.__version__)"
    ```
 
-   第二条退出 0、能打印两个版本即可继续。只检查在场需要的这两个包；用户环境里其他工具之间的版本冲突与在场无关，不要用全局 `pip check` 判断，也不要为此改动用户的其他包。使用与后续构建相同的 Python；如果系统拒绝全局安装，采用 INSTALL 中要求的 Python 3.12 安装器，并确认与 `/usr/local/bin/python3` 一致，不用 `sudo pip`。pip 自身检查更新时打印的证书警告可以忽略；只有依赖安装失败、或上面的导入命令报错时，若错误是访问 PyPI 的证书校验失败（`CERTIFICATE_VERIFY_FAILED`），请用户运行 Python 安装目录里的 `Install Certificates.command`（例如 `open "/Applications/Python 3.12/Install Certificates.command"`）后重试。
+   第二条退出 0、能打印两个版本即可继续。只检查在场需要的这两个包；用户环境里其他工具之间的版本冲突与在场无关，不要用全局 `pip check` 判断，也不要为此改动用户的其他包。不用 `sudo pip`。pip 自身检查更新时打印的证书警告可以忽略；只有依赖安装失败、或上面的导入命令报错时，若错误是访问 PyPI 的证书校验失败（`CERTIFICATE_VERIFY_FAILED`），请用户运行 Python 安装目录里的 `Install Certificates.command`（例如 `open "/Applications/Python 3.12/Install Certificates.command"`）后重试。
 
-3. 下载并验证模型及 SDK（约 570 MB，首次需要网络）：
+3. 下载并安装正式版（约 200 MB，首次需要能访问 GitHub）：
 
    ```sh
-   python3 scripts/bootstrap_dependencies.py
+   bash install.sh
    ```
 
-   退出 0 表示固定清单、大小与哈希验证通过。失败时修复网络或提示中指明的依赖，重跑会复用已验证的文件，不跳过校验。
+   脚本校验哈希和签名，装到 `~/Applications/在场.app`（已有 `/Applications/在场.app` 时更新那一份），不会关闭正在运行的在场：提示已打开时请用户保存并退出后重跑。任一步失败就停止。
 
-4. 构建、离线验收、安装：
+4. 核验：
 
    ```sh
-   python3 scripts/install_standalone.py
-   test -x "$HOME/Applications/在场.app/Contents/MacOS/MeetingAssistant"
-   /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$HOME/Applications/在场.app/Contents/Info.plist"
-   codesign --verify --deep --strict "$HOME/Applications/在场.app"
+   APP="$HOME/Applications/在场.app"; [ -d "$APP" ] || APP="/Applications/在场.app"
+   test -x "$APP/Contents/MacOS/MeetingAssistant"
+   /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist"
+   codesign --verify --deep --strict "$APP"
    ```
 
-   安装器调用 `build_offline.py --edition standalone` 和 `offline_check.py --edition standalone`；任一步失败就停止。首次构建加离线验收通常需要十几分钟，期间会出现大量 Swift 编译警告（并发兼容、第三方 SDK 弃用接口等），以命令退出状态为准。离线验收通过只说明程序本身正常，不代表麦克风权限、真实录音或云端转写已经验证。确认版本为 `0.3.0`、签名检查退出 0。数据目录为 `~/Library/Application Support/ZaichangStandalone`；安装不会清空会议资料。
+   版本应与 GitHub 最新 Release 一致，签名检查退出 0。这不代表麦克风权限、真实录音或云端转写已经验证。数据目录为 `~/Library/Application Support/ZaichangStandalone`；安装不会清空会议资料。以后的版本在场会自己下载并在退出时换上，不用再运行这些步骤。
+
+   只有用户明确要求从源码构建时，才改走 [INSTALL](INSTALL.md) 的源码安装。
 
 5. 检查本机 Codex：
 

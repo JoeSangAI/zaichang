@@ -182,7 +182,7 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
         layoutWorkspace();updateUI();configureVoiceprintRecommendations();configureMeetingContext();reconcileDeletedMeetingProjections()
         showMissingCredentialHintIfNeeded()
         if previewRenderOnly {return}
-        reloadLibrary(selectRecent:true);presentFirstRunGuideIfNeeded()
+        reloadLibrary(selectRecent:true);presentFirstRunGuideIfNeeded();AppUpdater.shared.start(owner:self)
         if !mock && Bundle.main.object(forInfoDictionaryKey:"LocalRecordingAllowed") as? Bool != true {refreshCloudBudget()}
         if !mock && Bundle.main.object(forInfoDictionaryKey:"LocalRecordingAllowed") as? Bool==true {return}
         if trialCandidate {if !mock && Bundle.main.object(forInfoDictionaryKey:"LocalRecordingAllowed") as? Bool != true && remainingSeconds()<=0 {newRecordingPending=true;diagnostic.stringValue="正在连接转写服务";updateUI()};return}
@@ -2024,7 +2024,7 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
         for (name,target) in targets {guard let target=target,let bitmap=target.bitmapImageRepForCachingDisplay(in:target.bounds) else{continue};target.effectiveAppearance.performAsCurrentDrawingAppearance { target.cacheDisplay(in:target.bounds,to:bitmap) };let image=NSImage(size:target.bounds.size);image.lockFocus();target.effectiveAppearance.performAsCurrentDrawingAppearance { NSColor.windowBackgroundColor.setFill();NSBezierPath(rect:NSRect(origin:.zero,size:target.bounds.size)).fill();bitmap.draw(in:NSRect(origin:.zero,size:target.bounds.size)) };image.unlockFocus();guard let tiff=image.tiffRepresentation,let opaque=NSBitmapImageRep(data:tiff) else{continue};if let png=opaque.representation(using:.png,properties:[:]) {try? png.write(to:directory.appendingPathComponent(stamp+"-"+name+".png"))}}
     }
     func installMenus() {
-        let menu=NSMenu();let item=NSMenuItem();menu.addItem(item);let appMenu=NSMenu();let config=appMenu.addItem(withTitle:"设置…",action:#selector(showSettings),keyEquivalent:",");config.target=self;let guideItem=appMenu.addItem(withTitle:"使用引导…",action:#selector(showFirstRunGuide),keyEquivalent:"");guideItem.target=self;appMenu.addItem(.separator());let quit=appMenu.addItem(withTitle:"退出在场",action:#selector(quitApplication),keyEquivalent:"q");quit.target=self;item.submenu=appMenu
+        let menu=NSMenu();let item=NSMenuItem();menu.addItem(item);let appMenu=NSMenu();let config=appMenu.addItem(withTitle:"设置…",action:#selector(showSettings),keyEquivalent:",");config.target=self;let guideItem=appMenu.addItem(withTitle:"使用引导…",action:#selector(showFirstRunGuide),keyEquivalent:"");guideItem.target=self;if AppUpdater.enabled {let updateItem=appMenu.addItem(withTitle:"检查更新…",action:#selector(checkForUpdates),keyEquivalent:"");updateItem.target=self};appMenu.addItem(.separator());let quit=appMenu.addItem(withTitle:"退出在场",action:#selector(quitApplication),keyEquivalent:"q");quit.target=self;item.submenu=appMenu
         let editItem=NSMenuItem();menu.addItem(editItem);let edit=NSMenu(title:"编辑");edit.addItem(withTitle:"剪切",action:#selector(NSText.cut(_:)),keyEquivalent:"x");edit.addItem(withTitle:"复制",action:#selector(NSText.copy(_:)),keyEquivalent:"c");let paste=edit.addItem(withTitle:"粘贴",action:#selector(paste(_:)),keyEquivalent:"v");paste.target=self;edit.addItem(withTitle:"全选",action:#selector(NSText.selectAll(_:)),keyEquivalent:"a");editItem.submenu=edit
         let find=edit.addItem(withTitle:"搜索原文…",action:#selector(showDocumentSearch),keyEquivalent:"f");find.target=self
         let recovery=edit.addItem(withTitle:"历史会议…",action:#selector(showRecoveries),keyEquivalent:"");recovery.target=self
@@ -2367,6 +2367,7 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
         return ["type":"offline_native_workflow","native_handler_checks":checks,"python_workflow_checks":document["checks"]!,"real_model_pipeline":fixture.evidence,"round":document["round"]!,"window_opened":false,"screen_mouse_keyboard":false,"real_keychain":false,"financial_network":false,"capture":false,"real_voiceprint_quality_verified":false,"fake_archive_removed":true]
     }
     @MainActor static func main() async {
+        if CommandLine.arguments.contains("--update-probe") {print(AppUpdater.current);exit(0)}
         if runMeetingNotesChecks() {return}
         if CommandLine.arguments.count>=2,Credential.offline {
             let flag=CommandLine.arguments[1]
