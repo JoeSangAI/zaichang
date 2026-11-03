@@ -79,25 +79,36 @@ extension Delegate {
         meetingMinutesBusy = true
         let generation = meetingDocumentGeneration, title = meetingTitle
         diagnostic.stringValue = "正在生成会议纪要"
-        meetingMinutesCredentialJob.run(timeout: 15, work: { try Credential.load() }) { [weak self] result in
+        meetingMinutesCredentialJob.run(timeout: Credential.promptTimeout, work: { try Credential.load() }) { [weak self] result in
             guard let self, self.currentCacheID == id, self.meetingDocumentGeneration == generation else { return }
-            guard case .success(let key?) = result, !key.isEmpty else {
-                self.meetingMinutesBusy = false
-                self.showMinuteError("去设置里填写百炼密钥")
-                return
+            let key: String
+            switch result {
+            case .success(let found?) where !found.isEmpty: key = found
+            case .success: self.meetingMinutesBusy = false; self.showMinuteError("去设置里填写百炼密钥"); return
+            case .failure(let error): self.meetingMinutesBusy = false; self.showMinuteError(Credential.failureText(error)); return
             }
-            self.meetingMinutesTask = Task { [weak self] in
-                do {
-                    let json = try await DashScopeMeetingMinutesClient(apiKey: key).complete(request)
-                    let markdown = try MeetingMinutes.validateAndRender(json, title: title, finalTranscript: evidence)
-                    guard let self, !Task.isCancelled, self.currentCacheID == id, self.meetingDocumentGeneration == generation else { return }
-                    self.meetingMinutesTask = nil
-                    self.saveMeetingMinutes(markdown)
-                } catch {
-                    guard let self, self.currentCacheID == id, self.meetingDocumentGeneration == generation else { return }
-                    self.meetingMinutesTask = nil; self.meetingMinutesBusy = false
-                    self.showMinuteError("纪要生成失败：\(error.localizedDescription)")
-                }
+            self.requestMeetingMinutes(key: key, request: request, evidence: evidence, title: title, id: id, generation: generation)
+        }
+    }
+
+    static func dashScopeMinutes(key: String, request: MeetingMinutesRequest) async throws -> String {
+        try await DashScopeMeetingMinutesClient(apiKey: key).complete(request)
+    }
+
+    func requestMeetingMinutes(key: String, request: MeetingMinutesRequest, evidence: String, title: String, id: String, generation: Int) {
+        let complete = meetingMinutesCompletion
+        // The save panel and the error alert are AppKit: off the main thread they crash the app.
+        meetingMinutesTask = Task { @MainActor [weak self] in
+            do {
+                let json = try await complete(key, request)
+                let markdown = try MeetingMinutes.validateAndRender(json, title: title, finalTranscript: evidence)
+                guard let self, !Task.isCancelled, self.currentCacheID == id, self.meetingDocumentGeneration == generation else { return }
+                self.meetingMinutesTask = nil
+                self.saveMeetingMinutes(markdown)
+            } catch {
+                guard let self, !Task.isCancelled, self.currentCacheID == id, self.meetingDocumentGeneration == generation else { return }
+                self.meetingMinutesTask = nil; self.meetingMinutesBusy = false
+                self.showMinuteError("纪要生成失败：\(error.localizedDescription)")
             }
         }
     }

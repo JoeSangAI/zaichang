@@ -593,7 +593,7 @@ extension Delegate {
             request["cloud_session_confirmed"]=true
             if qaFixture {request["key"]="offline-fixture";startWorker(nil,overrideRequest:request);return}
             credentialReadJob.onStateChange={ [weak self] in self?.updateUI() }
-            credentialReadJob.run(timeout:15,work:{try Credential.load()}){[weak self] result in
+            credentialReadJob.run(timeout:Credential.promptTimeout,work:{try Credential.load()}){[weak self] result in
                 guard let self else{return}
                 guard self.currentCacheID==item.id,self.phase.phase == .connecting else{
                     // Never drop a continue request silently: say so where the user looks.

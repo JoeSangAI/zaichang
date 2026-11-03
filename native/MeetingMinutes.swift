@@ -107,44 +107,43 @@ enum MeetingMinutes {
 
     /// Validates the structured model response and renders the six-section portable
     /// Markdown document. Quotes and evidence references must be exact transcript
-    /// substrings; proposal language is rejected from the decisions section.
+    /// substrings; proposal language is kept out of the decisions section.
+    /// Each item stands alone: one that fails is left out, so a single miscopied quote
+    /// never costs the whole document. Only a broken response or one with nothing left fails.
     static func validateAndRender(_ response: String, title: String, finalTranscript: String) throws -> String {
         guard !finalTranscript.isEmpty, response.utf8.count <= 512 * 1024,
               let data = response.data(using: .utf8),
               let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              Set(root.keys) == Set(["overview", "topics_and_conclusions", "decisions", "action_items", "open_questions", "key_quotes"]),
-              let overview = root["overview"] as? String, overview.count <= 1600, isSingleLine(overview),
-              let topics = stringArray(root["topics_and_conclusions"], maxCount: 40, maxLength: 1200),
-              let decisions = root["decisions"] as? [[String: Any]], decisions.count <= 40,
-              let actions = root["action_items"] as? [[String: Any]], actions.count <= 60,
-              let questions = stringArray(root["open_questions"], maxCount: 40, maxLength: 1000),
-              let quotes = stringArray(root["key_quotes"], maxCount: 12, maxLength: 500),
-              ([overview] + topics).allSatisfy({ claimSupported($0, by: finalTranscript) }),
-              quotes.allSatisfy({ finalTranscript.range(of: $0) != nil && evidenceEligible(["final": true, "text": $0]) }) else { throw MeetingMinutesError.invalidResponse }
+              let rawOverview = root["overview"] as? String,
+              let rawTopics = root["topics_and_conclusions"] as? [Any],
+              let decisions = root["decisions"] as? [Any],
+              let actions = root["action_items"] as? [Any],
+              let rawQuestions = root["open_questions"] as? [Any],
+              let rawQuotes = root["key_quotes"] as? [Any] else { throw MeetingMinutesError.invalidResponse }
+        let supported = { (text: String) in claimSupported(text, by: finalTranscript) }
+        let overview = nonempty(rawOverview, maxLength: 1600).flatMap { supported($0) ? $0 : nil } ?? ""
+        let topics = strings(rawTopics, maxCount: 40, maxLength: 1200).filter(supported)
+        let questions = strings(rawQuestions, maxCount: 40, maxLength: 1000).filter(supported)
+        let quotes = strings(rawQuotes, maxCount: 12, maxLength: 500)
+            .filter { finalTranscript.range(of: $0) != nil && evidenceEligible(["final": true, "text": $0]) }
 
-        var renderedDecisions: [String] = []
-        for item in decisions {
-            guard Set(item.keys) == Set(["text", "evidence_quote"]),
-                  let text = nonempty(item["text"], maxLength: 1200),
+        func evidenced(_ value: Any, maxLength: Int) -> (item: [String: Any], text: String)? {
+            guard let item = value as? [String: Any],
+                  let text = nonempty(item["text"], maxLength: maxLength),
                   let evidence = nonempty(item["evidence_quote"], maxLength: 500),
                   finalTranscript.range(of: evidence) != nil,
                   evidenceEligible(["final": true, "text": evidence]), claimSupported(text, by: evidence),
-                  !containsProposalLanguage(text), !containsProposalLanguage(evidence) else { throw MeetingMinutesError.invalidResponse }
-            renderedDecisions.append("- " + text)
+                  !containsProposalLanguage(text), !containsProposalLanguage(evidence) else { return nil }
+            return (item, text)
         }
-        var renderedActions: [String] = []
-        for item in actions {
-            guard Set(item.keys) == Set(["text", "owner", "due", "evidence_quote"]),
-                  let text = nonempty(item["text"], maxLength: 1000),
-                  let evidence = nonempty(item["evidence_quote"], maxLength: 500),
-                  finalTranscript.range(of: evidence) != nil,
-                  evidenceEligible(["final": true, "text": evidence]), claimSupported(text, by: evidence),
-                  !containsProposalLanguage(text), !containsProposalLanguage(evidence),
-                  optionalString(item["owner"], maxLength: 160), optionalString(item["due"], maxLength: 120) else { throw MeetingMinutesError.invalidResponse }
-            let owner = (item["owner"] as? String).map { "｜负责人：\($0)" } ?? ""
-            let due = (item["due"] as? String).map { "｜时间：\($0)" } ?? ""
-            renderedActions.append("- \(text)\(owner)\(due)")
+        let renderedDecisions = decisions.prefix(40).compactMap { evidenced($0, maxLength: 1200) }.map { "- " + $0.text }
+        let renderedActions: [String] = actions.prefix(60).compactMap { evidenced($0, maxLength: 1000) }.map { found in
+            let owner = nonempty(found.item["owner"], maxLength: 160).map { "｜负责人：\($0)" } ?? ""
+            let due = nonempty(found.item["due"], maxLength: 120).map { "｜时间：\($0)" } ?? ""
+            return "- \(found.text)\(owner)\(due)"
         }
+        guard !overview.isEmpty || !topics.isEmpty || !renderedDecisions.isEmpty || !renderedActions.isEmpty
+                || !questions.isEmpty || !quotes.isEmpty else { throw MeetingMinutesError.invalidResponse }
         let rendered = [
             "# " + safeTitle(title),
             section("概要", overview),
@@ -158,10 +157,8 @@ enum MeetingMinutes {
         return rendered
     }
 
-    private static func stringArray(_ value: Any?, maxCount: Int, maxLength: Int) -> [String]? {
-        guard let values = value as? [String], values.count <= maxCount,
-              values.allSatisfy({ nonempty($0, maxLength: maxLength) != nil }) else { return nil }
-        return values
+    private static func strings(_ values: [Any], maxCount: Int, maxLength: Int) -> [String] {
+        Array(values.compactMap { nonempty($0, maxLength: maxLength) }.prefix(maxCount))
     }
     private static func nonempty(_ value: Any?, maxLength: Int) -> String? {
         guard let text = value as? String, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, text.count <= maxLength,
@@ -170,11 +167,6 @@ enum MeetingMinutes {
     }
     private static func isSingleLine(_ text: String) -> Bool {
         !text.unicodeScalars.contains(where: { CharacterSet.newlines.contains($0) || CharacterSet.controlCharacters.contains($0) })
-    }
-    private static func optionalString(_ value: Any?, maxLength: Int) -> Bool {
-        if value is NSNull { return true }
-        guard let text = value as? String else { return false }
-        return text.count <= maxLength && !text.isEmpty && isSingleLine(text)
     }
     private static func bullets(_ values: [String]) -> String {
         values.isEmpty ? "未明确" : values.map { $0.hasPrefix("- ") ? $0 : "- " + $0 }.joined(separator: "\n")

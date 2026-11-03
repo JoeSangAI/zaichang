@@ -7,8 +7,25 @@ import Darwin
 enum Credential {
     static var offline:Bool {(Bundle.main.object(forInfoDictionaryKey:"OfflineOnly") as? Bool ?? false) || (CommandLine.arguments.contains("--speaker-ui-self-test") || CommandLine.arguments.contains("--recovery-ui-self-test") || CommandLine.arguments.contains("--cache-async-self-test") || CommandLine.arguments.contains("--speaker-refinement-self-test"))}
     static var service:String {RuntimeConfiguration.bailianService}
+    /// How long a read may wait on the system's keychain prompt: a person typing a password, not a disk.
+    static let promptTimeout:Double=180
+    // One read at a time, and the key is kept once read: a person answering one keychain prompt is never
+    // asked again by the next feature, and the process-wide no-interaction switch never flips under another read.
+    private static let gate=NSLock()
+    private static var remembered:String?
+    static func failureText(_ error:Error)->String {
+        if let code=(error as? Failure)?.code {
+            if code=="cache_io_timeout" {return "等钥匙串授权超时。系统弹窗里输入这台 Mac 的登录密码，选「始终允许」，以后就不会再问。"}
+            if code=="cache_io_still_waiting" {return "系统还在等你处理钥匙串弹窗，处理完再试。"}
+        }
+        let status=(error as NSError).domain=="keychain" ? (error as NSError).code:0
+        if status==Int(errSecUserCanceled) || status==Int(errSecAuthFailed) {return "钥匙串没有放行。再试一次，在弹窗里输入这台 Mac 的登录密码并选「始终允许」。"}
+        return "读取钥匙串里的百炼密钥失败（\(status)），请重试。"
+    }
     static func existenceStatus() -> OSStatus {
         if offline {return errSecItemNotFound}
+        // Asked from the interface: never wait behind a prompt. This query reads no secret and never prompts.
+        if gate.try() {let known=remembered != nil;gate.unlock();if known {return errSecSuccess}}
         let q:[String:Any]=[kSecClass as String:kSecClassGenericPassword,kSecAttrService as String:service,
             kSecAttrAccount as String:"beijing-asr",kSecMatchLimit as String:kSecMatchLimitOne,
             kSecUseAuthenticationUI as String:kSecUseAuthenticationUIFail]
@@ -16,6 +33,10 @@ enum Credential {
     }
     static func load(allowInteraction:Bool=true) throws -> String? {
         if offline {return nil}
+        // A quiet read never waits behind a prompt someone is answering; it simply has no key yet.
+        if allowInteraction {gate.lock()} else if !gate.try() {throw NSError(domain:"keychain",code:Int(errSecInteractionNotAllowed))}
+        defer {gate.unlock()}
+        if let remembered {return remembered}
         var q:[String:Any]=[kSecClass as String:kSecClassGenericPassword,kSecAttrService as String:service,
             kSecAttrAccount as String:"beijing-asr",kSecReturnData as String:true,kSecMatchLimit as String:kSecMatchLimitOne]
         if !allowInteraction {q[kSecUseAuthenticationUI as String]=kSecUseAuthenticationUIFail;SecKeychainSetUserInteractionAllowed(false)}
@@ -23,16 +44,20 @@ enum Credential {
         var result:CFTypeRef?; let status=SecItemCopyMatching(q as CFDictionary,&result)
         if status == errSecItemNotFound { return nil }
         guard status == errSecSuccess, let data=result as? Data else { throw NSError(domain:"keychain",code:Int(status)) }
-        return String(data:data,encoding:.utf8)
+        remembered=String(data:data,encoding:.utf8)
+        return remembered
     }
     static func delete() throws {
         guard !offline else {throw NSError(domain:"offline",code:1)}
+        gate.lock();defer {gate.unlock()}
         let q:[String:Any]=[kSecClass as String:kSecClassGenericPassword,kSecAttrService as String:service,kSecAttrAccount as String:"beijing-asr"]
         let code=SecItemDelete(q as CFDictionary)
         guard code==errSecSuccess || code==errSecItemNotFound else {throw NSError(domain:"keychain-delete",code:Int(code))}
+        remembered=nil
     }
     static func save(_ key:String) throws {
         guard !offline else {throw NSError(domain:"offline",code:1)}
+        gate.lock();defer {gate.unlock()}
         var trusted:SecTrustedApplication?; var access:SecAccess?
         guard SecTrustedApplicationCreateFromPath(Bundle.main.executablePath,&trusted)==errSecSuccess,
               let trusted=trusted, SecAccessCreate("在场百炼凭据" as CFString,[trusted] as CFArray,&access)==errSecSuccess,
@@ -45,6 +70,7 @@ enum Credential {
             status=SecItemUpdate(match as CFDictionary,[kSecValueData as String:Data(key.utf8),kSecAttrAccess as String:access] as CFDictionary)
         }
         guard status == errSecSuccess else {throw NSError(domain:"keychain-save",code:Int(status))}
+        remembered=key
     }
 }
 
@@ -90,7 +116,7 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
     var transcriptReadingRestoreRevision=0;var pendingTranscriptReadingPosition:TranscriptReadingPosition?;var pendingTranscriptSelection:NSRange?
     var timeline=TranscriptTimeline();var segments:[String:[String:Any]] {get {timeline.records} set {timeline.records=newValue;if newValue.isEmpty {fullRefreshGeneration &+= 1;indexedCorrectionRevision=naming.correctionRevision;fullRefreshAtomsReady=false;fullRefreshBuildInFlight=false;timeline.discardedIDs=[];spokenRowsCache=[:];dirtyTranscriptParents=[];dirtyTranscriptQueue=[];dirtyTranscriptQueueIndex=0;fullRefreshBlocksByParent=[:];nonFinalTranscriptParents=[];observedTranscriptTracks=[];observedTranscriptApplications=[];fullTranscriptRefreshPending=false;if let storage=output?.textStorage {incrementalTranscript.reset(storage:storage)}}}};var sequence:[String] {get {timeline.orderedIDs} set {timeline.arrivalOrder=newValue}};var expandedParents:[String:Set<String>]=[:];var transcriptCapacity=TranscriptCapacity();var showWholeTranscript=true;var transcriptLimitHit=false;var processingAudio=false;var asrNetworkStates:[String:String]=[:];var currentCacheID:String? {didSet {if oldValue != currentCacheID {notesPausedRelative=nil;cancelMeetingMinutes();translationCredentialJob.cancel();translationService.bind(cacheID:currentCacheID,root:recoveryBase());translationSwitch?.state=translationService.enabled ? .on:.off};notesController?.bind(currentCacheID)}};var cachedTranscriptionComplete=false;var observedTranscriptTracks=Set<String>();var observedTranscriptApplications=Set<String>()
     lazy var translationService=MeetingTranslationService();var translationSwitch:MeetingTintedSwitch?;let translationCredentialJob=CacheReadJob();var translationStatusLabel:NSTextField?
-    var meetingMinutesBusy=false;var meetingMinutesTask:Task<Void,Never>?;let meetingMinutesCredentialJob=CacheReadJob();let meetingMinutesReferenceJob=CacheReadJob()
+    var meetingMinutesBusy=false;var meetingMinutesTask:Task<Void,Never>?;var meetingMinutesCompletion:(String,MeetingMinutesRequest) async throws->String=Delegate.dashScopeMinutes;let meetingMinutesCredentialJob=CacheReadJob();let meetingMinutesReferenceJob=CacheReadJob()
     var availableCloudSeconds=0;let budgetReadJob=CacheReadJob();let credentialReadJob=CacheReadJob()
     let cacheReadJob=CacheReadJob();let cacheExportJob=CacheReadJob();let recordDetailsJob=CacheReadJob();let cacheWriteQueue=DispatchQueue(label:"meeting.cache.writes");
     var localOnlyMode=false;var modeUserSelected=false;var recordingModePicker:NSPopUpButton?;var exportButton:NSButton?;var startupWorkerFixture:(([String:Any])->Void)?;var startupCredentialFixture:(()throws->String?)?
@@ -108,6 +134,9 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
     var pendingAppendCaptureID:String?
     // Times of automatic resumes after a microphone change; bounds a flapping device.
     var deviceAutoResumeTimes:[Double]=[]
+    // A pause left alone this long closes the meeting through the same finish path
+    // as 新会议, so titles, speakers and the archive settle without a stop button.
+    var pauseAutoFinishSeconds:Double=15*60;var pausedSince:Date?;var pauseAutoFinishTimer:Timer?
     var replacing=false;var editing=false;var fixture:NSPopUpButton!
     let fixtureBoard=NSPasteboard(name:NSPasteboard.Name("com.joesang.meeting-assistant.validation-only"))
     let fixtures=["fake",String(repeating:"x",count:16),String(repeating:"x",count:32),String(repeating:"x",count:64),String(repeating:"x",count:128),"  fake_key  \n","fake-_/+.=:()", "fake\ninside"]
@@ -174,6 +203,7 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
         mock=Credential.offline || CommandLine.arguments.contains("--mock");humanIdentityAuthorized=Bundle.main.object(forInfoDictionaryKey:"HumanIdentityUseAuthorized") as? Bool ?? false
         if let path=Bundle.main.resourcePath,let icon=NSImage(contentsOfFile:path+"/"+(Bundle.main.object(forInfoDictionaryKey:"CFBundleIconFile") as? String ?? "MeetingAssistant.icns")) {NSApp.applicationIconImage=icon}
         restoreSidebarWidth();buildWorkspace()
+        NSWorkspace.shared.notificationCenter.addObserver(self,selector:#selector(systemDidWake),name:NSWorkspace.didWakeNotification,object:nil)
         buildSettings();configureRecordingStartPreference();cacheReadJob.onStateChange={ [weak self] in self?.updateUI() };cacheExportJob.onStateChange={ [weak self] in self?.updateUI() };qaWriteJob.onStateChange={ [weak self] in self?.updateUI();DispatchQueue.main.async {self?.completeApplicationTerminationIfReady()} };installMenus();if !previewRenderOnly {window.center();if offlineQA {window.orderFront(nil)}else{window.makeKeyAndOrderFront(nil);NSApp.activate(ignoringOtherApps:true)}}
         if mock {fixtureBoard.clearContents();fixtureBoard.setString(fixtures[0],forType:.string)}
         if offlineQA {do {try configureOfflineQA()}catch{phase.phase = .failed;phase.error="离线QA隔离配置错误";updateUI();return}}
@@ -388,7 +418,7 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
         guard !credentialReadJob.busy else{phase.phase = .failed;phase.error="请先处理系统服务访问提示，或选择仅录音";updateUI();return}
         sessionLocalOnly=false;localOnlyMode=false
         newRecordingPending=false;phase=UIState();phase.phase = .connecting;phase.error=nil;diagnostic.stringValue="正在连接转写服务";credentialReadJob.onStateChange={ [weak self] in self?.updateUI() };updateUI()
-        credentialReadJob.run(timeout:15,work:{if let fixture=fixture {return try fixture()};return try Credential.load()}){[weak self] result in guard let self=self else{return};switch result {case .success(let secret):guard let secret=secret,!secret.isEmpty else{self.phase.phase = .failed;self.phase.error="去设置里填写百炼密钥";self.updateUI();return};self.namelessCloudStart(secret);case .failure:self.phase.phase = .failed;self.phase.error="连接未完成，请处理系统访问提示后重试";self.updateUI()}}
+        credentialReadJob.run(timeout:Credential.promptTimeout,work:{if let fixture=fixture {return try fixture()};return try Credential.load()}){[weak self] result in guard let self=self else{return};switch result {case .success(let secret):guard let secret=secret,!secret.isEmpty else{self.phase.phase = .failed;self.phase.error="去设置里填写百炼密钥";self.updateUI();return};self.namelessCloudStart(secret);case .failure:self.phase.phase = .failed;self.phase.error="连接未完成，请处理系统访问提示后重试";self.updateUI()}}
     }
     func namelessCloudStart(_ key:String){
         naming.reset();sourceActivity=SourceActivity();segments=[:];sequence=[];expandedParents=[:];transcriptCapacity.reset();transcriptLimitHit=false;currentCacheID=nil;activeSession=nil;absoluteTime=nil;resetVoiceprintRecommendations(session:nil);recoveredArchiveText=nil;showWholeTranscript=true;output.string="";empty.isHidden=false;sessionSource=sourceName;source.stringValue=sourceName+" · 实时转写";confirmedScope=true;useMic=true;phase.phase = .connecting;updateUI()
@@ -726,7 +756,7 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
             if Credential.offline {guard let runner=recoveryRunnerOverride else{resumeBusy=false;processingAudio=false;throw Failure(code:"offline_recovery_no_runner")};runner(item);return}
             sourceBundle=bundle;confirmedScope=true;useMic=true
             credentialReadJob.onStateChange={ [weak self] in self?.updateUI() }
-            credentialReadJob.run(timeout:15,work:{try Credential.load()}){[weak self] result in
+            credentialReadJob.run(timeout:Credential.promptTimeout,work:{try Credential.load()}){[weak self] result in
                 guard let self=self,self.resumeBusy else{return}
                 switch result {
                 case .success(let value):
@@ -921,6 +951,7 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
             recordingControlTimeout?.cancel();recordingControlInFlight=nil
             notesPausedRelative=action=="pause" ? event["recording_elapsed_seconds"] as? Double:nil
             phase.phase=action=="pause" ? .paused:.recording
+            pausedSince=action=="pause" ? Date():nil;schedulePauseAutoFinish()
             pausedTailStates=[:];pausedTailRevision=action=="pause" ? event["control_revision"] as? Int:nil
             if action=="pause",let tracks=event["draining_tracks"] as? [String] {for track in tracks where isTranscriptAudioTrack(track) {pausedTailStates[track]="processing"}}
             if let elapsed=event["recording_elapsed_seconds"] as? Double,elapsed.isFinite,elapsed>=0 {phase.elapsed=max(phase.elapsed,elapsed)}
@@ -1928,6 +1959,18 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
         receive(["type":"segment","segment_id":"one","track":"remote","text":body,"final":count>=17])
         if useMic && mockTick>=5 {receive(["type":"segment","segment_id":"two","track":"mic","text":"预算先按1500元。","final":true])}
     }
+    @objc func systemDidWake() {schedulePauseAutoFinish()}
+    func schedulePauseAutoFinish() {
+        pauseAutoFinishTimer?.invalidate();pauseAutoFinishTimer=nil
+        guard phase.phase == .paused,let since=pausedSince else{return}
+        let remaining=pauseAutoFinishSeconds-Date().timeIntervalSince(since)
+        // Run-loop timers do not count system sleep; the wake observer re-checks wall time.
+        let retry={ [weak self] (delay:Double) in self?.pauseAutoFinishTimer=Timer.scheduledTimer(withTimeInterval:delay,repeats:false){[weak self] _ in self?.schedulePauseAutoFinish()} }
+        guard remaining<=0 else{retry(remaining);return}
+        guard recordingControlInFlight==nil,!newMeetingRequested,!quitting else{retry(60);return}
+        pausedSince=nil;finishRecording()
+        diagnostic.stringValue="暂停已久，已自动保存本场；点录音可接着这场继续";updateUI()
+    }
     func finishRecording() {
         guard !mock,!offlineQA,!sessionLocalOnly,!quitting,!preparingModels,
               [.recording,.paused].contains(phase.phase),child?.isRunning==true,
@@ -2380,7 +2423,7 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
                     default:
                         guard CommandLine.arguments.count==3 else{throw Failure(code:"check_directory_required")}
                         let directory=URL(fileURLWithPath:CommandLine.arguments[2])
-                        checks = try flag=="--edition-ui-self-test" ? editionUIChecks(directory:directory):meetingFilesExportChecks(directory:directory)
+                        if flag=="--edition-ui-self-test" {checks=try await editionUIChecks(directory:directory)} else {checks=try meetingFilesExportChecks(directory:directory)}
                     }
                     print(String(data:try JSONSerialization.data(withJSONObject:["type":flag,"checks":checks,"passed":checks.count,"capture":false,"cloud":false,"keychain":false],options:.sortedKeys),encoding:.utf8)!)
                 } catch {print("edition-check-failed: \(error)");exit(1)}

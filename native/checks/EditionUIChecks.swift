@@ -1,6 +1,6 @@
 import AppKit
 
-@MainActor func editionUIChecks(directory:URL) throws -> [String] {
+@MainActor func editionUIChecks(directory:URL) async throws -> [String] {
     guard Credential.offline,directory.path.contains("/.runtime/"),RuntimeConfiguration.dataRoot().path.contains("/.runtime/") else{throw Failure(code:"edition_ui_scope")}
     _ = NSApplication.shared;NSApp.setActivationPolicy(.prohibited)
     var checks:[String]=[]
@@ -103,5 +103,19 @@ import AppKit
     try check(token=="example-token","archive_accepts_configured_app_identity")
     try Data(#"{"schema":1,"archive":{"url":"file:///tmp/service","app_id":"example"}}"#.utf8).write(to:configURL)
     try check(!RuntimeConfiguration.archiveEnabled && owner.makeMeetingArchiveButton().isHidden,"invalid_archive_config_stays_hidden")
-    return checks+(try firstRunGuideChecks(directory:directory))+(try appUpdateChecks())
+    let later=(try firstRunGuideChecks(directory:directory))+(try appUpdateChecks())
+    // Runs last: once this self-test suspends, nested run loops stop draining the main
+    // queue, and the guide checks above wait on main-queue callbacks.
+    // The real export path: the reply arrives after a suspension, and the save panel must still open on the main thread.
+    var panelOnMain=false
+    let exportID=UUID().uuidString;owner.currentCacheID=exportID
+    let asyncTarget=directory.appendingPathComponent("异步纪要.md")
+    owner.savePanelURLProvider={panelOnMain=Thread.isMainThread;return asyncTarget}
+    owner.meetingMinutesCompletion={_,_ in try await Task.sleep(nanoseconds:20_000_000);return response}
+    owner.meetingMinutesBusy=true
+    owner.requestMeetingMinutes(key:"fake_offline_key",request:try MeetingMinutes.request(title:"隔离纪要导出",finalTranscript:transcript),evidence:transcript,title:"隔离纪要导出",id:exportID,generation:owner.meetingDocumentGeneration)
+    let exportTask=owner.meetingMinutesTask;await exportTask?.value
+    try check(panelOnMain && (try? String(contentsOf:asyncTarget,encoding:.utf8))==markdown && !owner.meetingMinutesBusy,"minutes_reply_saves_on_main_thread")
+    owner.meetingMinutesCompletion=Delegate.dashScopeMinutes
+    return checks+later
 }

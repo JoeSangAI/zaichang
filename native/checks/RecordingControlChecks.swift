@@ -167,6 +167,18 @@ import AppKit
     while Date()<autoDeadline && autoCommand.isEmpty {_ = RunLoop.current.run(mode:.default,before:Date().addingTimeInterval(0.05))}
     try check(autoCommand["action"] as? String=="resume" && autoCommand["session"] as? String=="auto-resume-session","microphone_change_pause_resumes_automatically")
     autoResume.window.orderOut(nil)
+    // A pause left alone closes the meeting; resuming first cancels that.
+    func pauseFixture(_ session:String)->Delegate {let view=app();view.pauseAutoFinishSeconds=0.3;view.mockStopHandler={};view.phase.phase = .recording;view.activeSession=session;view.currentCacheID=UUID().uuidString;view.receive(["type":"recording_paused","session":session,"control_revision":1,"draining_tracks":[]]);return view}
+    func spin(_ seconds:Double) {let until=Date().addingTimeInterval(seconds);while Date()<until {_ = RunLoop.current.run(mode:.default,before:Date().addingTimeInterval(0.05))}}
+    let idlePause=pauseFixture("idle-pause"),resumedPause=pauseFixture("resumed-pause")
+    resumedPause.receive(["type":"recording_resumed","session":"resumed-pause","control_revision":2])
+    spin(0.8)
+    try check(idlePause.phase.phase != .paused && idlePause.pausedSince==nil,"long_pause_finishes_meeting_automatically")
+    try check(resumedPause.phase.phase == .recording && resumedPause.pauseAutoFinishTimer==nil,"resume_cancels_pause_auto_finish")
+    let sleptPause=pauseFixture("slept-pause");sleptPause.pauseAutoFinishSeconds=600;sleptPause.schedulePauseAutoFinish()
+    sleptPause.pausedSince=Date().addingTimeInterval(-601);sleptPause.systemDidWake()
+    try check(sleptPause.phase.phase != .paused,"wake_after_long_sleep_finishes_paused_meeting")
+    for view in [idlePause,resumedPause,sleptPause] {view.window.orderOut(nil)}
     controls.sendRecordingControl("resume")
     try check(controls.phase.phase == .paused && commands.last?["session"] as? String=="session-a","resume_reuses_same_session")
     controls.receive(["type":"recording_resumed","session":"session-a","recording_elapsed_seconds":4.0])

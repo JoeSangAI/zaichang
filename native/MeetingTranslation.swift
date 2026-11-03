@@ -321,7 +321,7 @@ extension Delegate {
         }
         guard let cache=currentCacheID,!translationCredentialJob.busy else {translationSwitch?.state = .off;return}
         translationSwitch?.isEnabled=false
-        translationCredentialJob.run(timeout:15,work:{try Credential.load()}) { [weak self] result in
+        translationCredentialJob.run(timeout:Credential.promptTimeout,work:{try Credential.load()}) { [weak self] result in
             guard let self,self.currentCacheID==cache else{return}
             self.translationSwitch?.isEnabled=true
             do {

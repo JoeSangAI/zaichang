@@ -718,7 +718,10 @@ signal.signal(signal.SIGINT,stopped)
 ack=socket.socket(fileno=config["controlAckFD"])
 ack.send(json.dumps(dict(type="recording_paused",session=config["session"],control_revision=1,capture_gate="closed",upload_gate="draining_saved_audio",draining_tracks=[])).encode())
 ack.close()
-while True: time.sleep(.02)
+# A missed signal must fail the test, not hang the suite.
+deadline=time.monotonic()+10
+while time.monotonic()<deadline: time.sleep(.02)
+raise SystemExit(3)
 ''')
             binary.chmod(0o700)
             config={'session':session,'cache_id':cache_id}

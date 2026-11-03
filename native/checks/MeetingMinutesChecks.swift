@@ -29,25 +29,32 @@ func meetingMinutesChecks() throws -> [String] {
         throw MeetingMinutesError.invalidResponse
     }
 
+    // One bad item is left out; the rest of the document still arrives.
     let invalidQuote = response.replacingOccurrences(of: "周五前我会发测试清单。", with: "周五我会发送测试清单。")
-    guard rejects(invalidQuote, transcript: transcript) else { throw MeetingMinutesError.invalidResponse }
+    let withoutBadItems = try MeetingMinutes.validateAndRender(invalidQuote, title: "试运行安排", finalTranscript: transcript)
+    guard !withoutBadItems.contains("周五我会发送测试清单"), !withoutBadItems.contains("发送测试清单｜"),
+          withoutBadItems.contains("会议讨论了试运行周期和后续检查安排。") else { throw MeetingMinutesError.invalidResponse }
 
     let proposalAsDecision = """
     {"overview":"会议讨论了试运行建议。","topics_and_conclusions":["建议先试行两周。"],"decisions":[{"text":"决定试行两周","evidence_quote":"建议先试行两周。"}],"action_items":[],"open_questions":[],"key_quotes":[]}
     """
-    guard rejects(proposalAsDecision, transcript: transcript) else { throw MeetingMinutesError.invalidResponse }
+    let proposal = try MeetingMinutes.validateAndRender(proposalAsDecision, title: "测试", finalTranscript: transcript)
+    guard !proposal.contains("决定试行两周"), proposal.contains("## 明确决定\n未明确") else { throw MeetingMinutesError.invalidResponse }
 
     let extraSection = response.replacingOccurrences(of: "\"open_questions\":", with: "\"private_notes\":\"不应追加\",\"open_questions\":")
-    guard rejects(extraSection, transcript: transcript) else { throw MeetingMinutesError.invalidResponse }
-    let headingInjection = response.replacingOccurrences(of: "会议讨论了试运行周期和后续检查安排。", with: "会议讨论了试运行周期。\n## 我的笔记")
-    guard rejects(headingInjection, transcript: transcript) else { throw MeetingMinutesError.invalidResponse }
+    guard !(try MeetingMinutes.validateAndRender(extraSection, title: "测试", finalTranscript: transcript)).contains("不应追加") else { throw MeetingMinutesError.invalidResponse }
+    let headingInjection = response.replacingOccurrences(of: "会议讨论了试运行周期和后续检查安排。", with: "会议讨论了试运行周期。\\n## 我的笔记")
+    let injected = try MeetingMinutes.validateAndRender(headingInjection, title: "测试", finalTranscript: transcript)
+    guard !injected.contains("我的笔记"), injected.components(separatedBy: .newlines).filter({ $0.hasPrefix("## ") }) == MeetingMinutes.headings.map({ "## " + $0 }) else { throw MeetingMinutesError.invalidResponse }
     let company = "我们常规邀请的是甲公司和乙公司。他来过好多次，北京这次还在沟通。"
     let falsePayment = #"{"overview":"常规支持两种支付渠道。","topics_and_conclusions":[],"decisions":[],"action_items":[],"open_questions":[],"key_quotes":[]}"#
     let falseRefusal = #"{"overview":"对方拒绝合作，双方存在分歧。","topics_and_conclusions":[],"decisions":[],"action_items":[],"open_questions":[],"key_quotes":[]}"#
     let negativeDecision = #"{"overview":"会议讨论活动安排。","topics_and_conclusions":[],"decisions":[{"text":"拒绝参加活动","evidence_quote":"不。"}],"action_items":[],"open_questions":[],"key_quotes":[]}"#
+    // Nothing usable left is still a failure, never an empty document.
     guard rejects(falsePayment, transcript: company),
           rejects(falseRefusal, transcript: "不。好的，好的，没问题。谢谢大家。"),
-          rejects(negativeDecision, transcript: "不。") else { throw MeetingMinutesError.invalidResponse }
+          rejects(#"{"overview":"x"}"#, transcript: company),
+          !(try MeetingMinutes.validateAndRender(negativeDecision, title: "测试", finalTranscript: "不。")).contains("拒绝参加活动") else { throw MeetingMinutesError.invalidResponse }
     let payment = "我们支持信用卡支付。"
     _ = try MeetingMinutes.validateAndRender(falsePayment.replacingOccurrences(of: "常规支持两种支付渠道。", with: payment), title: "支付讨论", finalTranscript: payment)
     guard !MeetingMinutes.evidenceEligible(["final": true, "text": "不。"]),
@@ -57,7 +64,7 @@ func meetingMinutesChecks() throws -> [String] {
           MeetingMinutes.evidenceEligible(["final": true, "text": "不参加这次活动。"]),
           MeetingMinutes.evidenceEligible(["final": true, "text": "こんにちは。次の会議では企業参加状況及び共同宣伝計画について確認します。"]),
           MeetingMinutes.evidenceEligible(["final": true, "text": company]) else { throw MeetingMinutesError.invalidResponse }
-    return ["minutes_request_separates_evidence_and_background", "minutes_valid_json_renders_fixed_template", "minutes_rejects_nonverbatim_quote", "minutes_rejects_proposal_as_decision", "minutes_rejects_extra_output_fields", "minutes_rejects_heading_injection", "minutes_rejects_unsupported_payment_and_refusal", "minutes_filters_unreliable_evidence_preserving_explicit_negation_and_japanese"]
+    return ["minutes_request_separates_evidence_and_background", "minutes_valid_json_renders_fixed_template", "minutes_drops_nonverbatim_quote_keeps_rest", "minutes_drops_proposal_as_decision", "minutes_ignores_extra_output_fields", "minutes_drops_heading_injection", "minutes_rejects_unsupported_payment_and_refusal", "minutes_filters_unreliable_evidence_preserving_explicit_negation_and_japanese"]
 }
 
 private func rejects(_ response: String, transcript: String) -> Bool {
