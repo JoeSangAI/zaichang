@@ -108,7 +108,7 @@
 合并字段后，在仓库根目录验证（只读本机配置，不调用模型）：
 
 ```sh
-ZAICHANG_EDITION=standalone python3 scripts/check_connectors.py
+python3 scripts/check_connectors.py
 ```
 
 输出只含路径存在性、层级数量和配置状态；未配置项显示关闭，非法配置返回错误。它验证读取链路，不证明云端整理效果。
@@ -120,18 +120,18 @@ ZAICHANG_EDITION=standalone python3 scripts/check_connectors.py
 - **注册：** 此项配置属于 Codex MCP，不向 `connectors.json` 增加伪字段。先 `codex mcp get zaichang` 检查是否已有同名配置；已有配置先核对，改动需用户同意。在仓库根目录运行：
 
    ```sh
-   codex mcp add zaichang --env ZAICHANG_EDITION=standalone -- python3 "$PWD/agent-plugin/zaichang/scripts/mcp_server.py"
+   codex mcp add zaichang -- python3 "$PWD/agent-plugin/zaichang/scripts/mcp_server.py"
    codex mcp get zaichang
    ```
 
-   核对绝对脚本路径与 edition；保留仓库目录，移动后更新注册路径。其他 agent 使用同一 stdio 服务：命令 `python3`、参数为该脚本绝对路径、环境变量 `ZAICHANG_EDITION=standalone`。插件目录还包含 meeting-context Skill，可按客户端支持的插件方式安装；MCP 命令是本机直接可用的通路。
+   核对绝对脚本路径；保留仓库目录，移动后更新注册路径。其他 agent 使用同一 stdio 服务：命令 `python3`、参数为该脚本绝对路径。插件目录还包含 meeting-context Skill，可按客户端支持的插件方式安装；MCP 命令是本机直接可用的通路。
 - **验证：** 重开 Codex 会话，实际调用 `zaichang.current_meeting`。空闲时应返回无当前会议；未装读取器会返回 unavailable，不能当作成功。活跃会议必须先获得用户授权，再核对返回的会话及 revision，用同一会话读原文。不要为验收启动录音。仅 `mcp get` 成功不证明工具可调用；本机成功也不证明云端 Chat 已连通。
 
 ## 排错
 
 - **日志：** 构建目录 `.runtime/build/standalone/`，离线验收日志 `.runtime/standalone-review/`，连接检查 `.runtime/codex-connection/result.json`，助理启动日志在数据目录 `Assistant/runtime-startup.log`；分享前去除私人内容。
 - **依赖下载失败：** 脚本会自动重试网络错误，已校验的文件下次复用，直接重跑 `python3 scripts/bootstrap_dependencies.py` 即可。若始终在 huggingface.co 失败而其他站点正常，多半是本机代理不通 Hugging Face：先用 `curl -I https://huggingface.co` 分别在开/关代理时测试，能直连就去掉代理环境变量重跑（例如 `env -u HTTPS_PROXY -u HTTP_PROXY python3 scripts/bootstrap_dependencies.py`）。
-- **离线自检失败：** 重跑 `python3 scripts/offline_check.py --edition standalone`，查看首个失败项对应的日志，修复后重验，不跳过失败继续安装。
+- **离线自检失败：** 重跑 `python3 scripts/offline_check.py`，查看首个失败项对应的日志，修复后重验，不跳过失败继续安装。
 - **未授权麦克风：** 请用户到 macOS“系统设置 → 隐私与安全性 → 麦克风”开启在场，再重开应用；电脑声音按系统对应权限处理。
 - **无密钥：** 请用户自己在在场设置中填写百炼密钥；agent 不索要密钥。
 - **Codex 未登录：** 请用户自己运行 `codex login`，再执行连接检查。

@@ -1888,7 +1888,7 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
         let panel=NSView(frame:NSRect(x:0,y:0,width:420,height:160));let labels=["同意本机跨会识别用途","同意生成专用Keychain加密密钥","同意保存到本机应用支持目录","理解备份和删除范围"]
         var boxes:[NSButton]=[];for (i,title) in labels.enumerated(){let box=ImmediateButton(checkboxWithTitle:title,target:nil,action:nil);box.frame=NSRect(x:0,y:CGFloat(125-i*35),width:415,height:28);panel.addSubview(box);boxes.append(box)};dialog.accessoryView=panel;dialog.addButton(withTitle:"保存");dialog.addButton(withTitle:"取消")
         guard dialog.runModal() == .alertFirstButtonReturn,boxes.allSatisfy({$0.state == .on}) else{return}
-        let folder=mock ? URL(fileURLWithPath:root+"/native/validation-workflow/fake-profile") : RuntimeConfiguration.dataRoot(legacyJoeIdentity:true).appendingPathComponent("Identity",isDirectory:true)
+        let folder=mock ? URL(fileURLWithPath:root+"/native/validation-workflow/fake-profile") : RuntimeConfiguration.dataRoot().appendingPathComponent("Identity",isDirectory:true)
         let grant=ProfileStorageGrant(purposeAccepted:true,keychainKeyAccepted:true,localFolderAccepted:true,backupDeletionAccepted:true)
         let keys:ProfileKeyProvider=mock ? FakeProfileKeyProvider() : KeychainProfileProvider(permitted:true)
         let store=ProfileArchiveStore(folder:folder,domain:mock ? "synthetic_model_output" : "consented_live_audio",keys:keys,grant:grant)
@@ -1897,7 +1897,7 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
     @objc func restoreProfileArchive() {
         if trialCandidate {return}
         guard mock || Bundle.main.object(forInfoDictionaryKey:"ProfileStorageAuthorized") as? Bool==true else{diagnostic.stringValue="请先启用人物资料保存";return}
-        let folder=mock ? URL(fileURLWithPath:root+"/native/validation-workflow/fake-profile") : RuntimeConfiguration.dataRoot(legacyJoeIdentity:true).appendingPathComponent("Identity",isDirectory:true)
+        let folder=mock ? URL(fileURLWithPath:root+"/native/validation-workflow/fake-profile") : RuntimeConfiguration.dataRoot().appendingPathComponent("Identity",isDirectory:true)
         let grant=ProfileStorageGrant(purposeAccepted:true,keychainKeyAccepted:true,localFolderAccepted:true,backupDeletionAccepted:true)
         let provider:ProfileKeyProvider=mock ? FakeProfileKeyProvider() : KeychainProfileProvider(permitted:true)
         let store=profileStore ?? ProfileArchiveStore(folder:folder,domain:mock ? "synthetic_model_output" : "consented_live_audio",keys:provider,grant:grant);profileStore=store
@@ -2382,7 +2382,7 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
                         let directory=URL(fileURLWithPath:CommandLine.arguments[2])
                         checks = try flag=="--edition-ui-self-test" ? editionUIChecks(directory:directory):meetingFilesExportChecks(directory:directory)
                     }
-                    print(String(data:try JSONSerialization.data(withJSONObject:["type":flag,"edition":RuntimeConfiguration.edition(),"checks":checks,"passed":checks.count,"capture":false,"cloud":false,"keychain":false],options:.sortedKeys),encoding:.utf8)!)
+                    print(String(data:try JSONSerialization.data(withJSONObject:["type":flag,"checks":checks,"passed":checks.count,"capture":false,"cloud":false,"keychain":false],options:.sortedKeys),encoding:.utf8)!)
                 } catch {print("edition-check-failed: \(error)");exit(1)}
                 return
             }

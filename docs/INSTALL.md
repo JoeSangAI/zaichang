@@ -74,7 +74,7 @@ python3 scripts/install_standalone.py
 如果只需要验证已构建的离线测试应用，可运行：
 
 ```sh
-python3 scripts/offline_check.py --edition standalone
+python3 scripts/offline_check.py
 ```
 
 修改源码后，另运行 Python 测试套件：

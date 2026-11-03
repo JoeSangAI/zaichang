@@ -1,0 +1,28 @@
+#!/bin/bash
+# Only main and version tags leave, nothing leaves unchecked, and a new VERSION in app_version.py becomes
+# a release that every installed 在场 offers. Enable in a new checkout: git config core.hooksPath .githooks
+set -uo pipefail
+
+ROOT="$(git rev-parse --show-toplevel)"
+ZERO=0000000000000000000000000000000000000000
+COMMIT=""
+while read -r _local sha remote _remote_sha; do
+  case "$remote" in
+    refs/heads/main) [ "$sha" = "$ZERO" ] || COMMIT="$sha" ;;
+    refs/tags/v*) ;;
+    *) echo "refusing to push $remote: only main and version tags leave this checkout" >&2; exit 1 ;;
+  esac
+done
+
+python3 -B "$ROOT/scripts/check_public.py" || exit 1
+[ -n "$COMMIT" ] || exit 0
+python3 -B "$ROOT/scripts/release_public.py" --needs-release || exit 0
+
+[ "$(git rev-parse HEAD)" = "$COMMIT" ] && [ -z "$(git status --porcelain --untracked-files=no)" ] \
+  || { echo "push stopped: a new version is released from a clean checkout at HEAD" >&2; exit 1; }
+echo "new version: building and checking the release before anything leaves (about 15 minutes)…"
+python3 -B "$ROOT/scripts/release_public.py" --build-only > "$ROOT/.runtime/release-build.log" 2>&1 \
+  || { echo "push stopped: the release didn't pass. Log: .runtime/release-build.log" >&2; tail -5 "$ROOT/.runtime/release-build.log" >&2; exit 1; }
+mkdir -p "$ROOT/.local"
+nohup python3 -B "$ROOT/scripts/release_public.py" --publish-built > "$ROOT/.local/release.log" 2>&1 &
+echo "it will be published as soon as this push lands. Log: .local/release.log"

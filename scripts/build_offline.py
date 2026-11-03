@@ -1,41 +1,27 @@
 """Build an isolated development QA app from project-owned sources; never launch or use a network API."""
 from pathlib import Path
-import argparse,os,shutil,subprocess,plistlib,json,hashlib,atexit,sys
-from build_guard import acquire_desktop_idle_lease
+import argparse,os,shutil,subprocess,plistlib,json,hashlib,sys
 root=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(root))
 import app_version
 native=root/'native'
-work=root/'.runtime/build'
+work=root/'.runtime/build/standalone'
 parser=argparse.ArgumentParser()
-parser.add_argument('--edition',choices=['joe','standalone'],default='joe')
 parser.add_argument('--ui-only',action='store_true')
 parser.add_argument('--helper-only',action='store_true')
-parser.add_argument('--desktop-idle-confirmed',action='store_true',help='After explicit user confirmation that recorders are stopped, hold the installed desktop startup lock throughout the build.')
 args=parser.parse_args()
-if args.edition=='standalone':work=work/'standalone'
 work.mkdir(parents=True,exist_ok=True)
 if args.ui_only and args.helper_only:
     parser.error('--ui-only and --helper-only cannot be combined')
 
 # Development must yield to the installed recorder. Inspect executable names,
 # never command arguments (which may contain provider configuration).
-if args.desktop_idle_confirmed:
-    desktop_idle_lease=acquire_desktop_idle_lease()
-    atexit.register(os.close,desktop_idle_lease)
-else:
-    processes=subprocess.run(['ps','-axo','comm='],capture_output=True,text=True,check=True).stdout.splitlines()
-    if any(Path(name.strip()).name in {'MeetingCapture','IntegratedCapture'} for name in processes):
-        raise SystemExit('正在录音或处理已录音频，暂不编译。请等在场完成后再运行。')
-priority_lowered=False
-try:
-    os.nice(10);priority_lowered=True
-except PermissionError:
-    if not args.desktop_idle_confirmed:
-        raise
-    print('CPU priority adjustment unavailable; desktop idle lease remains held throughout compilation.',flush=True)
+processes=subprocess.run(['ps','-axo','comm='],capture_output=True,text=True,check=True).stdout.splitlines()
+if any(Path(name.strip()).name in {'MeetingCapture','IntegratedCapture'} for name in processes):
+    raise SystemExit('正在录音或处理已录音频，暂不编译。请等在场完成后再运行。')
+os.nice(10)
 
-app_name='在场独立版QA' if args.edition=='standalone' else '会议助理开发QA'
+app_name='在场独立版QA'
 final_app=work/(app_name+'.app')
 staging=work/('.'+app_name+'.staging.app')
 if staging.exists(): shutil.rmtree(staging)
@@ -123,7 +109,8 @@ if not args.ui_only:
 helper=app/'Contents/Helpers/会议采集离线QA.app'
 helper_info={
  'CFBundleExecutable':'MeetingCapture',
- 'CFBundleIdentifier':'com.joesang.meeting-capture.development-qa',
+ 'CFBundleIdentifier':'com.joesang.zaichang.standalone.capture.development-qa',
+ 'DataRootName':'ZaichangStandalone',
  'CFBundleName':'会议采集离线QA',
  'CFBundleDisplayName':'会议采集离线QA',
  'CFBundlePackageType':'APPL',
@@ -147,16 +134,14 @@ helper_info={
  'NSMicrophoneUsageDescription':'收录会议中的麦克风声音，并保存在本机；选择转写时生成会议文字。',
  'NSAudioCaptureUsageDescription':'收录电脑播放的会议声音，并区分应用来源。',
 }
-helper_info['ZaichangEdition']=args.edition
-if args.edition=='standalone':
- helper_info.update(DataRootName='ZaichangStandalone',CFBundleIdentifier='com.joesang.zaichang.standalone.capture.development-qa')
 helper_plist=helper/'Contents/Info.plist'
 helper_plist.write_bytes(plistlib.dumps(helper_info,sort_keys=True))
 subprocess.run(['codesign','--force','--sign','-',str(helper)],check=True)
 
 info={
  'CFBundleExecutable':'MeetingAssistant',
- 'CFBundleIdentifier':'com.joesang.meeting-assistant.development-qa',
+ 'CFBundleIdentifier':'com.joesang.zaichang.standalone.development-qa',
+ 'DataRootName':'ZaichangStandalone',
  'CFBundleName':'在场开发QA',
  'CFBundleDisplayName':'在场开发QA',
  'CFBundlePackageType':'APPL',
@@ -180,9 +165,6 @@ info={
  'NSMicrophoneUsageDescription':helper_info['NSMicrophoneUsageDescription'],
  'NSAudioCaptureUsageDescription':helper_info['NSAudioCaptureUsageDescription'],
 }
-info['ZaichangEdition']=args.edition
-if args.edition=='standalone':
- info.update(DataRootName='ZaichangStandalone',CFBundleIdentifier='com.joesang.zaichang.standalone.development-qa')
 (app/'Contents/Info.plist').write_bytes(plistlib.dumps(info,sort_keys=True))
 runtime=app/'Contents/Resources/Runtime'
 if runtime.is_symlink(): runtime.unlink()
@@ -214,7 +196,7 @@ if final_app.exists():
 else:
  staging.rename(final_app)
 (work/'source-receipt.json').write_text(json.dumps({
- 'schema':1,'edition':args.edition,'sources':built_sources,
+ 'schema':1,'sources':built_sources,
  'ui_sha256':hashlib.sha256((final_app/'Contents/MacOS/MeetingAssistant').read_bytes()).hexdigest(),
  'helper_sha256':hashlib.sha256((final_app/'Contents/Helpers/会议采集离线QA.app/Contents/MacOS/MeetingCapture').read_bytes()).hexdigest(),
 },ensure_ascii=False,indent=2)+'\n')

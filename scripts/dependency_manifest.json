@@ -42,34 +42,6 @@
       "git_blob_oid": "38da5a752e26d2ff4bd0f1a1b655092b774ca1a5"
     },
     {
-      "path": "native/local-speaker-install/runtime-models/Nemotron3Diarizer_fast128.mlmodelc/model.mil",
-      "url": "https://huggingface.co/FluidInference/nemotron-3-diarization-coreml/resolve/25a90f97f254428d4b30374b76af9c74fdee8327/monolithic/v2/Nemotron3Diarizer_fast128.mlmodelc/model.mil?download=true",
-      "bytes": 502794,
-      "source": "FluidInference/nemotron-3-diarization-coreml@25a90f97f254428d4b30374b76af9c74fdee8327",
-      "sha256": "e7c029a46d9f327bec4c47fc34e5d32ee2cec9ce596950af0c403d05146b4ead"
-    },
-    {
-      "path": "native/local-speaker-install/runtime-models/Nemotron3Diarizer_fast128.mlmodelc/coremldata.bin",
-      "url": "https://huggingface.co/FluidInference/nemotron-3-diarization-coreml/resolve/25a90f97f254428d4b30374b76af9c74fdee8327/monolithic/v2/Nemotron3Diarizer_fast128.mlmodelc/coremldata.bin?download=true",
-      "bytes": 758,
-      "source": "FluidInference/nemotron-3-diarization-coreml@25a90f97f254428d4b30374b76af9c74fdee8327",
-      "sha256": "ebcca7245d8d774305752b9f2b79433ad1858f8a06df3b326e0ae6305d981d25"
-    },
-    {
-      "path": "native/local-speaker-install/runtime-models/Nemotron3Diarizer_fast128.mlmodelc/weights/weight.bin",
-      "url": "https://huggingface.co/FluidInference/nemotron-3-diarization-coreml/resolve/25a90f97f254428d4b30374b76af9c74fdee8327/monolithic/v2/Nemotron3Diarizer_fast128.mlmodelc/weights/weight.bin?download=true",
-      "bytes": 198590592,
-      "source": "FluidInference/nemotron-3-diarization-coreml@25a90f97f254428d4b30374b76af9c74fdee8327",
-      "sha256": "e8c90d2d0e16787a420de6805fd5b7a95c116fac0163208b5bc4d8a9ae459ca4"
-    },
-    {
-      "path": "native/local-speaker-install/runtime-models/Nemotron3Diarizer_fast128.mlmodelc/analytics/coremldata.bin",
-      "url": "https://huggingface.co/FluidInference/nemotron-3-diarization-coreml/resolve/25a90f97f254428d4b30374b76af9c74fdee8327/monolithic/v2/Nemotron3Diarizer_fast128.mlmodelc/analytics/coremldata.bin?download=true",
-      "bytes": 243,
-      "source": "FluidInference/nemotron-3-diarization-coreml@25a90f97f254428d4b30374b76af9c74fdee8327",
-      "sha256": "a71e06616a3ae7bddef06ce5dfc7fe523a286e489f63a8da2fc4f1e940d560a4"
-    },
-    {
       "path": "native/local-speaker-install/runtime-models/localvqe-v1.3-4.8M-16ms.mlmodelc/analytics/coremldata.bin",
       "url": "https://huggingface.co/FluidInference/localvqe-coreml/resolve/4205430781c240397073d6f7bf676fb4c732fc12/localvqe-v1.3-4.8M-16ms.mlmodelc/analytics/coremldata.bin?download=true",
       "bytes": 243,

@@ -41,10 +41,10 @@ class ConnectorTests(unittest.TestCase):
             self.assertEqual(shared_people.search_people('张三')['candidates'],[])
             self.assertEqual(runtime_config.context_guidance(),'')
 
-    def test_all_connectors_work_in_both_editions(self):
+    def test_all_connectors_work(self):
         config,project=self.fixture();self.write(config)
-        for edition in ('joe','standalone'):
-            with self.subTest(edition=edition),patch.dict(os.environ,{'ZAICHANG_EDITION':edition}):
+        for _ in (1,):
+            with self.subTest():
                 rows,_=shared_terms.cleanup_terms(project)
                 self.assertEqual([r['layer'] for r in rows],['project','people','general'])
                 self.assertEqual([r['misheard'] for r in rows],[['误写甲'],[],[]])

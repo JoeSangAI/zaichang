@@ -16,7 +16,7 @@ final class AppUpdater:NSObject {
     static let retryFetchAfter:TimeInterval=30*60
     static var current:String {Bundle.main.object(forInfoDictionaryKey:"CFBundleShortVersionString") as? String ?? "0"}
     /// Only the public edition has a feed; a QA build must never touch the network.
-    static var enabled:Bool {RuntimeConfiguration.standalone && !Credential.offline && Bundle.main.object(forInfoDictionaryKey:"OfflineQA") as? Bool != true}
+    static var enabled:Bool {!Credential.offline && Bundle.main.object(forInfoDictionaryKey:"OfflineQA") as? Bool != true}
 
     /// `models` is set on the small package: everything but the models, usable only where those same models are already installed.
     struct Package:Sendable {let url:URL,sha256:String,models:String?}

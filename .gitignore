@@ -22,3 +22,6 @@ native/ui-review/
 
 # Optional user-owned integration settings
 connectors.json
+
+# The owner's private notes, status and settings: never committed
+.local/

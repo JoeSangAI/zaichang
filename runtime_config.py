@@ -1,15 +1,6 @@
-"""Edition and data-root contract inherited by all Python workers."""
+"""Data-root contract inherited by all Python workers. There is one app, so one data directory."""
 import os
 from pathlib import Path
-
-
-def edition(environment=None):
-    env = os.environ if environment is None else environment
-    return 'standalone' if env.get('ZAICHANG_EDITION') == 'standalone' else 'joe'
-
-
-def standalone():
-    return edition() == 'standalone'
 
 
 def data_root(environment=None):
@@ -19,8 +10,7 @@ def data_root(environment=None):
         return Path(value)
     if value and '/' not in value and value not in {'.', '..'}:
         return Path.home() / 'Library/Application Support' / value
-    name = 'ZaichangStandalone' if edition(env) == 'standalone' else 'MeetingAssistant'
-    return Path.home() / 'Library/Application Support' / name
+    return Path.home() / 'Library/Application Support/ZaichangStandalone'
 
 
 DEFAULT_ASSISTANT_NAME = '小满'

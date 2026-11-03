@@ -31,6 +31,7 @@ PYTHON_MODULES = (
     "live_trial.py", "meeting_context.py", "model_standby.py", "public_audio_trial.py",
     "runtime_config.py", "shared_terms.py", "shared_people.py", "speaker_identity.py",
 )
+RUNTIME_MODELS = ("Nemotron3Diarizer_low.mlmodelc", "learnable_sil_emb.bin", "community-1", "localvqe-v1.3-4.8M-16ms.mlmodelc")
 VERSION = app_version.VERSION
 BUILD = app_version.BUILD
 BUNDLE_ID = "com.joesang.zaichang.standalone"
@@ -90,8 +91,13 @@ def copy_runtime(runtime: Path) -> dict[str, str]:
     # local profiles, and meeting data stay outside the app bundle.
     speaker = ROOT / "native/local-speaker-install"
     speaker_target = runtime / "native/local-speaker-install"
+    # Only what the app loads. The download keeps its own copy of the low model under monolithic/,
+    # which the app never reads; shipping it would double the download for nothing.
     models = speaker / "runtime-models"
-    shutil.copytree(models, speaker_target / "runtime-models")
+    (speaker_target / "runtime-models").mkdir(parents=True)
+    for name in RUNTIME_MODELS:
+        source, target = models / name, speaker_target / "runtime-models" / name
+        shutil.copytree(source, target) if source.is_dir() else shutil.copy2(source, target)
     license_dir = runtime / "ThirdPartyLicenses"
     license_dir.mkdir(parents=True, exist_ok=True)
     for name in ["Apache-2.0.txt", "OpenMDW-1.1.txt", "ThirdPartyNotices.md"]:
@@ -133,7 +139,6 @@ def rewrite_bundle(stage: Path, runtime_hashes: dict[str, str]) -> dict:
         "CFBundleDisplayName": "在场声音采集",
         "CFBundleVersion": BUILD,
         "CFBundleShortVersionString": VERSION,
-        "ZaichangEdition": "standalone",
         "DataRootName": "ZaichangStandalone",
         "SelfContainedRuntime": True,
         "OfflineOnly": False,
@@ -160,7 +165,6 @@ def rewrite_bundle(stage: Path, runtime_hashes: dict[str, str]) -> dict:
         "CFBundleDisplayName": "在场",
         "CFBundleVersion": BUILD,
         "CFBundleShortVersionString": VERSION,
-        "ZaichangEdition": "standalone",
         "DataRootName": "ZaichangStandalone",
         "SelfContainedRuntime": True,
         "OfflineOnly": False,
@@ -194,7 +198,7 @@ def verify(stage: Path) -> dict:
     info = plistlib.loads((stage / "Contents/Info.plist").read_bytes())
     helper_path = stage / HELPER_RELATIVE
     helper_info = plistlib.loads((helper_path / "Contents/Info.plist").read_bytes())
-    expected = {"ZaichangEdition": "standalone", "DataRootName": "ZaichangStandalone",
+    expected = {"DataRootName": "ZaichangStandalone",
                 "SelfContainedRuntime": True, "OfflineQA": False, "LocalRecordingAllowed": True,
                 "TrialCandidate": True, "ClickStartsTrial": True}
     if any(info.get(key) != value for key, value in expected.items()):
@@ -241,8 +245,8 @@ def build_stage(identity: str = "-") -> dict:
                                  ROOT / "native/local-embedding-install/c-api.h"] if not path.exists()]
     if missing:
         raise SystemExit("依赖未准备完成，请先运行 python3 scripts/bootstrap_dependencies.py")
-    subprocess.run([sys.executable, str(ROOT / "scripts/build_offline.py"), "--edition", "standalone"], cwd=ROOT, check=True)
-    subprocess.run([sys.executable, str(ROOT / "scripts/offline_check.py"), "--edition", "standalone"], cwd=ROOT, check=True)
+    subprocess.run([sys.executable, str(ROOT / "scripts/build_offline.py")], cwd=ROOT, check=True)
+    subprocess.run([sys.executable, str(ROOT / "scripts/offline_check.py")], cwd=ROOT, check=True)
     if STAGE.exists():
         raise SystemExit(f"发现未完成的暂存安装：{STAGE}。请检查后再重试。")
     if not QA_APP.is_dir():

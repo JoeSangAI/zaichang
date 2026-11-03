@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
-"""Turn the public clone's current version into the GitHub release every installed 在场 offers.
+"""Turn this repository's version into the GitHub release every installed 在场 offers.
 
-Normally runs by itself at the end of sync_public.py --push. Built from the public clone, so what users
-receive is exactly the published source, with no draft from this checkout. Rerunning finishes a release
-that stopped halfway; a version already released is left alone.
+Normally runs by itself from .githooks/pre-push: a push that changes VERSION in app_version.py builds and
+checks the release before anything leaves, and publishes it once the commit is on GitHub. Built from a
+clean checkout at HEAD, so what users receive is exactly the published source. A version already released
+is left alone.
 
-  release_public.py               build, check and publish the clone's version if it has no release
-  release_public.py --build-only  build and check into .runtime/release/<version>, publish nothing
+  release_public.py                  build, check and publish if this version has no release yet
+  release_public.py --needs-release  exit 0 when this version has no release yet
+  release_public.py --build-only     build and check into .runtime/release/<version>, publish nothing
+  release_public.py --publish-built  wait for HEAD on GitHub, then publish what --build-only made
 """
 from __future__ import annotations
 
@@ -20,6 +23,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -65,14 +69,6 @@ def clone_version(clone):
     return re.search(r"^VERSION = '([^']+)'", text, re.M).group(1)
 
 
-def signing_identity():
-    """The one release identity, or why a release can't be signed. Changing it strands every installed copy."""
-    found = run('security', 'find-identity', '-v', '-p', 'codesigning')
-    choices = re.findall(r'\) ([0-9A-F]{40}) "(?:Apple Development|Developer ID Application):[^"\n]+"', found)
-    if len(choices) != 1: raise RuntimeError('发版需要这台 Mac 上恰好有一个开发者签名身份')
-    return choices[0]
-
-
 def certificate_days_left(identity):
     """Days until the signing certificate runs out; a release must be signed before that."""
     pem = run('security', 'find-certificate', '-a', '-Z', '-p', '-c', 'Apple Development')
@@ -82,6 +78,15 @@ def certificate_days_left(identity):
             end = dt.datetime.strptime(text.strip().split('=', 1)[1].replace(' GMT', ''), '%b %d %H:%M:%S %Y')
             return (end - dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)).days
     return None
+
+
+def signing_identity():
+    """The release identity. After a renewal the old and new certificates sit side by side for a while;
+    the one that lasts longer signs. Changing the team strands every installed copy."""
+    found = run('security', 'find-identity', '-v', '-p', 'codesigning')
+    choices = re.findall(r'\) ([0-9A-F]{40}) "Apple Development:[^"\n]+"', found)
+    if not choices: raise RuntimeError('这台 Mac 上没有可用的开发者签名证书：先在 Xcode 的帐户设置里续期')
+    return max(choices, key=lambda identity: certificate_days_left(identity) or -1)
 
 
 def problems_in(app, version, home=None):
@@ -95,9 +100,10 @@ def problems_in(app, version, home=None):
         build = subprocess.run(['vtool', '-show-build', str(path)], capture_output=True, text=True).stdout
         minimum = re.search(r'minos (\d+)\.(\d+)', build)
         if minimum and (int(minimum[1]), int(minimum[2])) > MINIMUM_OS: found.append(f'{name}: 要求系统 {minimum[1]}.{minimum[2]}，高于 15.0')
-        links = subprocess.run(['otool', '-L', str(path)], capture_output=True, text=True).stdout
-        if home in links: found.append(f'{name}: 链接了本机路径')
-        if home.encode() in path.read_bytes(): found.append(f'{name}: 含有本机路径')
+        # The first line of otool's answer is the file itself; only what it loads matters.
+        links = subprocess.run(['otool', '-L', str(path)], capture_output=True, text=True).stdout.splitlines()[1:]
+        rpaths = subprocess.run(['otool', '-l', str(path)], capture_output=True, text=True).stdout
+        if any(home in line for line in links) or f'path {home}' in rpaths: found.append(f'{name}: 依赖本机路径')
     info = run('/usr/libexec/PlistBuddy', '-c', 'Print :CFBundleShortVersionString', app / 'Contents/Info.plist').strip()
     if info != version: found.append(f'版本号是 {info}，应为 {version}')
     return found
@@ -134,6 +140,10 @@ def package(app, dist, version, repo=REPO):
 
 
 def build(clone, version):
+    sys.path.insert(0, str(clone))
+    import app_version
+    problem = app_version.first_run_review_problem()
+    if problem: raise RuntimeError(problem)
     identity = signing_identity()
     days = certificate_days_left(identity)
     if days is not None and days < 1: raise RuntimeError('签名证书已过期：先在 Xcode 里续期，再发版')
@@ -149,10 +159,13 @@ def build(clone, version):
     return app
 
 
-def publish(clone, dist, version):
+def publish(clone, dist, version, wait=0):
     commit = run('git', '-C', clone, 'rev-parse', 'HEAD').strip()
-    remote = run('git', '-C', clone, 'ls-remote', 'origin', 'refs/heads/main').split()[0]
-    if commit != remote: raise RuntimeError('公开仓库副本和 GitHub 不一致，先同步再发版')
+    for _ in range(wait // 5 + 1):
+        remote = run('git', '-C', clone, 'ls-remote', 'origin', 'refs/heads/main').split()[0]
+        if commit == remote: break
+        time.sleep(5)
+    if commit != remote: raise RuntimeError('这个提交还不在 GitHub 上，先推送再发版')
     run('gh', 'release', 'create', f'v{version}', dist / 'Zaichang.zip', dist / 'Zaichang-update.zip', dist / 'latest.json',
         '--repo', REPO, '--target', commit, '--title', f'在场 {version}', '--notes-file', dist / 'notes.md')
     # What installed copies will actually read.
@@ -174,13 +187,29 @@ def release_if_new(clone, build_only=False):
             'update_mb': (dist / 'Zaichang-update.zip').stat().st_size >> 20}
 
 
+def publish_built(clone):
+    """After the push: publish exactly what the pre-push build checked."""
+    clone = Path(clone); version = clone_version(clone)
+    if released(version): return {'released': False, 'version': version, 'reason': '这个版本已经发布过'}
+    dist = ROOT / '.runtime/release' / version
+    feed = json.loads((dist / 'latest.json').read_text(encoding='utf-8'))
+    if feed['version'] != version or sha(dist / 'Zaichang.zip') != feed['sha256']: raise RuntimeError('构建好的安装包和这个版本对不上，重新构建')
+    publish(clone, dist, version, wait=300)
+    return {'released': True, 'version': version}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--clone', type=Path, default=ROOT.parent / 'zaichang-public')
-    parser.add_argument('--build-only', action='store_true')
+    parser.add_argument('--clone', type=Path, default=ROOT)
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument('--build-only', action='store_true')
+    mode.add_argument('--publish-built', action='store_true')
+    mode.add_argument('--needs-release', action='store_true')
     args = parser.parse_args()
     try:
-        print(json.dumps(release_if_new(args.clone, args.build_only), ensure_ascii=False, indent=2))
+        if args.needs_release: return 1 if released(clone_version(args.clone)) else 0
+        result = publish_built(args.clone) if args.publish_built else release_if_new(args.clone, args.build_only)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
     except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError) as error:
         print(getattr(error, 'stderr', '') or str(error), file=sys.stderr)

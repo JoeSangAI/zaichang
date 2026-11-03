@@ -1,25 +1,17 @@
 import Foundation
 import CoreFoundation
 
-// Shared by the UI and capture helper. Edition comes from the signed bundle;
-// only the data path is inherited when the UI launches a child.
+// Shared by the UI and capture helper. There is one app, so one identity: the data path
+// is the only thing a child inherits, and only so tests can point it somewhere isolated.
 enum RuntimeConfiguration {
-    static func edition(info:[String:Any]=Bundle.main.infoDictionary ?? [:], environment:[String:String]=ProcessInfo.processInfo.environment)->String {
-        // Bundle identity wins; unbundled tools can inherit an explicit edition.
-        let value=(info["ZaichangEdition"] as? String) ?? environment["ZAICHANG_EDITION"]
-        return value == "standalone" ? "standalone":"joe"
-    }
-    static var standalone:Bool {edition() == "standalone"}
     /// Where tools the user installed live; a GUI app does not inherit their shell's PATH.
     static var toolSearchPaths:[String] {["/usr/local/bin","/opt/homebrew/bin",NSHomeDirectory()+"/.local/bin",NSHomeDirectory()+"/.codex/bin","/usr/bin","/bin"]}
-    static var bailianService:String {standalone ? "com.joesang.zaichang.standalone.bailian":"com.joesang.meeting-assistant.bailian"}
-    static var identityService:String {standalone ? "com.zaichang.app.identity-v2":"com.joesang.meeting-assistant.identity-v2"}
-    static func dataRoot(legacyJoeIdentity:Bool=false,info:[String:Any]=Bundle.main.infoDictionary ?? [:],environment:[String:String]=ProcessInfo.processInfo.environment)->URL {
+    static let bailianService="com.joesang.zaichang.standalone.bailian"
+    static let identityService="com.zaichang.app.identity-v2"
+    static func dataRoot(info:[String:Any]=Bundle.main.infoDictionary ?? [:],environment:[String:String]=ProcessInfo.processInfo.environment)->URL {
         if let path=environment["ZAICHANG_DATA_ROOT"],path.hasPrefix("/"),!path.split(separator:"/").contains("..") {return URL(fileURLWithPath:path,isDirectory:true)}
         if let name=environment["ZAICHANG_DATA_ROOT"],!name.isEmpty,!name.contains("/"),name != ".",name != ".." {return FileManager.default.urls(for:.applicationSupportDirectory,in:.userDomainMask)[0].appendingPathComponent(name,isDirectory:true)}
-        // Retired encrypted identity storage keeps its ExampleUser path for compatibility.
-        // An explicit DataRootName always wins, including for this legacy caller.
-        let name=(info["DataRootName"] as? String).flatMap{!$0.isEmpty && !$0.contains("/") && $0 != "." && $0 != ".." ? $0:nil} ?? (edition(info:info,environment:environment) == "standalone" ? "ZaichangStandalone":(legacyJoeIdentity ? "JoeMeetingAssistant":"MeetingAssistant"))
+        let name=(info["DataRootName"] as? String).flatMap{!$0.isEmpty && !$0.contains("/") && $0 != "." && $0 != ".." ? $0:nil} ?? "ZaichangStandalone"
         return FileManager.default.urls(for:.applicationSupportDirectory,in:.userDomainMask)[0].appendingPathComponent(name,isDirectory:true)
     }
     // Optional connectors are independent of bundle identity and safe to omit.
@@ -64,14 +56,13 @@ enum RuntimeConfiguration {
     static func childEnvironment()->[String:String] {
         var env=ProcessInfo.processInfo.environment
         env["ZAICHANG_DATA_ROOT"]=dataRoot().path
-        env["ZAICHANG_EDITION"]=standalone ? "standalone":"joe"
         // Python must never write bytecode into the signed bundle: one .pyc breaks its seal.
         env["PYTHONDONTWRITEBYTECODE"]="1"
         return env
     }
 }
 
-/// What the user calls the assistant. One small file in the edition's data
+/// What the user calls the assistant. One small file in the app's data
 /// directory, read by the UI and by the Python runtime; later persona fields
 /// (such as tone) belong in the same file.
 enum AssistantProfile {

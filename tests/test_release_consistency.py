@@ -38,31 +38,5 @@ class ReleaseConsistencyTests(unittest.TestCase):
             self.assertEqual(choose(), home)
 
 
-@unittest.skipUnless((ROOT / 'scripts/export_public.py').is_file(), 'source checkout only')
-class PublicExportTests(unittest.TestCase):
-    def test_export_takes_only_committed_content(self):
-        import export_public
-        with tempfile.TemporaryDirectory() as temporary:
-            base = Path(temporary).resolve()
-            subprocess.run(['git', 'init', '-q', str(base)], check=True)
-            (base / 'public').mkdir()
-            (base / 'public/README.md').write_text('committed\n')
-            subprocess.run(['git', '-C', str(base), 'add', 'public/README.md'], check=True)
-            subprocess.run(['git', '-C', str(base), '-c', 'user.name=t', '-c', 'user.email=t@example.com', 'commit', '-qm', 't'], check=True)
-            (base / 'public/README.md').write_text('draft from another session\n')
-            (base / 'public/new.png').write_bytes(b'unreviewed')
-            with export_public.committed_tree('HEAD', base) as tree:
-                self.assertEqual((tree / 'public/README.md').read_text(), 'committed\n')
-                self.assertFalse((tree / 'public/new.png').exists())
-
-    def test_hand_edit_on_github_blocks_until_taken_back(self):
-        import sync_public
-        recorded, wanted = {'README.md': 'old'}, {'README.md': 'old'}
-        self.assertEqual(sync_public.edited_outside_export({'README.md': 'hand'}, recorded, wanted), ['README.md'])
-        self.assertEqual(sync_public.edited_outside_export({'new.png': 'hand'}, {}, {}), ['new.png'])
-        self.assertEqual(sync_public.edited_outside_export({'README.md': 'hand'}, recorded, {'README.md': 'hand'}), [])
-        self.assertEqual(sync_public.edited_outside_export({'README.md': 'old'}, recorded, {'README.md': 'new'}), [])
-
-
 if __name__ == '__main__':
     unittest.main()

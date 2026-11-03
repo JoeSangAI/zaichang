@@ -53,14 +53,12 @@ class BundleGateTests(unittest.TestCase):
             problems = release_public.problems_in(app, '0.5.0', home='/nobody')
             self.assertEqual(len(problems), 2)
 
-    def test_binary_naming_the_build_machine_is_refused(self):
+    def test_a_source_path_string_alone_is_not_a_dependency(self):
+        # Compiled-in source paths for assertion messages don't stop the app running elsewhere.
         with tempfile.TemporaryDirectory() as temporary:
             app = self.app(temporary)
-            binary = app / 'Contents/MacOS/tool'
-            binary.write_bytes(b'\xcf\xfa\xed\xfe' + b'/elsewhere/here')
+            (app / 'Contents/MacOS/tool').write_bytes(b'\xcf\xfa\xed\xfe' + b'/nobody/src/file.swift')
             self.assertEqual(release_public.problems_in(app, '0.5.0', home='/nobody'), [])
-            binary.write_bytes(b'\xcf\xfa\xed\xfe' + b'/nobody/here')
-            self.assertEqual(len(release_public.problems_in(app, '0.5.0', home='/nobody')), 1)
 
 
 class PublicInstallerTests(unittest.TestCase):

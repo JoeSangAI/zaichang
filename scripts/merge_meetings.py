@@ -24,7 +24,7 @@ from typing import Any
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_CACHE_ROOT = Path.home() / "Library/Application Support/MeetingAssistant/SessionCache"
+DEFAULT_CACHE_ROOT = Path.home() / "Library/Application Support/ZaichangStandalone/SessionCache"
 DEFAULT_STAGE_ROOT = PROJECT_ROOT / ".runtime/session-continuity-1012/merge-staging"
 EXPECTED = {
     "D2909AA6-B97C-4AA7-83AD-506F47CABA67": "点位筛选与投放节奏｜单周滚动策略下高入住率楼盘点位可得性验证",

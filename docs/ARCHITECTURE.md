@@ -97,7 +97,7 @@ Python 回归位于 `tests/`，原生检查位于 `native/checks/`。`scripts/of
 
 ## 可选配置接口
 
-一份源码，两种应用身份。edition 只决定应用名、bundle ID、数据目录和既有 Keychain 标识，不删功能。公开版为 `ZaichangStandalone`；其他既有身份保留兼容。
+一个应用，一份数据目录：`~/Library/Application Support/ZaichangStandalone`。每个人的差别只来自下面这份配置，不来自不同的版本。
 
 `<数据目录>/connectors.json` 是唯一增强配置，UTF-8 JSON，`schema` 必须为整数 1。缺失、损坏或版本不支持时关闭增强，基础应用仍可使用。路径支持绝对路径与 `~/`，不接受相对路径或 `..`。字段缺失即关闭该项：
 

@@ -94,7 +94,7 @@ func audioObjects(for pids:[pid_t])->[AudioObjectID] {
         return status==noErr && object != kAudioObjectUnknown ? object : nil
     }.sorted()
 }
-func selfAudioPIDs()->[pid_t] {[getpid()]+processes(bundle:"com.joesang.meeting-assistant")+processes(bundle:"com.joesang.meeting-assistant.validation")+processes(bundle:"com.joesang.meeting-assistant.next")+processes(bundle:"com.joesang.meeting-assistant.offlineqa")+processes(bundle:"com.joesang.meeting-assistant.desktop")+processes(bundle:"com.joesang.meeting-assistant.development-qa")}
+func selfAudioPIDs()->[pid_t] {[getpid()]+processes(bundle:"com.joesang.zaichang.standalone")+processes(bundle:"com.joesang.zaichang.standalone.development-qa")+processes(bundle:"com.joesang.meeting-assistant")+processes(bundle:"com.joesang.meeting-assistant.validation")+processes(bundle:"com.joesang.meeting-assistant.next")+processes(bundle:"com.joesang.meeting-assistant.offlineqa")+processes(bundle:"com.joesang.meeting-assistant.desktop")+processes(bundle:"com.joesang.meeting-assistant.development-qa")}
 func scopeDescription(global:Bool,ids:[AudioObjectID])->CATapDescription {
     let description=global ? CATapDescription(monoGlobalTapButExcludeProcesses:ids) : CATapDescription(monoMixdownOfProcesses:ids)
     description.isPrivate=true;description.muteBehavior = .unmuted
@@ -1463,7 +1463,7 @@ struct CaptureControlAcknowledgement {
             let args = CommandLine.arguments
             if args.count==2,args[1]=="--runtime-configuration-self-test",Bundle.main.object(forInfoDictionaryKey:"OfflineOnly") as? Bool==true {
                 let checks=try runtimeConfigurationChecks()
-                print(String(data:try JSONSerialization.data(withJSONObject:["type":"runtime_helper","checks":checks,"passed":checks.count,"edition":RuntimeConfiguration.edition(),"data_root":RuntimeConfiguration.dataRoot().path,"capture":false,"cloud":false,"keychain":false],options:.sortedKeys),encoding:.utf8)!)
+                print(String(data:try JSONSerialization.data(withJSONObject:["type":"runtime_helper","checks":checks,"passed":checks.count,"data_root":RuntimeConfiguration.dataRoot().path,"capture":false,"cloud":false,"keychain":false],options:.sortedKeys),encoding:.utf8)!)
                 return
             }
             if args.count==3,args[1]=="--recover-session-cache" {
