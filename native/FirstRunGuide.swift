@@ -129,22 +129,22 @@ final class FirstRunGuide:NSObject {
         case .transcription:
             if isDone(kind) {return "密钥已保存在这台 Mac。"}
             if skipped.contains(kind) {return "先只录音，声音留在本机。以后可以在设置里填写密钥。"}
-            return "把声音变成文字要用阿里云百炼。创建一个 API 密钥粘贴到这里，费用按你账号的实际用量计算。"
+            return "转写和会议概览要用阿里云百炼。创建一个 API 密钥粘贴到这里，费用按你账号的实际用量计算。"
         case .assistant:
-            if skipped.contains(kind) && assistant != .ready {return "先不用助理，录音和转写不受影响。"}
-            if assistant != .ready && activeStep != kind {return "助理用你自己的 Codex 账号，稍后连接。"}
+            if skipped.contains(kind) && assistant != .ready {return "先不用助理提问和旁听，录音、转写和概览不受影响。"}
+            if assistant != .ready && activeStep != kind {return "提问和旁听用你自己的 Codex 账号，稍后连接。"}
             switch assistant {
             case .checking:return "正在检查这台 Mac 上的 Codex…"
             case .ready:return "已连接你的 Codex 账号。"
-            case .needsLogin:return "Codex 已安装，还没登录。在终端粘贴命令并回车，按提示登录，回到这里会自动刷新。"
-            case .notInstalled:return "助理用你自己的 Codex 账号，这台 Mac 还没安装。在终端粘贴命令并回车，按提示登录，回到这里会自动刷新。"
+            case .needsLogin:return "向助理提问和旁听要用 Codex：已安装，还没登录。在终端粘贴命令并回车，按提示登录，回到这里会自动刷新。"
+            case .notInstalled:return "向助理提问和旁听用你自己的 Codex 账号，这台 Mac 还没安装。在终端粘贴命令并回车，按提示登录，回到这里会自动刷新。"
             }
         case .recording:
             return isDone(kind) ? "这台 Mac 已经录过会议。":"开始录音时，系统会询问麦克风和电脑声音，两个都点允许。只问一次。"
         }
     }
     private func title(_ kind:FirstRunStep.Kind)->String {
-        switch kind {case .transcription:return "连接转写服务";case .assistant:return "连接助理";case .recording:return "第一次录音"}
+        switch kind {case .transcription:return "连接转写和概览";case .assistant:return "连接助理";case .recording:return "第一次录音"}
     }
     private func actions(_ kind:FirstRunStep.Kind)->[NSView] {
         switch kind {

@@ -228,6 +228,9 @@ class OfflineRuntime:
     async def start(self):
         pass
 
+    async def request(self, method, params=None, **kwargs):
+        return {}
+
     async def start_thread(self, cwd, **kwargs):
         self.thread_options = kwargs
         return {"thread": {"id": "offline-listener"}}

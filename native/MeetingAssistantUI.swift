@@ -7,6 +7,7 @@ import Darwin
 enum Credential {
     static var offline:Bool {(Bundle.main.object(forInfoDictionaryKey:"OfflineOnly") as? Bool ?? false) || (CommandLine.arguments.contains("--speaker-ui-self-test") || CommandLine.arguments.contains("--recovery-ui-self-test") || CommandLine.arguments.contains("--cache-async-self-test") || CommandLine.arguments.contains("--speaker-refinement-self-test"))}
     static var service:String {RuntimeConfiguration.bailianService}
+    static let changed=Notification.Name("ZaichangBailianCredentialChanged")
     /// How long a read may wait on the system's keychain prompt: a person typing a password, not a disk.
     static let promptTimeout:Double=180
     // One read at a time, and the key is kept once read: a person answering one keychain prompt is never
@@ -49,6 +50,8 @@ enum Credential {
     }
     static func delete() throws {
         guard !offline else {throw NSError(domain:"offline",code:1)}
+        // Declared before the lock so it runs after the unlock: listeners read the key right away.
+        defer {NotificationCenter.default.post(name:changed,object:nil)}
         gate.lock();defer {gate.unlock()}
         let q:[String:Any]=[kSecClass as String:kSecClassGenericPassword,kSecAttrService as String:service,kSecAttrAccount as String:"beijing-asr"]
         let code=SecItemDelete(q as CFDictionary)
@@ -57,6 +60,7 @@ enum Credential {
     }
     static func save(_ key:String) throws {
         guard !offline else {throw NSError(domain:"offline",code:1)}
+        defer {NotificationCenter.default.post(name:changed,object:nil)}
         gate.lock();defer {gate.unlock()}
         var trusted:SecTrustedApplication?; var access:SecAccess?
         guard SecTrustedApplicationCreateFromPath(Bundle.main.executablePath,&trusted)==errSecSuccess,

@@ -12,8 +12,11 @@ import os
 import re
 import sqlite3
 import shutil
+import ssl
 import sys
 import time
+import urllib.error
+import urllib.request
 import uuid
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -64,7 +67,7 @@ MAX_WORK_QUEUED = 4
 MAX_REQUESTS_RUNNING = 4
 # How long Codex may keep retrying the model before the task is told it failed.
 # Listening has none: it picks up by itself once the connection is back.
-RETRY_DEADLINE_SECONDS = {"overview": 60, "request": 120, "work": 300}
+RETRY_DEADLINE_SECONDS = {"request": 120, "work": 300}
 RETRY_DEADLINE_WHEN_DOWN = 20
 # Background work stops starting when the machine is this close to its process limit.
 PROCESS_RESERVE = 300
@@ -93,10 +96,17 @@ def _speech_line(segment: dict) -> str:
     review = "〔识别待核实〕" if not overview_evidence_eligible({**segment, "final": True}) else ""
     return f"{_clock_text(segment.get('start'))} {speaker}：{str(segment.get('text') or '')}{review}"
 OVERVIEW_INTERVAL_SECONDS = 180
-OVERVIEW_BASE_INSTRUCTIONS = "You turn supplied meeting text into the requested JSON. Answer directly, without tools."
-# Failures of the machine or the network, not of this overview: try again next interval.
-OVERVIEW_TRANSIENT_FAILURES = {"model_unreachable", "machine_process_limit", "runtime_capacity",
-                               "runtime_disconnected", "turn_stalled"}
+# Overview is one JSON completion with no tools: it needs no Codex process and no ChatGPT account.
+# DeepSeek on Bailian, same key as transcription: qwen-flash took suggestions for decisions (replay, 2026-11-03).
+OVERVIEW_MODEL = "deepseek-v4.1-flash"
+OVERVIEW_API_HOST = "dashscope.aliyuncs.com"
+OVERVIEW_API_URL = f"https://{OVERVIEW_API_HOST}/compatible-mode/v1/chat/completions"
+OVERVIEW_DEADLINE_SECONDS = 60
+OVERVIEW_MAX_TOKENS = 6000
+# Failures of the network or the service, not of this overview: try again next interval.
+OVERVIEW_TRANSIENT_FAILURES = {"model_unreachable"}
+# Waiting on the user's key, not on the meeting: a new key retries these at once.
+OVERVIEW_KEY_FAILURES = {"overview_key_missing", "overview_key_rejected"}
 OVERVIEW_SOURCE_FORMAT = "indexed-v1"
 _EVIDENCE_SCHEMA = {"type": "array", "minItems": 1, "maxItems": 3, "items": {
     "type": "object", "additionalProperties": False,
@@ -122,6 +132,77 @@ OVERVIEW_SCHEMA = {"type": "object", "additionalProperties": False,
     "required": ["current_topic", "discussion_points", "decisions", "actions", "open_questions"]}
 EMPTY_OVERVIEW = {"current_topic": {"text": "", "evidence": []}, "discussion_points": [],
                   "decisions": [], "actions": [], "open_questions": []}
+# The meeting grows at the end of the user message; everything before it stays a cacheable prefix.
+# Codex's instructions plus the schema. Extra "not a decision" rules made the model drop real decisions (replay, 2026-11-03).
+OVERVIEW_SYSTEM_PROMPT = ("You produce a concise, structured meeting overview from the provided finalized speech segments only. "
+                          "Do not use filesystem, web, MCP, tools, or outside context. Never infer decisions, tasks, owners, or deadlines. "
+                          "Every non-empty item must cite exact source quotes and segment IDs from the supplied meeting projection. "
+                          "Answer with one JSON object that follows this JSON Schema, with every property present:\n"
+                          + json.dumps(OVERVIEW_SCHEMA, ensure_ascii=False, separators=(",", ":")))
+# Read last in an incremental round: without it the model rebuilt the overview from the new speech alone.
+OVERVIEW_KEEP_REMINDER = ("\n\n以上是上一版之后的新发言。输出完整的新一版概览：上一版里的已定事项、接下来和待讨论，"
+                          "只要没被新发言推翻，就原样保留（文字和证据都不变），再加上新内容；讨论要点可以按新进展精简。")
+
+
+class _RefuseRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *_args, **_kwargs):
+        raise RuntimeErrorCode("model_unreachable")
+
+
+def _overview_body(prompt: str) -> dict:
+    return {"model": OVERVIEW_MODEL, "temperature": 0.1, "stream": False, "enable_thinking": False,
+            "response_format": {"type": "json_object"}, "max_tokens": OVERVIEW_MAX_TOKENS,
+            "messages": [{"role": "system", "content": OVERVIEW_SYSTEM_PROMPT}, {"role": "user", "content": prompt}]}
+
+
+def _call_overview_model(key: str, prompt: str, timeout: float) -> dict:
+    """One blocking completion. Provider text can echo the meeting, so failures carry only a code."""
+    body = _overview_body(prompt)
+    request = urllib.request.Request(OVERVIEW_API_URL, data=json.dumps(body, ensure_ascii=False).encode(), method="POST",
+                                     headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"})
+    # Python.org macOS installations may not have run their certificate installer.
+    system_ca = Path("/etc/ssl/cert.pem")
+    context = ssl.create_default_context(cafile=str(system_ca) if sys.platform == "darwin" and system_ca.is_file() else None)
+    handlers = (_RefuseRedirect(), urllib.request.HTTPSHandler(context=context))
+    try:
+        try:
+            with urllib.request.build_opener(*handlers).open(request, timeout=timeout) as response:
+                raw = response.read(2_000_001)
+        except urllib.error.HTTPError:
+            raise
+        except OSError:
+            # Bailian does not need the VPN, so a proxy having a bad moment is no reason to fail: go direct once.
+            with urllib.request.build_opener(urllib.request.ProxyHandler({}), *handlers).open(request, timeout=timeout) as response:
+                raw = response.read(2_000_001)
+    except urllib.error.HTTPError as exc:
+        error_code = ""
+        with contextlib.suppress(Exception):
+            error_code = str((json.loads(exc.read(65_536)).get("error") or {}).get("code") or "").casefold()
+        logging.getLogger(__name__).warning("zaichang-overview-failed %s", _compact({"http": exc.code, "provider_code": error_code[:80]}))
+        if exc.code in (401, 403) or "arrearage" in error_code:
+            raise RuntimeErrorCode("overview_key_rejected") from None
+        if "inspection" in error_code:
+            raise RuntimeErrorCode("overview_content_rejected") from None
+        if exc.code == 429 or exc.code >= 500:
+            raise RuntimeErrorCode("model_unreachable") from None
+        raise RuntimeErrorCode("overview_request_rejected") from None
+    except (OSError, TimeoutError) as exc:  # URLError is an OSError.
+        reason = getattr(exc, "reason", exc)
+        logging.getLogger(__name__).warning("zaichang-overview-failed %s", _compact({"network": type(reason).__name__, "detail": str(reason)[:120]}))
+        raise RuntimeErrorCode("model_unreachable") from None
+    try:
+        root = json.loads(raw)
+        choice = root["choices"][0]
+        text = choice["message"]["content"]
+        if len(raw) > 2_000_000 or choice.get("finish_reason") == "length" or not isinstance(text, str):
+            raise ValueError
+    except (KeyError, IndexError, TypeError, ValueError):
+        raise RuntimeErrorCode("overview_response_invalid") from None
+    return {"text": text, "model": root.get("model"), "usage": root.get("usage")}
+
+
+async def _request_overview(key: str, prompt: str, timeout: float) -> dict:
+    return await asyncio.to_thread(_call_overview_model, key, prompt, timeout)
 
 
 def _now() -> float:
@@ -129,6 +210,10 @@ def _now() -> float:
 
 
 TERMINAL_STATUSES = ("completed", "failed", "interrupted")
+
+
+def _codex_setup_text() -> str:
+    return f"{assistant_name()}的提问和旁听要先连接 Codex（菜单「使用引导…」）。概览、转写和纪要不受影响。"
 
 
 def _failure_text(code: str | None) -> str:
@@ -251,7 +336,9 @@ class AssistantRuntime:
                  clock: Callable[[], float] = _now,
                  sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
                  headroom: Callable[[], int] = process_headroom,
-                 warm_requests: bool = False):
+                 warm_requests: bool = False,
+                 overview_call: Callable[[str, str, float], Awaitable[dict]] = _request_overview,
+                 overview_key: str | None = None):
         self.store = store
         self.cwd = str(Path(cwd).expanduser().resolve())
         self.output_root = Path(output_root) if output_root is not None else Path.home() / "Desktop" / "AI output"
@@ -271,6 +358,9 @@ class AssistantRuntime:
         self.overview_timers: dict[str, asyncio.Task] = {}
         self.overview_refresh_pending: set[str] = set()
         self.overview_last_attempt: dict[str, float] = {}
+        self.overview_call = overview_call
+        # None until the app has said; "" once it has said there is no key.
+        self.overview_key = overview_key
         self.contexts_seen: set[str] = set()
         self.headroom = headroom
         self.warm_requests = warm_requests
@@ -417,6 +507,8 @@ class AssistantRuntime:
                 result = await self.shutdown()
             elif method == "list_workspaces":
                 result = await self.list_workspaces()
+            elif method == "overview_key":
+                result = await self.set_overview_key(params)
             else:
                 if not workspace_id:
                     raise ValueError("workspace_id_required")
@@ -435,6 +527,7 @@ class AssistantRuntime:
                 "workspace_not_found": "会议工作区不存在", "proactive_disabled": "旁听尚未开启",
                 "runtime_offline": "离线模式无法启动任务", "task_not_found": "任务不存在",
                 "task_cancelling": "任务正在停止，请稍后再发送",
+                "auth_required": _codex_setup_text(), "unavailable": "暂时连不上 Codex，稍后再试。",
                 "approval_not_found": "审批已过期或不存在", "session_binding_conflict": "会议已绑定到其他工作区",
                 "invalid_context_database": "上下文数据库路径无效", "runtime_closed": "Codex Runtime 已关闭"}.get(code, code)
 
@@ -512,8 +605,10 @@ class AssistantRuntime:
             except Exception as exc:
                 self.runtime = None
                 code = exc.code if isinstance(exc, RuntimeErrorCode) else "runtime_unavailable"
-                self.runtime_status = "auth_required" if "auth" in code.lower() or "login" in code.lower() else "unavailable"
-                self.runtime_message = _failure_text(code) if code == "machine_process_limit" else code
+                needs_setup = code == "codex_not_installed" or "auth" in code.lower() or "login" in code.lower()
+                self.runtime_status = "auth_required" if needs_setup else "unavailable"
+                self.runtime_message = (_codex_setup_text() if needs_setup
+                                        else _failure_text(code) if code == "machine_process_limit" else code)
 
     async def list_workspaces(self) -> dict:
         rows = self.store.db.execute("SELECT id,title,session_id,cache_id,updated FROM workspace ORDER BY updated DESC")
@@ -583,17 +678,25 @@ class AssistantRuntime:
     async def cmd_overview(self, workspace_id: str, params: dict) -> dict:
         # Visibility is presentation only. Closing the tab never owns a job.
         if params.get("refresh"):
-            await self._ensure_runtime(workspace_id)
             self._schedule_overview(workspace_id, refresh=True)
-        available = self.runtime is not None and not self.runtime.closed
+        available = bool(self.overview_key) and not self.offline
         if not available and self.contexts.get(workspace_id, {}).get("segments"):
-            self._set_overview_status(workspace_id, "failed", "runtime_offline" if self.offline else self.runtime_status,
+            self._set_overview_status(workspace_id, "failed", "runtime_offline" if self.offline else "overview_key_missing",
                                       self._overview_hash(self.contexts[workspace_id]))
         await self._snapshot(workspace_id)
         live = workspace_id in self.overview_timers or any(
             r["kind"] == "overview" and r["status"] in ("queued", "running", "waiting")
             for r in self.store.tasks(workspace_id))
         return {"active": bool(params.get("active")), "queued": live, "available": available}
+
+    async def set_overview_key(self, params: dict) -> dict:
+        """The app hands over the Bailian key here. It stays in this process, out of the store and the logs."""
+        self.overview_key = str(params.get("key") or "").strip()
+        for workspace_id in list(self.contexts):
+            row = self.store.db.execute("SELECT error FROM meeting_overview WHERE workspace_id=?", (workspace_id,)).fetchone()
+            self._schedule_overview(workspace_id, refresh=bool(self.overview_key and row and row["error"] in OVERVIEW_KEY_FAILURES))
+            await self._snapshot(workspace_id)
+        return {"available": bool(self.overview_key)}
 
     @staticmethod
     def _overview_content(segment: dict) -> dict:
@@ -621,7 +724,7 @@ class AssistantRuntime:
                 and current[str(s["id"])] != covered.get(str(s["id"]))]
 
     def _schedule_overview(self, workspace_id: str, *, immediate: bool = False, refresh: bool = False):
-        if self._closed or self.runtime is None or self.runtime.closed:
+        if self._closed or self.offline or self.overview_key is None:
             return
         ctx = self.contexts.get(workspace_id, {})
         if not ctx.get("cache_id") and not ctx.get("session_id"):
@@ -701,8 +804,8 @@ class AssistantRuntime:
             source_hash = self._overview_hash(ctx)
             if not any(overview_evidence_eligible(s) for s in ctx["segments"]):
                 raise RuntimeErrorCode("overview_no_reliable_evidence")
-            if await asyncio.to_thread(self.headroom) < PROCESS_RESERVE:
-                raise RuntimeErrorCode("machine_process_limit")
+            if not self.overview_key:
+                raise RuntimeErrorCode("overview_key_missing")
             frozen = self._prepare_overview(workspace_id, ctx)
             task_id = self._create_task(workspace_id, "会议概览", "user", goal="根据已完成的会议发言更新结构化概览",
                                         source_refs=[source_hash], kind="overview")
@@ -746,7 +849,7 @@ class AssistantRuntime:
                   + self._overview_prompt({"title": ctx.get("title"), "segments": []}).split("人物字典按", 1)[0]
                   + "\n上一版概览（证据使用原片段ID）：" + _compact(previous)
                   + "\n新发言每行为[segment_id,说话人,原文]，证据沿用原ID。\n最终发言片段：\n")
-        lines = []; size = len(prefix)
+        lines = []; size = len(prefix) + len(OVERVIEW_KEEP_REMINDER)
         for segment in new:
             sid = str(segment["id"])
             partial = covered.get(sid)
@@ -775,9 +878,9 @@ class AssistantRuntime:
                 break
             lines.append(line); size += len(line) + 1
             covered[sid] = coverage[sid]
-        if len(prefix) > MAX_CONTEXT_CHARS:
+        if len(prefix) + len(OVERVIEW_KEEP_REMINDER) > MAX_CONTEXT_CHARS:
             raise RuntimeErrorCode("overview_summary_exceeds_budget")
-        return {**frozen, "prompt": prefix + "\n".join(lines), "covered": covered,
+        return {**frozen, "prompt": prefix + "\n".join(lines) + OVERVIEW_KEEP_REMINDER, "covered": covered,
                 "remaining": covered != coverage}
 
     def _overview_prompt(self, ctx: dict) -> str:
@@ -829,6 +932,10 @@ class AssistantRuntime:
                     if sid not in indexed_sources:
                         continue
                     sid = indexed_sources[sid]
+                if quote and quote not in sources.get(sid, ""):
+                    # A misread pointer: words found verbatim in exactly one line correct it.
+                    found = [source for source, text in sources.items() if quote in text]
+                    sid = found[0] if len(found) == 1 else sid
                 if sid in sources and quote and quote in sources[sid] and overview_evidence_eligible({"final": True, "text": quote}):
                     out.append({"segment_id": sid, "quote": quote})
             return out[:3]
@@ -1010,6 +1117,11 @@ class AssistantRuntime:
                 await self._interrupt_conversation(row["id"])
             elif enabled:
                 await self._ensure_runtime(workspace_id)
+                if not self.offline and (self.runtime is None or self.runtime.closed):
+                    # Nobody would be listening: the switch must not claim otherwise.
+                    self.store.db.execute("UPDATE workspace SET proactive=0 WHERE id=?", (workspace_id,))
+                    await self._snapshot(workspace_id)
+                    raise RuntimeErrorCode(self.runtime_status)
                 if row["id"] not in self.task_workers:
                     self._set_task(row["id"], status="completed", error=None)
                 self._schedule_listener(workspace_id)
@@ -1082,12 +1194,13 @@ class AssistantRuntime:
                 self._set_task(task_id, error="interrupt_outcome_unconfirmed")
 
     def _pump(self):
-        if self._closed or self.runtime is None or self.runtime.closed:
+        if self._closed:
             return
+        codex = self.runtime is not None and not self.runtime.closed
         for row in self.store.db.execute("""SELECT * FROM task WHERE status='queued' AND kind IN ('chat','overview','work')
                 ORDER BY CASE WHEN kind='work' AND origin!='user' THEN 1 ELSE 0 END, created""").fetchall():
             task_id = row["id"]
-            if task_id in self.task_workers:
+            if task_id in self.task_workers or (row["kind"] != "overview" and not codex):
                 continue
             request = row["kind"] == "work" and row["lane"] == "request"
             if row["kind"] == "overview" and len(self.background_running) >= 2:
@@ -1104,7 +1217,7 @@ class AssistantRuntime:
                 self.work_running.add(task_id)
             self._set_task(task_id, status="running")
             self.turn_ready[task_id] = asyncio.Event()
-            worker = asyncio.create_task(self._run_task(task_id))
+            worker = asyncio.create_task(self._run_overview(task_id) if row["kind"] == "overview" else self._run_task(task_id))
             self.task_workers[task_id] = worker
             worker.add_done_callback(lambda done, tid=task_id: self._worker_done(tid, done))
 
@@ -1217,21 +1330,16 @@ class AssistantRuntime:
         self.turn_ready[task_id].clear()
         if row["kind"] == "work":
             return await self._run_work(task_id)
-        is_overview = row["kind"] == "overview"
         started = time.monotonic()
         fresh = row["thread_id"] not in self.runtime_threads
-        self.turn_modes[task_id] = "overview" if is_overview else "listen"
+        self.turn_modes[task_id] = "listen"
         try:
             thread_id = row["thread_id"]
             if fresh:
-                model, effort = 'gpt-6.1-terra', 'medium'  # Overview and conversation threads share one route.
-                options = {"tools": False, "base_instructions": OVERVIEW_BASE_INSTRUCTIONS} if is_overview else {}
+                model, effort = 'gpt-6.1-terra', 'medium'
                 result = await self.runtime.start_thread(self.cwd, ephemeral=True, sandbox="read-only", approval_policy="never",
-                    dynamic_tools=[] if is_overview else self._dynamic_tools(), model=model, effort=effort,
-                    developer_instructions=("You produce a concise, structured meeting overview from the provided finalized speech segments only. "
-                                            "Do not use filesystem, web, MCP, tools, or outside context. Never infer decisions, tasks, owners, or deadlines. "
-                                            "Every non-empty item must cite exact source quotes and segment IDs from the supplied meeting projection."
-                                            if is_overview else self._listener_prompt()), **options)
+                    dynamic_tools=self._dynamic_tools(), model=model, effort=effort,
+                    developer_instructions=self._listener_prompt())
                 thread_id = result["thread"]["id"]
                 logging.getLogger(__name__).warning('zaichang-model-route %s', _compact({
                     'kind': row['kind'], 'requested_model': model, 'requested_effort': effort,
@@ -1241,15 +1349,6 @@ class AssistantRuntime:
                 self._set_task(task_id, thread_id=thread_id)
             if self.store.task(task_id)["status"] == "cancelling":
                 self._set_task(task_id, status="completed", turn_id=None)
-                return
-            if is_overview:
-                self.store.db.execute("UPDATE message SET status='completed' WHERE task_id=? AND role='user' AND status='queued'", (task_id,))
-                ctx = self.overview_inputs[task_id]
-                await self._run_turn(task_id, thread_id, ctx.get("prompt") or self._overview_prompt(ctx), output_schema=OVERVIEW_SCHEMA)
-                if self.store.task(task_id)["status"] == "completed":
-                    await self._finish_overview(task_id)
-                else:
-                    self._set_overview_status(workspace_id, "interrupted", "turn_interrupted", self._overview_hash(ctx))
                 return
             # The conversation thread only listens; user requests run on their own threads.
             if not self._listening_enabled(workspace_id):
@@ -1265,7 +1364,7 @@ class AssistantRuntime:
             raise
         except Exception as exc:
             code = exc.code if isinstance(exc, RuntimeErrorCode) else str(exc)
-            if code == "thread_not_found" and not fresh and not is_overview:
+            if code == "thread_not_found" and not fresh:
                 # Explicit rejection proves this turn never began. Retry once on
                 # a new ephemeral thread; unknown RPC outcomes are never replayed.
                 self.runtime_threads.discard(thread_id)
@@ -1273,14 +1372,12 @@ class AssistantRuntime:
                 return await self._run_task(task_id)
             # A stalled listening turn, or one whose process died after a good run,
             # resumes on a fresh thread instead of ending listening.
-            resumes = not is_overview and (code == "turn_stalled" or (
-                code == "runtime_disconnected" and time.monotonic() - started >= LISTENER_SELF_HEAL_AFTER_SECONDS))
+            resumes = code == "turn_stalled" or (
+                code == "runtime_disconnected" and time.monotonic() - started >= LISTENER_SELF_HEAL_AFTER_SECONDS)
             self._set_task(task_id, status="completed" if resumes
                            else "interrupted" if self.runtime is None or self.runtime.closed or code == "runtime_disconnected"
                            else "failed", turn_id=None, error=code)
             self.store.db.execute("UPDATE message SET status='interrupted' WHERE task_id=? AND status='queued'", (task_id,))
-            if is_overview:
-                self._set_overview_status(workspace_id, "failed", code, (json.loads(row["source_refs"]) or [""])[0])
             # A missing/unknown temporary thread is discarded. The next explicit
             # send/toggle creates a fresh thread with local history, never resume.
             self.runtime_threads.discard(thread_id)
@@ -1291,8 +1388,40 @@ class AssistantRuntime:
             self.turn_outputs.pop(task_id, None)
             self.activities.pop(task_id, None)
             self._dismiss_requests(task_id)
-            if is_overview:
-                self.overview_inputs.pop(task_id, None)
+            await self._snapshot(workspace_id)
+
+    async def _run_overview(self, task_id):
+        row = self.store.task(task_id); workspace_id = row["workspace_id"]
+        ctx = self.overview_inputs[task_id]
+        started = time.monotonic()
+        try:
+            self.store.db.execute("UPDATE message SET status='completed' WHERE task_id=? AND role='user' AND status='queued'", (task_id,))
+            await self._snapshot(workspace_id)
+            prompt = ctx.get("prompt") or self._overview_prompt(ctx)
+            try:
+                # The socket timeout normally ends it first; the thread behind this cannot be interrupted.
+                reply = await asyncio.wait_for(self.overview_call(self.overview_key or "", prompt, OVERVIEW_DEADLINE_SECONDS),
+                                               OVERVIEW_DEADLINE_SECONDS + 5)
+            except asyncio.TimeoutError:
+                raise RuntimeErrorCode("model_unreachable") from None
+            logging.getLogger(__name__).warning("zaichang-overview-usage %s", _compact({
+                "task_id": task_id, "requested_model": OVERVIEW_MODEL, "reported_model": reply.get("model"),
+                "seconds": round(time.monotonic() - started, 2), "prompt_chars": len(prompt), "usage": reply.get("usage")}))
+            self._message(f"bailian:{task_id}", task_id, "assistant", reply["text"], "completed", "user")
+            self._set_task(task_id, status="completed", turn_id=None, error=None)
+            await self._finish_overview(task_id)
+        except asyncio.CancelledError:
+            self._set_task(task_id, status="interrupted", turn_id=None, error="shutdown_no_replay")
+            raise
+        except Exception as exc:
+            code = (exc.code if isinstance(exc, RuntimeErrorCode)
+                    else "overview_response_invalid" if isinstance(exc, json.JSONDecodeError) else str(exc))
+            self._set_task(task_id, status="failed", turn_id=None, error=code)
+            self.store.db.execute("UPDATE message SET status='interrupted' WHERE task_id=? AND status='queued'", (task_id,))
+            self._set_overview_status(workspace_id, "failed", code, (json.loads(row["source_refs"]) or [""])[0])
+        finally:
+            self.overview_inputs.pop(task_id, None)
+            self.turn_ready[task_id].set()
             await self._snapshot(workspace_id)
 
     async def _run_work(self, task_id):
@@ -1362,7 +1491,7 @@ class AssistantRuntime:
 
     def _retry_deadline(self, task_id) -> float | None:
         row = self.store.task(task_id)
-        lane = "overview" if row["kind"] == "overview" else None if row["kind"] == "chat" else "request" if row["lane"] == "request" else "work"
+        lane = None if row["kind"] == "chat" else "request" if row["lane"] == "request" else "work"
         if lane is None:
             return None
         deadline = RETRY_DEADLINE_SECONDS[lane]
@@ -1386,9 +1515,9 @@ class AssistantRuntime:
         # Only the user's own messages create user-origin work; listener tasks are proactive.
         return self._executing(task_id) and self.store.task(task_id)["origin"] == "user"
 
-    async def _run_turn(self, task_id, thread_id, prompt, *, output_schema=None):
+    async def _run_turn(self, task_id, thread_id, prompt):
         self.turn_outputs[task_id] = []
-        options = {"output_schema": output_schema}
+        options = {}
         if self._executing(task_id):
             # Work products have a narrow writable home. Existing projects and
             # broader actions use the runtime's explicit approval flow.
@@ -1452,9 +1581,6 @@ class AssistantRuntime:
                         for item_id, text in self.turn_outputs[task_id]:
                             self._message(f"codex:{thread_id}:{turn_id}:{item_id}", task_id, "assistant",
                                           heading + text, "completed", row["origin"])
-                    elif row["kind"] == "overview":
-                        for item_id, text in self.turn_outputs[task_id]:
-                            self._message(f"codex:{thread_id}:{turn_id}:{item_id}", task_id, "assistant", text, "completed", "user")
                     await self._link_changed(down=False)
                     self._set_task(task_id, status="completed", turn_id=None, error=None)
                 elif status in ("interrupted", "cancelled") or row["status"] == "cancelling":

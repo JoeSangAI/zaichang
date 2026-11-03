@@ -105,7 +105,7 @@ import SQLite3
         controller.panel.chooseTab("概览")
         try wait(240) { ["ready", "failed", "interrupted"].contains((controller.state["meeting_overview"] as? [String: Any])?["status"] as? String ?? "") }
         let overview = controller.state["meeting_overview"] as? [String: Any] ?? [:]
-        try check(overview["status"] as? String == "ready", "native_overview_real_codex_completion")
+        try check(overview["status"] as? String == "ready", "native_overview_real_model_completion")
         try check(overview["stale"] as? Bool == false, "overview_matches_current_speech")
         let data = overview["data"] as? [String: Any] ?? [:]
         try check(!((data["current_topic"] as? [String: Any])?["text"] as? String ?? "").isEmpty, "overview_has_current_topic")

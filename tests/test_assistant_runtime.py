@@ -52,6 +52,8 @@ class FakeAppServer:
 
     async def request(self, method, params=None, **kwargs):
         params = params or {}
+        if method == "account/read":  # The login probe at startup, not part of any task.
+            return {"account": {"type": "chatgpt"}, "requiresOpenaiAuth": True}
         self.requests.append((method, params))
         if method == "turn/start":
             thread_id = params["threadId"]
@@ -77,19 +79,7 @@ class FakeAppServer:
         q = self.events.setdefault(thread_id, asyncio.Queue())
         await asyncio.sleep(0)
         if params.get("outputSchema"):
-            if params["outputSchema"] == OVERVIEW_SCHEMA:
-                prompt = params["input"][0]["text"]
-                source_rows = [json.loads(line) for line in prompt.split("最终发言片段：\n", 1)[1].splitlines()]
-                source_id = next((str(row[0]) for row in source_rows if isinstance(row[2], str)
-                                  and "不知道 qoder 有没有做过校园的推广" in row[2]), "0")
-                text = json.dumps({"current_topic": {"text": "Qoder 校园推广", "evidence": [
-                    {"segment_id": source_id, "quote": "qoder 有没有做过校园的推广"}]},
-                    "discussion_points": [{"text": "团队尚不确定 Qoder 是否做过校园推广", "evidence": [
-                        {"segment_id": source_id, "quote": "不知道 qoder 有没有做过校园的推广"}]}],
-                    "decisions": [], "actions": [], "open_questions": [{"text": "Qoder 是否做过校园推广？", "evidence": [
-                        {"segment_id": source_id, "quote": "qoder 有没有做过校园的推广"}]}]}, ensure_ascii=False)
-            else:
-                text = json.dumps({"stance": "代表团队明确校园推广目标", "items": []}, ensure_ascii=False)
+            text = json.dumps({"stance": "代表团队明确校园推广目标", "items": []}, ensure_ascii=False)
         else:
             text = "已完成"
         await q.put({"method": "item/completed", "params": {"threadId": thread_id,
@@ -117,6 +107,34 @@ class FakeAppServer:
 
     async def close(self):
         self.closed = True
+
+
+class FakeOverviewModel:
+    """Stands in for the Bailian call: deterministic JSON built from the prompt it was given."""
+
+    def __init__(self):
+        self.calls = []
+        self.failure = None
+        self.gate = None
+
+    async def __call__(self, key, prompt, timeout):
+        self.calls.append({"key": key, "prompt": prompt, "timeout": timeout})
+        if self.gate is not None:
+            await self.gate.wait()
+        await asyncio.sleep(0)
+        if self.failure:
+            raise RuntimeErrorCode(self.failure)
+        rows = prompt.removesuffix(assistant_runtime.OVERVIEW_KEEP_REMINDER).split("最终发言片段：\n", 1)[1]
+        source_rows = [json.loads(line) for line in rows.splitlines()]
+        source_id = next((str(row[0]) for row in source_rows if isinstance(row[2], str)
+                          and "不知道 qoder 有没有做过校园的推广" in row[2]), "0")
+        text = json.dumps({"current_topic": {"text": "Qoder 校园推广", "evidence": [
+            {"segment_id": source_id, "quote": "qoder 有没有做过校园的推广"}]},
+            "discussion_points": [{"text": "团队尚不确定 Qoder 是否做过校园推广", "evidence": [
+                {"segment_id": source_id, "quote": "不知道 qoder 有没有做过校园的推广"}]}],
+            "decisions": [], "actions": [], "open_questions": [{"text": "Qoder 是否做过校园推广？", "evidence": [
+                {"segment_id": source_id, "quote": "qoder 有没有做过校园的推广"}]}]}, ensure_ascii=False)
+        return {"text": text, "model": "deepseek-v4.1-flash", "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
 
 
 class FakeMember:
@@ -153,7 +171,9 @@ class AssistantRuntimeTests(unittest.IsolatedAsyncioTestCase):
         async def emit(value):
             self.emitted.append(value)
 
-        self.service = AssistantRuntime(self.store, self.root, output_root=self.root / "outputs", runtime_factory=fake_members(self.fake), emit=emit)
+        self.overview_model = FakeOverviewModel()
+        self.service = AssistantRuntime(self.store, self.root, output_root=self.root / "outputs", runtime_factory=fake_members(self.fake), emit=emit,
+                                        overview_call=self.overview_model, overview_key="fake-key")
         result = await self.service.bind("workspace-proposed", {"session_id": "session-1", "cache_id": "cache-1", "title": "广告策略会"})
         self.workspace_id = result["workspace_id"]
 
@@ -214,7 +234,7 @@ class AssistantRuntimeTests(unittest.IsolatedAsyncioTestCase):
         store.close()
 
 
-    async def test_meeting_overview_uses_codex_schema_without_changing_chat_focus(self):
+    async def test_meeting_overview_uses_bailian_without_codex_or_chat_focus(self):
         speech = "不知道 qoder 有没有做过校园的推广"
         await self.service.cmd_context(self.workspace_id, {"title": "Qoder campus marketing", "notes": "PRIVATE_NOTE_SHOULD_NOT_ENTER_OVERVIEW",
             "segments": [{"id": "public-qoder-1", "revision": 1, "text": speech, "speaker": "Bob", "final": True},
@@ -234,13 +254,12 @@ class AssistantRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.store.workspace(self.workspace_id)["active_task_id"])
         task = self.store.db.execute("SELECT * FROM task WHERE kind='overview'").fetchone()
         self.assertEqual(task["lane"], "background")
-        thread_id = task["thread_id"]
-        self.assertTrue(self.fake.threads[thread_id]["ephemeral"])
-        self.assertEqual(self.fake.threads[thread_id]["sandbox"], "read-only")
-        self.assertEqual(self.fake.threads[thread_id]["dynamic_tools"], [])
-        turn = next(params for method, params in self.fake.requests if method == "turn/start")
-        self.assertEqual(turn["outputSchema"], OVERVIEW_SCHEMA)
-        prompt = turn["input"][0]["text"]
+        self.assertIsNone(task["thread_id"])
+        self.assertEqual(self.fake.threads, {})
+        self.assertFalse([method for method, _ in self.fake.requests if method == "turn/start"])
+        call = self.overview_model.calls[0]
+        self.assertEqual(call["key"], "fake-key")
+        prompt = call["prompt"]
         self.assertIn(speech, prompt)
         self.assertNotIn("PRIVATE_NOTE_SHOULD_NOT_ENTER_OVERVIEW", prompt)
         self.assertNotIn("unfinished", prompt)
@@ -333,7 +352,7 @@ class AssistantRuntimeTests(unittest.IsolatedAsyncioTestCase):
             (self.workspace_id,)).fetchone()[0]
         evidence = json.loads(stored)["current_topic"]["evidence"]
         self.assertEqual(evidence[0]["segment_id"], segments[700]["id"])
-        self.assertEqual(sum(method == "turn/start" for method, _ in self.fake.requests), 1)
+        self.assertEqual(len(self.overview_model.calls), 1)
 
     async def test_overview_index_protocol_rejects_wrong_sources_and_keeps_numeric_ids_unambiguous(self):
         ctx = {"overview_source_format": assistant_runtime.OVERVIEW_SOURCE_FORMAT, "segments": [
@@ -349,6 +368,10 @@ class AssistantRuntimeTests(unittest.IsolatedAsyncioTestCase):
         for sid in ("3", "-1", "00", "foreign-meeting-id", "bad"):
             self.assertEqual(validate(sid, quote), [])
         self.assertEqual(validate("0", "伪造原文"), [])
+        # A real line, misread: the words are verified verbatim and only the pointer moves.
+        self.assertEqual(validate("1", quote), [{"segment_id": "1", "quote": quote}])
+        twice = {**ctx, "segments": ctx["segments"] + [{"id": "again", "text": quote, "final": True}]}
+        self.assertEqual(validate("1", quote, twice), [])
         self.assertEqual(validate("2", ctx["segments"][2]["text"]), [])
         other = {**ctx, "segments": [{"id": "other-meeting", "text": "另一场会议的原文。", "final": True}]}
         self.assertEqual(validate("0", quote, other), [])
@@ -391,7 +414,7 @@ class AssistantRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["queued"])
         await self.wait_until(lambda: self.store.db.execute("SELECT status FROM meeting_overview WHERE workspace_id=?",
             (self.workspace_id,)).fetchone()[0] == "ready")
-        self.assertEqual(sum(method == "turn/start" for method, _ in self.fake.requests), 1)
+        self.assertEqual(len(self.overview_model.calls), 1)
 
 
 
@@ -482,7 +505,7 @@ class AssistantRuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.service.cmd_overview(self.workspace_id, {"active": True, "refresh": True})
         await self.wait_until(lambda: self.store.db.execute("SELECT status FROM meeting_overview WHERE workspace_id=?",
             (self.workspace_id,)).fetchone()[0] == "ready")
-        self.assertEqual(sum(method == "turn/start" for method, _ in self.fake.requests), 1)
+        self.assertEqual(len(self.overview_model.calls), 1)
     async def test_overview_company_names_do_not_prove_payment_relation(self):
         source = "我们常规邀请的是甲公司和乙公司。"
         ctx = {"segments": [{"id": "company", "text": source, "final": True}]}

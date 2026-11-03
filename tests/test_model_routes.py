@@ -1,3 +1,4 @@
+import assistant_runtime as ar
 import asyncio
 import unittest
 from unittest.mock import AsyncMock
@@ -17,10 +18,8 @@ class RouteTransportTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('model',sent);self.assertNotIn('effort',sent)
 
 class PurposeRoutes(MeetingIncrementalOverviewTests):
-    async def test_overview_requests_medium_terra(self):
+    async def test_overview_goes_to_bailian_and_opens_no_codex_thread(self):
         await self.context(1);await self.settle()
-        options=self.fake.thread_options[0]
-        # Fake transport records the exact options used by the real scheduler.
-        if isinstance(options,tuple):options=options[-1]
-        self.assertEqual(options['model'],'gpt-6.1-terra')
-        self.assertEqual(options['effort'],'medium')
+        self.assertEqual(self.fake.thread_options,[])
+        self.assertEqual(len(self.overview_model.calls),1)
+        self.assertEqual(ar.OVERVIEW_MODEL,'deepseek-v4.1-flash')

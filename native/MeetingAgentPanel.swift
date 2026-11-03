@@ -433,7 +433,10 @@ final class MeetingAgentPanel: NSView {
         let busy = ["queued", "running"].contains(status)
         let error = overview["error"] as? String ?? ""
         overviewStatus.stringValue = busy ? "正在整理会议内容…" : status == "failed" || status == "interrupted" ?
-            (error == "overview_no_reliable_evidence" ? "原文待核实，暂不生成概览" : "暂时无法更新 · 可点击重试") :
+            (error == "overview_no_reliable_evidence" ? "原文待核实，暂不生成概览" :
+             error == "overview_key_missing" ? "去设置里填写百炼密钥后可用" :
+             error == "overview_key_rejected" ? "百炼密钥无效或账户欠费 · 去设置检查" :
+             error == "overview_content_rejected" ? "百炼拒绝处理这段内容，概览未更新" : "暂时无法更新 · 可点击重试") :
             error == "overview_evidence_filtered" ? "缺少依据的判断已排除 · 请核对原文" :
             error == "overview_source_needs_review" ? "仅依据可用原文整理 · 部分片段待核实" :
             overview["stale"] as? Bool == true ? "会议有新内容 · 等待更新" : status == "ready" ? "根据本场会议整理" : "会议概览"

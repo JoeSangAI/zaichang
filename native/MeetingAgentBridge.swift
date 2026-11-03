@@ -16,11 +16,16 @@ final class MeetingAgentBridge {
     var observers: [UUID: (String, [String: Any]) -> Void] = [:]
     private(set) var error: String?
     private var stopping = false
+    private let offline: Bool
+    private(set) var overviewKeyKnown = false
     init(root: String, store: URL, offline: Bool) {
+        self.offline = offline
         let child = Process(), stdin = Pipe(), stdout = Pipe()
         child.executableURL = URL(fileURLWithPath: "/usr/local/bin/python3")
         child.arguments = ["-u", root + "/assistant_runtime.py", "--store", store.path, "--cwd", NSHomeDirectory()] + (offline ? ["--offline"] : [])
         var env = RuntimeConfiguration.childEnvironment()
+        // Codex and everything it runs inherit this environment; a key never travels through it.
+        for name in ["DASHSCOPE_API_KEY", "ALIYUN_API_KEY", "BAILIAN_API_KEY", "ZAICHANG_OVERVIEW_PROBE_KEY"] { env.removeValue(forKey: name) }
         env["PATH"] = (RuntimeConfiguration.toolSearchPaths + [env["PATH"] ?? ""]).joined(separator: ":")
         child.environment = env; child.standardInput = stdin; child.standardOutput = stdout
         // Retain startup diagnostics locally; never send them into the chat.
@@ -50,6 +55,23 @@ final class MeetingAgentBridge {
         } }
         do { try FileManager.default.createDirectory(at: store, withIntermediateDirectories: true); try child.run(); process = child; input = stdin.fileHandleForWriting }
         catch { self.error = "助理未能启动：\(error.localizedDescription)"; stdout.fileHandleForReading.readabilityHandler = nil }
+        NotificationCenter.default.addObserver(forName: Credential.changed, object: nil, queue: .main) { [weak self] _ in self?.pushOverviewKey() }
+        pushOverviewKey()
+    }
+    /// The overview's Bailian key goes over stdin, like the recording helpers'. A Keychain that
+    /// cannot answer right now is not a missing key: say nothing and ask again later.
+    func pushOverviewKey(allowInteraction: Bool = false) {
+        guard !offline else { return }
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let key: String
+            // In QA only the explicit live probe gets here, with a key it was handed.
+            if Credential.offline { key = ProcessInfo.processInfo.environment["ZAICHANG_OVERVIEW_PROBE_KEY"] ?? "" }
+            else { do { key = try Credential.load(allowInteraction: allowInteraction) ?? "" } catch { return } }
+            DispatchQueue.main.async {
+                self?.overviewKeyKnown = !key.isEmpty
+                self?.send("overview_key", workspace: "", params: ["key": key])
+            }
+        }
     }
     private func receive(_ data: Data) {
         buffer.append(data)
@@ -240,6 +262,7 @@ final class MeetingAgentController: NSObject {
         let notes=owner.notesController?.editor.string ?? ""
         let meetingState = owner.phase.phase.rawValue
         guard force || contextDirty || lastTitle != owner.meetingTitle || lastNotes != notes || lastMeetingState != meetingState else{return}
+        if lastMeetingState != meetingState, !service.overviewKeyKnown { service.pushOverviewKey() }
         lastMeetingState = meetingState
         contextDirty=false;lastTitle=owner.meetingTitle;lastNotes=notes
         let rows = meetingAssistantSegments(owner: owner, turns: owner.readingTurns(owner.sequence))
@@ -264,6 +287,8 @@ final class MeetingAgentController: NSObject {
         guard refresh, !suspended, !binding else { return }
         sync(force: true)
         guard currentBindingReady else { return }
+        // The user asked: this is the moment a Keychain prompt is welcome.
+        if !service.overviewKeyKnown { service.pushOverviewKey(allowInteraction: true) }
         service.send("overview", workspace: workspaceID, params: ["refresh": true])
     }
     func command(_ method: String, _ params: [String: Any]) {

@@ -146,12 +146,17 @@ class CodexTransportTests(unittest.IsolatedAsyncioTestCase):
 
 
 class PoolMember:
+    account = {"account": {"type": "chatgpt"}, "requiresOpenaiAuth": True}
+
     def __init__(self, *, on_request=None, args=()):
         self.args, self.closed, self.starts = args, False, 0
         PoolMember.made.append(self)
 
     async def start(self):
         self.starts += 1
+
+    async def request(self, method, params=None, **kwargs):
+        return PoolMember.account
 
     async def start_thread(self, cwd, **options):
         return {"thread": {"id": f"thread-{len(PoolMember.made)}"}, "options": options}
@@ -182,6 +187,19 @@ class CodexPoolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(PoolMember.made[0].args, NO_TOOLS_ARGS)
         self.assertIn("mcp_servers={}", NO_TOOLS_ARGS)
         self.assertEqual(PoolMember.made[1].args, ())
+
+    async def test_logged_out_codex_is_named_and_leaves_no_process(self):
+        pool = CodexPool(PoolMember, capacity=3)
+        made = len(PoolMember.made)
+        with unittest.mock.patch.object(PoolMember, "account", {"account": None, "requiresOpenaiAuth": True}):
+            with self.assertRaisesRegex(RuntimeErrorCode, "auth_required"):
+                await pool.start()
+        self.assertTrue(pool.closed)
+        self.assertTrue(all(member.closed for member in PoolMember.made[made:]))
+
+    async def test_missing_executable_is_named(self):
+        with self.assertRaisesRegex(RuntimeErrorCode, "codex_not_installed"):
+            await CodexRuntime("/nonexistent/codex").start()
 
     async def test_capacity_is_a_hard_limit(self):
         for _ in range(3):

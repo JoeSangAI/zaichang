@@ -22,8 +22,8 @@ NO_TOOLS_ARGS = ("-c", "mcp_servers={}", "-c", "features.plugins=false", "-c", "
                  "-c", "features.shell_snapshot=false", "-c", 'web_search="disabled"',
                  "-c", "include_apps_instructions=false", "-c", "include_environment_context=false",
                  "-c", "include_permissions_instructions=false")
-# Listening, 4 requests, 2 background jobs, 2 overviews and one warm spare.
-MAX_PROCESSES = 10
+# Listening, 4 requests, 2 background jobs and one warm spare.
+MAX_PROCESSES = 8
 
 
 class RuntimeErrorCode(Exception):
@@ -77,6 +77,8 @@ class CodexRuntime:
                 stderr=asyncio.subprocess.PIPE, limit=8 * 1024 * 1024, start_new_session=True)
         except BlockingIOError as exc:
             raise RuntimeErrorCode("machine_process_limit") from exc
+        except FileNotFoundError as exc:
+            raise RuntimeErrorCode("codex_not_installed") from exc
         self.closed = False
         self._reader = asyncio.create_task(self._read())
         self._stderr = asyncio.create_task(self._drain_stderr())
@@ -329,6 +331,12 @@ class CodexPool:
         probe = self.factory(on_request=self.on_request, args=NO_TOOLS_ARGS)
         try:
             await probe.start()
+            try:
+                account = await probe.request("account/read", {"refreshToken": False}, timeout=10)
+            except (RuntimeErrorCode, asyncio.TimeoutError):
+                account = {}  # A Codex without this call: the first turn reports the login state.
+            if account.get("account") is None and account.get("requiresOpenaiAuth"):
+                raise RuntimeErrorCode("auth_required")
         finally:
             with contextlib.suppress(Exception):
                 await probe.close()
