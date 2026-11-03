@@ -61,7 +61,9 @@ def changelog_problem(version, changelog):
 
 
 def released(version):
-    return subprocess.run(['gh', 'release', 'view', f'v{version}', '--repo', REPO], capture_output=True).returncode == 0
+    """Published, not a draft: a draft reaches nobody, so a version with only a draft still needs releasing."""
+    found = subprocess.run(['gh', 'release', 'view', f'v{version}', '--repo', REPO, '--json', 'isDraft'], capture_output=True, text=True)
+    return found.returncode == 0 and json.loads(found.stdout).get('isDraft') is False
 
 
 def clone_version(clone):
@@ -166,8 +168,20 @@ def publish(clone, dist, version, wait=0):
         if commit == remote: break
         time.sleep(5)
     if commit != remote: raise RuntimeError('这个提交还不在 GitHub 上，先推送再发版')
-    run('gh', 'release', 'create', f'v{version}', dist / 'Zaichang.zip', dist / 'Zaichang-update.zip', dist / 'latest.json',
-        '--repo', REPO, '--target', commit, '--title', f'在场 {version}', '--notes-file', dist / 'notes.md')
+    # A draft first, every file uploaded and retried on its own, and only then made public: installed copies
+    # read latest.json, so it must never go live before the packages it points to.
+    tag = f'v{version}'
+    if subprocess.run(['gh', 'release', 'view', tag, '--repo', REPO], capture_output=True).returncode != 0:
+        run('gh', 'release', 'create', tag, '--draft', '--repo', REPO, '--target', commit, '--title', f'在场 {version}', '--notes-file', dist / 'notes.md')
+    else:  # a draft left by an attempt that didn't finish: point it at what was built now
+        run('gh', 'release', 'edit', tag, '--target', commit, '--notes-file', dist / 'notes.md', '--repo', REPO)
+    for name in ('Zaichang.zip', 'Zaichang-update.zip', 'latest.json'):
+        for attempt in range(6):
+            if subprocess.run(['gh', 'release', 'upload', tag, dist / name, '--clobber', '--repo', REPO], capture_output=True).returncode == 0: break
+            time.sleep(20 * (attempt + 1))
+        else:
+            raise RuntimeError(f'{name} 传不上去；草稿还在，重跑 release_public.py --publish-built 会接着传')
+    run('gh', 'release', 'edit', tag, '--draft=false', '--latest', '--repo', REPO)
     # What installed copies will actually read.
     url = f'https://github.com/{REPO}/releases/latest/download/latest.json'
     if json.loads(run('curl', '-fsSL', '--retry', '3', url))['version'] != version:

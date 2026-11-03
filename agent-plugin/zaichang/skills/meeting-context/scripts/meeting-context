@@ -1,18 +1,9 @@
 #!/bin/sh
 set -eu
 
-if [ -z "${ZAICHANG_EDITION:-}" ]; then
-  if [ -d "$HOME/Desktop/在场.app" ]; then
-    ZAICHANG_EDITION=joe
-  else
-    ZAICHANG_EDITION=standalone
-  fi
-fi
-export ZAICHANG_EDITION
-case "$ZAICHANG_EDITION" in
-  standalone) APP="$HOME/Applications/在场.app" ;;
-  *) APP="$HOME/Desktop/在场.app" ;;
-esac
+# The one 在场 the installer put in place: the user's own Applications folder or the system one.
+APP="$HOME/Applications/在场.app"
+[ -d "$APP" ] || APP="/Applications/在场.app"
 READER="$APP/Contents/Resources/Runtime/meeting_context.py"
 
 if [ ! -f "$READER" ]; then
