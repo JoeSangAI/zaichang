@@ -202,7 +202,14 @@ def publish_models(dist, feed):
     shown = subprocess.run(['gh', 'release', 'view', tag, '--repo', REPO, '--json', 'isDraft,assets'], capture_output=True, text=True)
     if shown.returncode == 0:
         state = json.loads(shown.stdout)
-        if not state['isDraft'] and any(a['name'] == 'Zaichang-models.zip' for a in state['assets']): return
+        if not state['isDraft'] and any(a['name'] == 'Zaichang-models.zip' for a in state['assets']):
+            # Zipping the same models again gives other bytes (file times): the feed must name the file that is there.
+            published = json.loads(run('gh', 'api', f'repos/{REPO}/releases/tags/{tag}'))
+            digest = next(a['digest'] for a in published['assets'] if a['name'] == 'Zaichang-models.zip').removeprefix('sha256:')
+            if feed['models']['sha256'] != digest:
+                feed['models']['sha256'] = digest
+                (dist / 'latest.json').write_text(json.dumps(feed, ensure_ascii=False, indent=1), encoding='utf-8')
+            return
     else:
         run('gh', 'release', 'create', tag, '--draft', '--repo', REPO, '--title', f'在场语音模型 {tag[7:]}',
             '--notes', '在场的语音模型，新安装时和应用一起下载。只在模型变化时更新。')
