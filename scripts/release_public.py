@@ -115,30 +115,74 @@ def verify_signature(app):
     run('codesign', '--verify', '--deep', '--strict', f'-R={REQUIREMENT}', app)
 
 
-def package(app, dist, version, repo=REPO):
-    """The whole zip, the small zip without the models, and the feed. The small one is proven to reassemble."""
+def models_tag(models_id):
+    return f'models-{models_id[:12]}'
+
+
+def published_models():
+    """The models id of the release installed copies read now, or None before the first one."""
+    try: return json.loads(run('curl', '-fsSL', '--retry', '3', f'https://github.com/{REPO}/releases/latest/download/latest.json'))['patch']['models']
+    except (subprocess.CalledProcessError, ValueError, KeyError, TypeError): return None
+
+
+def package(app, dist, version, repo=REPO, previous_models=None):
+    """The small zip (everything but the models) every release, the models zip once per models id on its
+    own fixed release, and the whole zip only when the models changed: copies with the old models then
+    need it. The small one is proven to reassemble with the models into a correctly signed app."""
     app, dist = Path(app), Path(dist)
     if dist.exists(): shutil.rmtree(dist)
     dist.mkdir(parents=True)
-    whole, small = dist / 'Zaichang.zip', dist / 'Zaichang-update.zip'
-    run('ditto', '-c', '-k', '--keepParent', app, whole)
+    models_id = (app / 'Contents/Resources/Runtime/models.id').read_text().strip()
+    whole, small, models = dist / 'Zaichang.zip', dist / 'Zaichang-update.zip', dist / 'Zaichang-models.zip'
     with tempfile.TemporaryDirectory(dir=dist) as temporary:
         stripped = Path(temporary) / app.name
         run('cp', '-Rc', app, stripped)
         for relative in MODEL_FOLDERS: shutil.rmtree(stripped / relative)
         run('ditto', '-c', '-k', '--keepParent', stripped, small)
+        # Model folders only, at their paths inside the app, so a fresh install lays them into the small one.
+        only = Path(temporary) / 'models' / app.name
+        for relative in MODEL_FOLDERS:
+            (only / relative).parent.mkdir(parents=True, exist_ok=True)
+            run('cp', '-Rc', app / relative, only / relative)
+        run('ditto', '-c', '-k', only.parent, models)
         again = Path(temporary) / 'again'
         run('ditto', '-x', '-k', small, again)
-        for relative in MODEL_FOLDERS: run('cp', '-Rc', app / relative, again / app.name / relative)
+        run('ditto', '-x', '-k', models, again)
         verify_signature(again / app.name)
+    if previous_models != models_id: run('ditto', '-c', '-k', '--keepParent', app, whole)
     base = f'https://github.com/{repo}/releases/download/v{version}'
     changelog = app / 'Contents/Resources/Runtime/CHANGELOG.md'
-    feed = {'version': version, 'sha256': sha(whole), 'notes': notes(version, changelog), 'zip': f'{base}/{whole.name}',
-            'patch': {'zip': f'{base}/{small.name}', 'sha256': sha(small),
-                      'models': (app / 'Contents/Resources/Runtime/models.id').read_text().strip()}}
+    # Older copies read "zip" only when the small package can't be used; with unchanged models that is
+    # never, so it names the small one rather than a whole package that wasn't built.
+    entire = whole if whole.exists() else small
+    feed = {'version': version, 'sha256': sha(entire), 'notes': notes(version, changelog), 'zip': f'{base}/{entire.name}',
+            'patch': {'zip': f'{base}/{small.name}', 'sha256': sha(small), 'models': models_id},
+            'models': {'id': models_id, 'sha256': sha(models),
+                       'zip': f'https://github.com/{repo}/releases/download/{models_tag(models_id)}/{models.name}'}}
     (dist / 'latest.json').write_text(json.dumps(feed, ensure_ascii=False, indent=1), encoding='utf-8')
     (dist / 'notes.md').write_text(feed['notes'], encoding='utf-8')
     return feed
+
+
+def upload(tag, file):
+    for attempt in range(6):
+        if subprocess.run(['gh', 'release', 'upload', tag, file, '--clobber', '--repo', REPO], capture_output=True).returncode == 0: return
+        time.sleep(20 * (attempt + 1))
+    raise RuntimeError(f'{Path(file).name} 传不上去；草稿还在，重跑 release_public.py --publish-built 会接着传')
+
+
+def publish_models(dist, feed):
+    """The models live on their own release, uploaded the first time this models id ships."""
+    tag = models_tag(feed['models']['id'])
+    shown = subprocess.run(['gh', 'release', 'view', tag, '--repo', REPO, '--json', 'isDraft,assets'], capture_output=True, text=True)
+    if shown.returncode == 0:
+        state = json.loads(shown.stdout)
+        if not state['isDraft'] and any(a['name'] == 'Zaichang-models.zip' for a in state['assets']): return
+    else:
+        run('gh', 'release', 'create', tag, '--draft', '--repo', REPO, '--title', f'在场语音模型 {tag[7:]}',
+            '--notes', '在场的语音模型，新安装时和应用一起下载。只在模型变化时更新。')
+    upload(tag, dist / 'Zaichang-models.zip')
+    run('gh', 'release', 'edit', tag, '--draft=false', '--latest=false', '--repo', REPO)
 
 
 def build(clone, version):
@@ -175,12 +219,9 @@ def publish(clone, dist, version, wait=0):
         run('gh', 'release', 'create', tag, '--draft', '--repo', REPO, '--target', commit, '--title', f'在场 {version}', '--notes-file', dist / 'notes.md')
     else:  # a draft left by an attempt that didn't finish: point it at what was built now
         run('gh', 'release', 'edit', tag, '--target', commit, '--notes-file', dist / 'notes.md', '--repo', REPO)
+    publish_models(dist, json.loads((dist / 'latest.json').read_text(encoding='utf-8')))
     for name in ('Zaichang.zip', 'Zaichang-update.zip', 'latest.json'):
-        for attempt in range(6):
-            if subprocess.run(['gh', 'release', 'upload', tag, dist / name, '--clobber', '--repo', REPO], capture_output=True).returncode == 0: break
-            time.sleep(20 * (attempt + 1))
-        else:
-            raise RuntimeError(f'{name} 传不上去；草稿还在，重跑 release_public.py --publish-built 会接着传')
+        if (dist / name).exists(): upload(tag, dist / name)
     run('gh', 'release', 'edit', tag, '--draft=false', '--latest', '--repo', REPO)
     # What installed copies will actually read.
     url = f'https://github.com/{REPO}/releases/latest/download/latest.json'
@@ -194,10 +235,10 @@ def release_if_new(clone, build_only=False):
     problem = changelog_problem(version, clone / 'CHANGELOG.md')
     if problem: raise RuntimeError(problem)
     dist = ROOT / '.runtime/release' / version
-    feed = package(build(clone, version), dist, version)
+    feed = package(build(clone, version), dist, version, previous_models=published_models())
     if build_only: return {'released': False, 'version': version, 'dist': str(dist), 'feed': feed}
     publish(clone, dist, version)
-    return {'released': True, 'version': version, 'whole_mb': (dist / 'Zaichang.zip').stat().st_size >> 20,
+    return {'released': True, 'version': version, 'whole': (dist / 'Zaichang.zip').exists(),
             'update_mb': (dist / 'Zaichang-update.zip').stat().st_size >> 20}
 
 
@@ -207,7 +248,7 @@ def publish_built(clone):
     if released(version): return {'released': False, 'version': version, 'reason': '这个版本已经发布过'}
     dist = ROOT / '.runtime/release' / version
     feed = json.loads((dist / 'latest.json').read_text(encoding='utf-8'))
-    if feed['version'] != version or sha(dist / 'Zaichang.zip') != feed['sha256']: raise RuntimeError('构建好的安装包和这个版本对不上，重新构建')
+    if feed['version'] != version or sha(dist / feed['zip'].rsplit('/', 1)[1]) != feed['sha256']: raise RuntimeError('构建好的安装包和这个版本对不上，重新构建')
     publish(clone, dist, version, wait=300)
     return {'released': True, 'version': version}
 

@@ -69,6 +69,16 @@ class PublicInstallerTests(unittest.TestCase):
         self.assertIn(release_public.TEAM, text)
         subprocess.run(['bash', '-n'], input=text.encode(), check=True)
 
+    def test_installer_assembles_app_and_models_and_still_reads_older_feeds(self):
+        text = (ROOT / 'install.sh').read_text(encoding='utf-8')
+        self.assertIn('field models.zip', text)
+        self.assertIn('field patch.zip', text)
+        self.assertIn('field zip', text)  # a feed from before the split
+        self.assertIn('codesign --verify --deep --strict', text)
+
+    def test_models_have_one_fixed_release_per_id(self):
+        self.assertEqual(release_public.models_tag('a60e1ffbc6c11f1e66ae24a9c28ef6be'), 'models-a60e1ffbc6c1')
+
 
 class UpdaterContractTests(unittest.TestCase):
     def swift(self):

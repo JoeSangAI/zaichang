@@ -25,7 +25,7 @@
 
    第二条退出 0、能打印两个版本即可继续。只检查在场需要的这两个包；用户环境里其他工具之间的版本冲突与在场无关，不要用全局 `pip check` 判断，也不要为此改动用户的其他包。不用 `sudo pip`。pip 自身检查更新时打印的证书警告可以忽略；只有依赖安装失败、或上面的导入命令报错时，若错误是访问 PyPI 的证书校验失败（`CERTIFICATE_VERIFY_FAILED`），请用户运行 Python 安装目录里的 `Install Certificates.command`（例如 `open "/Applications/Python 3.12/Install Certificates.command"`）后重试。
 
-3. 下载并安装正式版（约 200 MB，首次需要能访问 GitHub）：
+3. 下载并安装正式版（应用约 40 MB，语音模型约 210 MB；首次需要能访问 GitHub）：
 
    ```sh
    bash install.sh

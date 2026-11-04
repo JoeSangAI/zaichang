@@ -2,7 +2,7 @@
 # Installs the latest 在场. curl -fsSL https://raw.githubusercontent.com/JoeSangAI/zaichang/main/install.sh | bash
 set -euo pipefail
 
-FEED="https://github.com/JoeSangAI/zaichang/releases/latest/download/latest.json"
+FEED="${ZAICHANG_FEED:-https://github.com/JoeSangAI/zaichang/releases/latest/download/latest.json}"
 REQUIREMENT='identifier "com.joesang.zaichang.standalone" and anchor apple generic and certificate leaf[subject.OU] = "3BVM9N9HS4"'
 DATA="$HOME/Library/Application Support/ZaichangStandalone"
 
@@ -32,14 +32,26 @@ trap 'rm -rf "$WORK"' EXIT
 
 say "正在查找最新版本…"
 curl -fsSL --retry 3 "$FEED" -o "$WORK/latest.json" || stop "连不上 GitHub，检查网络后再试一次。"
-field() { plutil -extract "$1" raw -o - "$WORK/latest.json"; }
-VERSION="$(field version)"; ZIP="$(field zip)"; SHA="$(field sha256)"
+field() { plutil -extract "$1" raw -o - "$WORK/latest.json" 2>/dev/null; }
+fetch() {  # url sha256 file
+  curl -fL --retry 3 --progress-bar "$1" -o "$3" || stop "下载没有完成，检查网络后再试一次。"
+  echo "$2  $3" | shasum -a 256 -c - >/dev/null 2>&1 || stop "下载的文件不完整，再试一次。"
+}
+VERSION="$(field version)"
 
-say "正在下载在场 $VERSION…"
-curl -fL --retry 3 --progress-bar "$ZIP" -o "$WORK/app.zip" || stop "下载没有完成，检查网络后再试一次。"
-echo "$SHA  $WORK/app.zip" | shasum -a 256 -c - >/dev/null 2>&1 || stop "下载的文件不完整，再试一次。"
-
-ditto -x -k "$WORK/app.zip" "$WORK/unpacked"
+# The app and its voice models come as two packages; the models change rarely and are shared by releases.
+if MODELS="$(field models.zip)"; then
+  say "正在下载在场 $VERSION…"
+  fetch "$(field patch.zip)" "$(field patch.sha256)" "$WORK/app.zip"
+  say "正在下载语音模型…"
+  fetch "$MODELS" "$(field models.sha256)" "$WORK/models.zip"
+  ditto -x -k "$WORK/app.zip" "$WORK/unpacked"
+  ditto -x -k "$WORK/models.zip" "$WORK/unpacked"
+else
+  say "正在下载在场 $VERSION…"
+  fetch "$(field zip)" "$(field sha256)" "$WORK/app.zip"
+  ditto -x -k "$WORK/app.zip" "$WORK/unpacked"
+fi
 xattr -dr com.apple.quarantine "$WORK/unpacked/在场.app" 2>/dev/null || true
 codesign --verify --deep --strict "-R=$REQUIREMENT" "$WORK/unpacked/在场.app" 2>/dev/null || stop "这份安装包的签名不对，没有安装。"
 

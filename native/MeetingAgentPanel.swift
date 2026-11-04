@@ -339,7 +339,6 @@ final class MeetingAgentPanel: NSView {
         }
         let stop = item("停止回答", #selector(cancelCurrentTask)); stop.isEnabled = state["conversation_status"] as? String == "running"
         _ = item("助理名字…", #selector(renameAssistant))
-        _ = item("你的名字…", #selector(renameMe))
         let recent = NSMenu(); for workspace in state["workspaces"] as? [[String:Any]] ?? [] {
             guard let id = workspace["id"] as? String else { continue }
             let item = NSMenuItem(title: workspace["title"] as? String ?? "会前对话", action: #selector(openRecentMenu(_:)), keyEquivalent: "")
@@ -367,31 +366,8 @@ final class MeetingAgentPanel: NSView {
         }
         if let window { alert.beginSheetModal(for: window, completionHandler: apply) } else { apply(alert.runModal()) }
     }
-    @objc private func renameMe() {
-        let alert = NSAlert(); alert.messageText = "会上大家怎么叫你？"
-        alert.informativeText = "概要里，负责人是你的待办排在最前面。可以写几个称呼，用顿号隔开。"
-        let field = NSTextField(string: AssistantProfile.myNames.joined(separator: "、")); field.frame = NSRect(x: 0, y: 0, width: 240, height: 24)
-        field.placeholderString = "比如：林岚、小林、Lan"; field.setAccessibilityLabel("你的名字")
-        alert.accessoryView = field; alert.addButton(withTitle: "保存"); alert.addButton(withTitle: "取消")
-        alert.window.initialFirstResponder = field
-        let apply: (NSApplication.ModalResponse) -> Void = { [weak self] response in
-            guard response == .alertFirstButtonReturn else { return }
-            do { try AssistantProfile.save(myNames: field.stringValue) } catch { self?.statusLabel.stringValue = "名字没能保存，请重试" }
-            if let self { self.apply(self.state) }
-        }
-        if let window { alert.beginSheetModal(for: window, completionHandler: apply) } else { apply(alert.runModal()) }
-    }
     /// Who said a transcript line, by the overview's segment ID; set by the bridge.
     var speakerOfSegment: ((String) -> String?)?
-    /// A to-do is the user's when its owner is one of their names, or "我" said by them.
-    func isMine(_ item: [String: Any]) -> Bool {
-        let mine = Set(AssistantProfile.myNames.map { $0.lowercased() })
-        guard !mine.isEmpty, let owner = (item["owner"] as? String)?.trimmingCharacters(in: .whitespaces), !owner.isEmpty else { return false }
-        if mine.contains(owner.lowercased()) { return true }
-        guard owner == "我" else { return false }
-        let speakers = (item["evidence"] as? [[String: Any]] ?? []).compactMap { ($0["segment_id"] as? String).flatMap { speakerOfSegment?($0) } }
-        return !speakers.isEmpty && speakers.allSatisfy { mine.contains($0.lowercased()) }
-    }
     @objc private func openRecentMenu(_ sender: NSMenuItem) { if let id = sender.representedObject as? String { onCommand?("open_workspace", ["workspace_id": id]) } }
 
     private func buildOverviewPage() {
@@ -498,10 +474,8 @@ final class MeetingAgentPanel: NSView {
             rich.append(NSAttributedString(string: "\n", attributes: [.paragraphStyle: style]))
         }
         // Conclusions first; background last. Each item is one bulleted line led by a bold keyword or owner.
-        let actions = (data["actions"] as? [[String: Any]] ?? []).filter { !(($0["text"] as? String) ?? "").isEmpty }
-        let mine = actions.filter(isMine)
-        for (key, title, bullet) in [("mine", "我的待办", "→"), ("decisions", "已定事项", "✓"), ("actions", "接下来", "→"), ("open_questions", "待讨论", "?"), ("discussion_points", "讨论要点", "•")] {
-            let items = key == "mine" ? mine : key == "actions" ? actions.filter { !isMine($0) } : (data[key] as? [[String: Any]] ?? []).filter { !(($0["text"] as? String) ?? "").isEmpty }
+        for (key, title, bullet) in [("decisions", "已定事项", "✓"), ("actions", "接下来", "→"), ("open_questions", "待讨论", "?"), ("discussion_points", "讨论要点", "•")] {
+            let items = (data[key] as? [[String: Any]] ?? []).filter { !(($0["text"] as? String) ?? "").isEmpty }
             guard !items.isEmpty else { continue }
             paragraph("\(title)  \(items.count)", size: 12, weight: .semibold, color: MeetingVisualStyle.quietAccent, before: rich.length == 0 ? 0 : 14, after: 6)
             let style = NSMutableParagraphStyle(); style.lineSpacing = 4; style.paragraphSpacing = 8
@@ -514,10 +488,10 @@ final class MeetingAgentPanel: NSView {
                 var text = (item["text"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
                 var lead = ""
                 if var owner = item["owner"] as? String, !owner.isEmpty {
-                    // "我" is whoever said it; name them, and drop the lead under "我的待办".
-                    let said = owner == "我" ? (item["evidence"] as? [[String: Any]])?.first?["segment_id"] as? String : nil
-                    if let said, let speaker = speakerOfSegment?(said) { owner = speaker }
-                    lead = key == "mine" ? "" : owner
+                    // "我" is whoever said it; show that person's name.
+                    if owner == "我", let said = (item["evidence"] as? [[String: Any]])?.first?["segment_id"] as? String,
+                       let speaker = speakerOfSegment?(said) { owner = speaker }
+                    lead = owner
                     if text.hasPrefix(owner) { text = String(text.dropFirst(owner.count)).trimmingCharacters(in: CharacterSet(charactersIn: " ：:，,")) }
                 } else if let colon = text.firstIndex(where: { $0 == "：" || $0 == ":" }), (2...12).contains(text.distance(from: text.startIndex, to: colon)) {
                     lead = String(text[..<colon]); text = String(text[text.index(after: colon)...]).trimmingCharacters(in: .whitespaces)
@@ -529,11 +503,6 @@ final class MeetingAgentPanel: NSView {
                 if let deadline = item["deadline"] as? String, !deadline.isEmpty { rich.append(NSAttributedString(string: " · " + deadline, attributes: quiet)) }
                 if let link = evidenceLink(item) { rich.append(link) }
                 rich.append(NSAttributedString(string: "\n", attributes: body))
-            }
-            if key == "actions" && AssistantProfile.myNames.isEmpty {
-                // Nobody has told 在场 who the user is yet; one quiet line says how.
-                rich.append(NSAttributedString(string: "告诉在场你的名字，你的待办会排在最前面\n", attributes: [.font: MeetingVisualStyle.textFont(12), .foregroundColor: MeetingVisualStyle.muted,
-                    .link: URL(string: "zaichang-me://names")!, .toolTip: "设置你的名字", .paragraphStyle: style]))
             }
         }
 
@@ -1067,7 +1036,6 @@ extension MeetingAgentPanel: NSTextViewDelegate {
             }
             return true
         }
-        if textView === overviewTextView, let url = link as? URL, url.scheme == "zaichang-me" { renameMe(); return true }
         guard textView === overviewTextView, let url = link as? URL, url.scheme == "zaichang-evidence",
               let quote = overviewEvidence[url.lastPathComponent] else { return false }
         let popover = NSPopover(), controller = NSViewController()
