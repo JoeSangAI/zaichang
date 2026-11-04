@@ -53,6 +53,8 @@ final class SpeakerConfirmationController:NSObject,NSTextFieldDelegate,NSPopover
     private let changeName=NSButton(title:"更正姓名…",target:nil,action:nil)
     private let reject=NSButton(title:"不是",target:nil,action:nil)
     private let previewJob=CacheReadJob()
+    // The whole-speaker box plays this voice's longest final sentence.
+    private var previewID=""
     private var previewPlayer:AVAudioPlayer?
     private var previewRevision=0
     init(owner:Delegate) {self.owner=owner;super.init()}
@@ -146,7 +148,7 @@ final class SpeakerConfirmationController:NSObject,NSTextFieldDelegate,NSPopover
             var context:[NSView]=[]
             let spoken=(turn?.parts.compactMap{$0.1["text"] as? String}.joined() ?? "").trimmingCharacters(in:.whitespacesAndNewlines)
             if !spoken.isEmpty {
-                let line=NSTextField(wrappingLabelWithString:"“"+spoken+"”");line.font = .systemFont(ofSize:13);line.textColor=MeetingVisualStyle.ink;line.maximumNumberOfLines=3
+                let line=NSTextField(wrappingLabelWithString:"“"+spoken+"”");line.font = .systemFont(ofSize:13);line.textColor=MeetingVisualStyle.ink;line.maximumNumberOfLines=3;line.lineBreakMode = .byWordWrapping;line.cell?.truncatesLastVisibleLine=true
                 line.preferredMaxLayoutWidth=268
                 let block=NSView();block.wantsLayer=true;block.layer?.cornerRadius=10;block.layer?.backgroundColor=MeetingVisualStyle.quietFill.cgColor
                 block.translatesAutoresizingMaskIntoConstraints=false;line.translatesAutoresizingMaskIntoConstraints=false;block.addSubview(line)
@@ -156,7 +158,8 @@ final class SpeakerConfirmationController:NSObject,NSTextFieldDelegate,NSPopover
             }
             var counts:[String:Int]=[:]
             for reading in owner.readingTurns() {if let name=reading.parts.first.flatMap({owner.naming.name(segment:$0.0)}) {counts[name,default:0]+=1}}
-            let names=counts.sorted{$0.value != $1.value ? $0.value>$1.value:$0.key<$1.key}.prefix(4).map(\.key)
+            let own=speakerKey.flatMap{owner.naming.displayName(speaker:$0)?.value}
+            let names=counts.filter{$0.key != own}.sorted{$0.value != $1.value ? $0.value>$1.value:$0.key<$1.key}.prefix(4).map(\.key)
             if !names.isEmpty {
                 let chips=NSStackView();chips.orientation = .horizontal;chips.spacing=6
                 for name in names {
@@ -167,13 +170,36 @@ final class SpeakerConfirmationController:NSObject,NSTextFieldDelegate,NSPopover
             }
             voiceChips.orientation = .horizontal;voiceChips.spacing=6;voiceChips.isHidden=true
             if speakerKey != nil {
-                scope.isHidden=true;learn.isHidden=true
-                status.stringValue="这个人本场的发言都会改，后面说的也一样。"
+                // One small box: hear a line, type or pick a name, Enter. The name
+                // covers this voice for the whole meeting; picking someone merges.
+                scope.isHidden=true;learn.isHidden=true;status.isHidden=true;buttons.isHidden=true
                 onlyThis.target=self;onlyThis.action=#selector(narrowToThisTurn);onlyThis.bezelStyle = .inline
                 buttons.insertArrangedSubview(onlyThis,at:0)
                 more.title="更多…"
+                previewID=groupIDs.compactMap{id in owner.namingItem(id).map{(id,$0)}}.filter{$0.1["final"] as? Bool==true}
+                    .max{let a=($0.1["end"] as? Double ?? 0)-($0.1["start"] as? Double ?? 0),b=($1.1["end"] as? Double ?? 0)-($1.1["start"] as? Double ?? 0);return a<b}?.0 ?? segment
+                if !spoken.isEmpty,let quote=context.first,let item=owner.namingItem(previewID),let line=item["text"] as? String,!line.isEmpty {
+                    ((quote.subviews.first as? NSTextField))?.stringValue="“"+line.trimmingCharacters(in:.whitespacesAndNewlines)+"”"
+                }
+                listen.target=self;listen.action=#selector(listenQuickVoice);listen.isBordered=false;listen.title=""
+                listen.image=NSImage(systemSymbolName:"play.circle.fill",accessibilityDescription:"试听");listen.imageScaling = .scaleProportionallyUpOrDown
+                listen.contentTintColor=MeetingVisualStyle.ink;listen.setAccessibilityLabel("试听这个人说的一句");listen.toolTip="试听"
+                listen.translatesAutoresizingMaskIntoConstraints=false;listen.widthAnchor.constraint(equalToConstant:28).isActive=true;listen.heightAnchor.constraint(equalToConstant:28).isActive=true
+                if !spoken.isEmpty,let quote=context.first {
+                    for constraint in quote.constraints where constraint.firstAttribute == .width {constraint.constant=256}
+                    (quote.subviews.first as? NSTextField)?.preferredMaxLayoutWidth=232
+                    let row=NSStackView(views:[listen,quote]);row.spacing=8;row.alignment = .centerY;context[0]=row
+                }
+                field.placeholderString=owner.naming.displayName(speaker:speakerKey!) == nil ? "这是谁？":"改名"
+                title.isHidden=true
             }
-            fields=[title]+context+[field,voiceChips,candidates,scope,learn,status,buttons]
+            // The whole-speaker box reads top-down: the line, the name, then people to pick.
+            let lead=speakerKey != nil && !spoken.isEmpty ? 1:0
+            let tail:[NSView]=[voiceChips,candidates,scope,learn,status,buttons]
+            var ordered:[NSView]=[title]
+            if speakerKey != nil {ordered+=Array(context.prefix(lead));ordered.append(field);ordered+=Array(context.dropFirst(lead))}
+            else {ordered+=context;ordered.append(field)}
+            fields=ordered+tail
         }
         let column=NSStackView(views:fields);column.orientation = .vertical;column.alignment = .leading;column.spacing=12;column.translatesAutoresizingMaskIntoConstraints=false
         root.addSubview(column)
@@ -189,6 +215,7 @@ final class SpeakerConfirmationController:NSObject,NSTextFieldDelegate,NSPopover
                 popover.contentViewController?.view.window?.makeFirstResponder(field)
             }
             if quickCandidate==nil {service=SharedPersonIdentityService(root:owner.root);search()}
+            if speakerKey != nil && quickCandidate==nil {listenQuickVoice()}
         }
         refreshValidity()
         if quickCandidate==nil {
@@ -259,6 +286,7 @@ final class SpeakerConfirmationController:NSObject,NSTextFieldDelegate,NSPopover
         guard let view=popover.contentViewController?.view else{return}
         view.layoutSubtreeIfNeeded();popover.contentSize=NSSize(width:324,height:view.fittingSize.height)
     }
+    private var previewContext:Bool {currentQuickContext}
     private var currentQuickContext:Bool {
         guard let owner else{return false}
         if let workspace=owner.workspaceOwner,workspace.displayedDocument !== owner {return false}
@@ -298,26 +326,25 @@ final class SpeakerConfirmationController:NSObject,NSTextFieldDelegate,NSPopover
         }
     }
     private func stopQuickPreview() {
-        previewRevision &+= 1;previewJob.cancel();previewPlayer?.stop();previewPlayer=nil;listen.title="试听"
+        previewRevision &+= 1;previewJob.cancel();previewPlayer?.stop();previewPlayer=nil;if quickCandidate != nil || speakerKey==nil {listen.title="试听"}
         listen.isEnabled = owner?.voiceprintManagementOwner.audioPreviewBlocked != true
     }
     func stopPreviewForCapture() {stopQuickPreview()}
     func cancelQuickInteraction() {stopQuickPreview();if quickCandidate != nil {popover.close()}}
     @objc private func listenQuickVoice() {
         if previewPlayer != nil || previewJob.waiting {stopQuickPreview();return}
-        guard currentQuickContext,let owner,!owner.voiceprintManagementOwner.audioPreviewBlocked,let cache=openedCache,
-              let candidate=quickCandidate,let key=quickKey,owner.voiceprintRecommendation(for:key)==candidate,
-              let id=candidate.support.first(where:{owner.namingItem($0.id) != nil})?.id,var item=owner.namingItem(id),
-              let start=item["start"] as? Double,let end=item["end"] as? Double else{return}
+        guard previewContext,let owner,!owner.voiceprintManagementOwner.audioPreviewBlocked,let cache=openedCache,
+              let id=quickCandidate==nil ? previewID:quickKey.flatMap({key in owner.voiceprintRecommendation(for:key)==quickCandidate ? quickCandidate?.support.first(where:{owner.namingItem($0.id) != nil})?.id:nil}),
+              var item=owner.namingItem(id),let start=item["start"] as? Double,let end=item["end"] as? Double else{return}
         item["end"]=min(end,start+6)
         let root=owner.recoveryBase(),savedSession=session,revision=previewRevision
-        listen.title="读取中…";listen.isEnabled=false
+        if quickCandidate != nil {listen.title="读取中…"};listen.isEnabled=false
         previewJob.run(work:{try SpeakerAudioPreview.read(root:root,cacheID:cache,session:savedSession,items:[item])}) { [weak self] result in
-            guard let self,self.currentQuickContext,self.popover.isShown,self.previewRevision==revision,self.owner?.voiceprintManagementOwner.audioPreviewBlocked != true else{return}
+            guard let self,self.previewContext,self.popover.isShown,self.previewRevision==revision,self.owner?.voiceprintManagementOwner.audioPreviewBlocked != true else{return}
             do {
                 let clip=try result.get(),player=try AVAudioPlayer(data:SpeakerAudioPreview.listeningData(clip.wav));player.delegate=self
                 guard player.prepareToPlay(),player.play() else{throw Failure(code:"quick_voice_play_failed")}
-                self.previewPlayer=player;self.listen.title="停止";self.listen.isEnabled=true
+                self.previewPlayer=player;if self.quickCandidate != nil {self.listen.title="停止"};self.listen.isEnabled=true
             }catch{self.stopQuickPreview();self.showQuickStatus("原音暂时无法试听，可详细查看。")}
         }
     }
@@ -499,9 +526,9 @@ extension Delegate {
         confirmationController?.popover.close()
         let controller=SpeakerConfirmationController(owner:self);confirmationController=controller;controller.present(segment:id,anchor:anchor)
     }
-    func showSpeakerConfirmation(_ segment:String,wholeSpeaker:Bool=false) {
+    func showSpeakerConfirmation(_ segment:String,wholeSpeaker:Bool=false,anchor:NSView?=nil) {
         guard !(workspaceOwner ?? self).meetingDeletionBusy else{return}
         confirmationController?.popover.close()
-        let controller=SpeakerConfirmationController(owner:self);confirmationController=controller;controller.present(segment:segment,wholeSpeaker:wholeSpeaker)
+        let controller=SpeakerConfirmationController(owner:self);confirmationController=controller;controller.present(segment:segment,anchor:anchor,wholeSpeaker:wholeSpeaker)
     }
 }

@@ -835,7 +835,7 @@ enum MeetingCoarseRefinement {
         // Closed but unfinished ASR hypotheses are not finished utterances.
         // Once reviewed, keep them in the original view rather than inventing
         // a speaker for a zero-duration fragment on the clean reading surface.
-        var result=TranscriptTimeline.markReadingEchoes(original:original,projected:projected,protected:protected)
+        var result=TranscriptTimeline.markCrossTrack(projected,protected:protected)
         var drafts=0
         for i in result.indices {
             guard let id=result[i]["segment_id"] as? String,reviewedIDs.contains(id),!protected.contains(id),

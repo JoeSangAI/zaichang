@@ -1746,7 +1746,52 @@ extension Delegate {
         review.performClose(nil);return true
     }
     @objc func showSpeakerReview() {guard !(workspaceOwner ?? self).meetingDeletionBusy else{return};displayedDocument.openSpeakerReview()}
-    func refreshOpenSpeakerReview() {refreshQuickVoiceCandidate();(speakerReviewWindow as? SpeakerReviewWindow)?.reviewController?.refresh()}
+    func refreshOpenSpeakerReview() {refreshQuickVoiceCandidate();refreshSpeakerStrip(force:true);(speakerReviewWindow as? SpeakerReviewWindow)?.reviewController?.refresh()}
+    /// This meeting's people as one row above the transcript: named voices by
+    /// name, the rest behind one "还有 N 位" chip. Each opens the same small
+    /// editor; overlaps, short sounds and unknown fragments are not people.
+    func refreshSpeakerStrip(force:Bool=false) {
+        guard let strip=speakerStrip else{return}
+        let signature=[activeSession ?? "",String(sequence.count),String(naming.correctionRevision),String(naming.registeredSpeakerCount)].joined(separator:"|")
+        let now=ProcessInfo.processInfo.systemUptime
+        guard force || signature != speakerStripSignature else{return}
+        if !force && now-speakerStripRefreshedAt<2 {
+            // Live text arrives several times a second; settle once, two seconds on.
+            if !speakerStripRefreshPending {speakerStripRefreshPending=true;DispatchQueue.main.asyncAfter(deadline:.now()+2){[weak self] in self?.speakerStripRefreshPending=false;self?.refreshSpeakerStrip()}}
+            return
+        }
+        speakerStripSignature=signature;speakerStripRefreshedAt=now
+        for view in strip.arrangedSubviews {strip.removeArrangedSubview(view);view.removeFromSuperview()}
+        guard let session=activeSession,!sequence.isEmpty else{strip.isHidden=true;return}
+        let index=SpeakerReviewIndex.build(session:session,turns:readingTurns(),names:naming)
+        func longest(_ person:SpeakerReviewPerson)->String? {person.entries.max{($0.end-$0.start)<($1.end-$1.start)}?.partIDs.first}
+        let people=index.people.map{person in (person,person.entries.reduce(0.0){$0+max(0,$1.end-$1.start)})}.sorted{$0.1>$1.1}
+        var named:[(String,String)]=[],unnamed:[String]=[],seen=Set<String>()
+        for (person,seconds) in people {
+            guard let id=longest(person) else{continue}
+            if let name=naming.displayName(speaker:person.key)?.visibleValue {if seen.insert(name).inserted {named.append((name,id))}}
+            else if seconds>=5 {unnamed.append(id)}
+        }
+        func chip(_ title:String,_ id:String,avatar:NSImage,tint:NSColor)->NSButton {
+            let button=ImmediateButton(title:title,target:self,action:#selector(openSpeakerChip(_:)));button.isBordered=false
+            button.image=avatar;button.imagePosition = .imageLeading;button.font = .systemFont(ofSize:12.5);button.contentTintColor=tint
+            button.attributedTitle=NSAttributedString(string:" "+title,attributes:[.font:NSFont.systemFont(ofSize:12.5),.foregroundColor:tint])
+            button.identifier=NSUserInterfaceItemIdentifier(id);button.toolTip=title+" · 点一下改名";button.setAccessibilityLabel(title);return button
+        }
+        for (name,id) in named.prefix(6) {
+            strip.addArrangedSubview(chip(name,id,avatar:MeetingVisualStyle.speakerAvatar(MeetingVisualStyle.speakerInitial(name),color:MeetingVisualStyle.speakerColor(name)),tint:MeetingVisualStyle.ink))
+        }
+        if named.count>6 {let more=NSTextField(labelWithString:"等 \(named.count) 人");more.font = .systemFont(ofSize:12);more.textColor=MeetingVisualStyle.muted;strip.addArrangedSubview(more)}
+        if let first=unnamed.first {
+            let ask=chip(unnamed.count==1 ? "还有一位":"还有 \(unnamed.count) 位",first,avatar:MeetingVisualStyle.speakerAvatar("?",color:MeetingVisualStyle.accentText,dashed:true),tint:MeetingVisualStyle.accentText)
+            ask.toolTip="听一句，告诉在场这是谁";strip.addArrangedSubview(ask)
+        }
+        strip.isHidden=strip.arrangedSubviews.isEmpty
+    }
+    @objc func openSpeakerChip(_ sender:NSButton) {
+        guard let id=sender.identifier?.rawValue,let item=namingItem(id) else{return}
+        naming.register(segment:id,item:item);showSpeakerConfirmation(id,wholeSpeaker:true,anchor:sender)
+    }
     func openSpeakerReview(for key:SessionSpeakerKey?=nil) {
         if let existing=speakerReviewWindow as? SpeakerReviewWindow,let controller=existing.reviewController {
             controller.refresh(preferred:key);existing.makeKeyAndOrderFront(nil);return

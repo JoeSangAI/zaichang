@@ -136,7 +136,7 @@ import AppKit
     try check(speakerLinks.contains(speakerLinkPrefix+"w-0"),"speaker_name_in_transcript_is_a_link_to_rename_the_person")
     try check(whole.textView(whole.output,clickedOnLink:speakerLinkPrefix+"w-0",at:0),"clicking_a_speaker_name_opens_the_editor")
     let wholeEditor=whole.confirmationController!
-    try check(wholeEditor.scope.isHidden && wholeEditor.learn.isHidden && wholeEditor.status.stringValue.contains("后面说的也一样"),"speaker_name_editor_defaults_to_the_whole_person_without_options")
+    try check(wholeEditor.scope.isHidden && wholeEditor.learn.isHidden && wholeEditor.status.isHidden,"speaker_name_editor_defaults_to_the_whole_person_without_options")
     if let content=wholeEditor.popover.contentViewController?.view {
         content.frame=NSRect(origin:.zero,size:content.fittingSize);content.layoutSubtreeIfNeeded()
         if let bitmap=content.bitmapImageRepForCachingDisplay(in:content.bounds) {content.cacheDisplay(in:content.bounds,to:bitmap);try bitmap.representation(using:.png,properties:[:])!.write(to:directory.appendingPathComponent("whole-speaker-popover.png"))}

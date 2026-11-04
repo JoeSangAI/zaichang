@@ -74,7 +74,10 @@ final class MeetingFilesExportStore {
     private func transcript(_ item:CachedMeeting,files:MeetingLibraryFiles,includeCoarse:Bool=true)throws->(String,String,[String]) {
         let metadata=try item.metadata(),session=files.session
         var names=SessionNames()
-        let events=try item.events(includeCoarseRefinement:includeCoarse)
+        // The reading export leaves out the far end heard again through the
+        // microphone (same rule as the app); asides stay as their own lines.
+        let loaded=try item.events(includeCoarseRefinement:includeCoarse)
+        let events=includeCoarse ? TranscriptTimeline.markCrossTrack(loaded,protected:[]).map{event in var row=event;row.removeValue(forKey:"reading_aside_of");return row}:loaded
         for event in events {
             guard let parent=event["segment_id"] as? String else{continue}
             names.register(segment:parent,item:event)

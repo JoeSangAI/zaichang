@@ -105,7 +105,7 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
     var librarySearch:NSSearchField!;var libraryTable:NSTableView!;var libraryStatus:NSTextField!;var libraryRetryButton:NSButton!;var libraryVisible:[CachedMeeting]=[];var librarySelectionChanging=false
     let libraryJob=CacheReadJob();let libraryOpenJob=CacheReadJob();let librarySearchJob=CacheReadJob();let librarySummaryJob=CacheReadJob();var librarySummaryPending:CachedMeeting?;var librarySummaryGeneration=0;var librarySummaryLoaded:Set<String>=[];var libraryFilterWork:DispatchWorkItem?;var pendingLibraryOpen:CachedMeeting?;var libraryReloadPending=false;var librarySelectRecentPending=false
     var liveReturn:NSButton!;var timelineToggle:NSButton!;var historyLiveButton:NSButton!;var showsSpeakerRanges=false
-    var speakerReviewButton:NSButton?;var voiceCandidateButton:NSButton?;var speakerReviewWindow:NSWindow?;var libraryParticipants:[String:[String]]=[:]
+    var speakerReviewButton:NSButton?;var speakerStrip:NSStackView?;var speakerStripSignature="";var speakerStripRefreshedAt=0.0;var speakerStripRefreshPending=false;var voiceCandidateButton:NSButton?;var speakerReviewWindow:NSWindow?;var libraryParticipants:[String:[String]]=[:]
     let autoTitle=MeetingAutoTitle();var titleProvider:MeetingTitleProvider?;var titleTextAllowed=false;var titleTask:Task<Void,Never>?;var titleRevision=0;var titleProviderFactory:((String)->MeetingTitleProvider)?;var owedTitleTask:Task<Void,Never>?;var owedTitleLastPass=0.0;var owedTitlePassInterval=600.0
     var finalTitleTasks:[String:Task<Void,Never>]=[:]
     var isHistoryReader=false;weak var workspaceOwner:Delegate?;var historyReader:Delegate?;var historyReaderShell:NSWindow?
@@ -1125,12 +1125,14 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
             let previousSpeakerCount=naming.registeredSpeakerCount
             naming.register(segment:id,item:event)
             for run in TranscriptTimeline.speakerRuns(event) {naming.register(segment:TranscriptTimeline.runID(parent:id,run:run),item:run)}
-            let visibleRows=spokenRows(id,event)
+            let neighbours=reconcileCrossTrack(around:event)
+            let visibleRows=spokenRows(id,segments[id] ?? event)
             for (key,row) in visibleRows where key != id {naming.register(segment:key,item:row)}
             if !deferPresentation,naming.registeredSpeakerCount != previousSpeakerCount {persistSessionNames()}
             observeVoiceprint(event);observeSemanticName(event)
             if MeetingTranslationPolicy.eligible(event) {for (partID, part) in visibleRows {translationService.accept(segmentID:partID,item:part)}}
             markTranscriptParentDirty(id,preparedRows:visibleRows)
+            for parent in neighbours where parent != id {markTranscriptParentDirty(parent)}
             if event["final"] as? Bool == true,phase.phase == .recording {scheduleAutoTitle()}
             if previewRenderOnly && dirtyTranscriptQueue.count<=24 {renderText()}
         } else if type=="meter" {
@@ -1276,7 +1278,20 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
         let revision=item["revision"] as? Int ?? -1
         if let cached=spokenRowsCache[id],cached.revision==revision,cached.correctionRevision==naming.correctionRevision {return cached.rows}
         transcriptProjectionComputations+=1
-        let rows=computeSpokenRows(id,item);spokenRowsCache[id]=(revision,naming.correctionRevision,rows);return rows
+        let rows=crossTrackPieces(item,computeSpokenRows(id,item));spokenRowsCache[id]=(revision,naming.correctionRevision,rows);return rows
+    }
+    /// A microphone sentence split by speaker can hold far-end pieces; each piece gets the same rule.
+    func crossTrackPieces(_ item:[String:Any],_ rows:[(String,[String:Any])])->[(String,[String:Any])] {
+        guard rows.count>1,item["reading_echo_of"]==nil,item["reading_aside_of"]==nil,TranscriptTimeline.isMicrophone(item)==true,
+              let lo=item["start"] as? Double,let hi=item["end"] as? Double,lo.isFinite,hi.isFinite else{return rows}
+        let slack=TranscriptTimeline.crossTrackSlack
+        let remote=timeline.ids(startingFrom:lo-120-slack,before:hi+slack).compactMap{timeline.records[$0]}.filter{TranscriptTimeline.isMicrophone($0)==false}
+        guard !remote.isEmpty else{return rows}
+        return rows.map {id,row in
+            guard naming.displayName(segment:id)?.origin != .manual else{return (id,row)}
+            var piece=row;piece.merge(TranscriptTimeline.crossTrackFields(TranscriptTimeline.crossTrackRole(row,among:remote))){$1}
+            return (id,piece)
+        }
     }
     func computeSpokenRows(_ id:String,_ item:[String:Any])->[(String,[String:Any])] {
         if naming.sentenceName(segment:id) != nil {return [(id,item)]}
@@ -1410,6 +1425,48 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
             if microphoneSignalAlertVisible {microphoneSignalAlertVisible=false;diagnostic.stringValue="";diagnostic.isHidden=true}
         }
     }
+    /// Re-decide the microphone sentences near one final arrival with the
+    /// shared rule (TranscriptTimeline.crossTrackRole). Returns the other
+    /// sentences whose reading fields changed; the arrival itself is updated in place.
+    func reconcileCrossTrack(around event:[String:Any])->[String] {
+        guard event["final"] as? Bool==true,TranscriptTimeline.isMicrophone(event) != nil,
+              let lo=event["start"] as? Double,let hi=event["end"] as? Double,lo.isFinite,hi.isFinite else{return []}
+        let slack=TranscriptTimeline.crossTrackSlack
+        // Far-end sentences are bounded at 120 s, so this reaches every one touching the window.
+        let ids=timeline.ids(startingFrom:lo-120-2*slack,before:hi+2*slack)
+        var remote:[[String:Any]]=[],affected:[String]=[]
+        for id in ids {
+            guard let item=timeline.records[id],let start=item["start"] as? Double,let end=item["end"] as? Double,
+                  end>lo-2*slack,start<hi+2*slack,let mic=TranscriptTimeline.isMicrophone(item) else{continue}
+            if mic {affected.append(id)} else {remote.append(item)}
+        }
+        var changed=Set<String>()
+        for id in affected {
+            let item=timeline.records[id]!
+            let manual=naming.sentenceName(segment:id) != nil || naming.displayName(segment:id)?.origin == .manual
+            let next=TranscriptTimeline.crossTrackFields(manual ? nil:TranscriptTimeline.crossTrackRole(item,among:remote))
+            guard TranscriptTimeline.crossTrackKeys.contains(where:{(item[$0] as? String) != (next[$0] as? String)}) else{continue}
+            // The far-end sentences it left and joined redraw with it.
+            for key in TranscriptTimeline.crossTrackKeys {for host in [item[key],next[key]] {if let host=host as? String {changed.insert(host)}}}
+            timeline.annotate(id,Dictionary(uniqueKeysWithValues:TranscriptTimeline.crossTrackKeys.map{($0,next[$0])}));changed.insert(id)
+        }
+        // Split sentences decide per piece, so a new far-end sentence redraws them too.
+        if TranscriptTimeline.isMicrophone(event)==false {
+            for id in affected where (timeline.records[id]?["speaker_runs"] as? [Any])?.isEmpty==false {changed.insert(id)}
+        } else if (event["speaker_runs"] as? [Any])?.isEmpty==false {
+            for item in remote {if let id=item["segment_id"] as? String {changed.insert(id)}}
+        }
+        return Array(changed)
+    }
+    /// Microphone asides riding on one far-end sentence, in order.
+    func crossTrackAsides(of host:String)->[(String,[String:Any])] {
+        guard let item=segments[host],let lo=item["start"] as? Double,let hi=item["end"] as? Double,lo.isFinite,hi.isFinite else{return []}
+        let slack=TranscriptTimeline.crossTrackSlack
+        return timeline.ids(startingFrom:lo-120-slack,before:hi+slack).flatMap { id -> [(String,[String:Any])] in
+            guard let mic=segments[id],TranscriptTimeline.isMicrophone(mic)==true,(mic["end"] as? Double ?? 0)>lo-slack else{return []}
+            return spokenRows(id,mic).filter{$0.1["reading_aside_of"] as? String==host}
+        }.sorted{TranscriptTimeline.start($0.1)<TranscriptTimeline.start($1.1)}
+    }
     func markTranscriptParentDirty(_ parent:String,preparedRows:[(String,[String:Any])]?=nil) {
         guard !parent.isEmpty else{return}
         let rows:[(String,[String:Any])]
@@ -1464,7 +1521,7 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
         }
         if originalLabel=="待确认",let id=turn.parts.first?.0 {
             let who=(text.string as NSString).range(of:"是谁？",options:.backwards)
-            if who.location != NSNotFound {text.addAttributes([.link:id,.toolTip:"确认这句话的发言人"],range:who)}
+            if who.location != NSNotFound {text.addAttributes([.link:(naming.key(segment:id) != nil ? speakerLinkPrefix:"")+id,.toolTip:"这是谁？"],range:who)}
         }
         if !hint.isEmpty {text.append(NSAttributedString(string:hint,attributes:base.merging([.font:NSFont.systemFont(ofSize:12),.foregroundColor:MeetingVisualStyle.muted]){$1}))}
         text.append(NSAttributedString(string:"   "+(absolute ?? relative)+(speaking ? "":state),attributes:base.merging([.font:NSFont.monospacedDigitSystemFont(ofSize:12,weight:.regular),.foregroundColor:MeetingVisualStyle.muted]){$1}))
@@ -1485,6 +1542,18 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
                 attributes[.toolTip]=(part["speaker"] as? [String:Any])?["reason"] as? String=="overlap" ? "这部分有重叠发言；点击修改发言人":"这部分的发言人待确认；点击修改"
             }
             text.append(NSAttributedString(string:body,attributes:attributes));partRanges[partID]=NSRange(location:offset,length:text.length-offset)
+        }
+        // Short microphone words said inside this far-end sentence ride on it in small type.
+        var hosts:[String]=[]
+        for part in turn.parts {let host=part.1["parent_segment_id"] as? String ?? part.0;if !hosts.contains(host) {hosts.append(host)}}
+        let asides=hosts.flatMap(crossTrackAsides).compactMap { id,item -> String? in
+            guard let body=item["text"] as? String,TranscriptTimeline.crossTrackText(body).count>1 else{return nil}
+            let words=body.trimmingCharacters(in:CharacterSet(charactersIn:"。.， "))
+            // Only a real name leads the aside; a voice nobody has named is just its words.
+            return naming.displayName(segment:id).map{$0.visibleValue+"："+words} ?? words
+        }
+        if !asides.isEmpty {
+            text.append(NSAttributedString(string:"   "+asides.joined(separator:"  "),attributes:[.font:NSFont.systemFont(ofSize:12.5),.foregroundColor:MeetingVisualStyle.muted,.paragraphStyle:para]))
         }
         if speaking,let last=turn.parts.last.flatMap({partRanges[$0.0]}),last.length>0 {
             // Fade the newest words only; the text itself is unchanged.

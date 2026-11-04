@@ -60,6 +60,19 @@ import AppKit
     view.naming.validateVoiceprintArchive(try VoiceprintArchiveStore(folder:voiceFolder,domain:"consented_live_audio").load())
     view.meetingTitle=meeting.customTitle ?? MeetingLibraryInfo.defaultTitle(meeting.date);view.phase.elapsed=meeting.durationSeconds
     view.deferPresentation=false;view.window.title="在场 · 已保存记录";view.diagnostic.stringValue="已保存";view.window.setContentSize(NSSize(width:1050,height:780));view.window.contentView!.layoutSubtreeIfNeeded();view.renderText();try view.settleTranscriptForOfflineReview();view.updateUI();view.scroll.contentView.scroll(to:.zero)
+    // The speaker strip and the small box it opens, as a person would first see them.
+    view.refreshSpeakerStrip(force:true)
+    if let strip=view.speakerStrip,!strip.isHidden {
+        strip.layoutSubtreeIfNeeded()
+        if let bitmap=strip.bitmapImageRepForCachingDisplay(in:strip.bounds) {strip.cacheDisplay(in:strip.bounds,to:bitmap);try bitmap.representation(using:.png,properties:[:])?.write(to:directory.appendingPathComponent("speaker-strip.png"))}
+        if let ask=strip.arrangedSubviews.compactMap({$0 as? NSButton}).last,let id=ask.identifier?.rawValue {
+            let controller=SpeakerConfirmationController(owner:view);controller.present(segment:id,showPopover:false,wholeSpeaker:true)
+            if let box=controller.popover.contentViewController?.view {
+                box.frame.size=controller.popover.contentSize;box.layoutSubtreeIfNeeded()
+                if let bitmap=box.bitmapImageRepForCachingDisplay(in:box.bounds) {box.cacheDisplay(in:box.bounds,to:bitmap);try bitmap.representation(using:.png,properties:[:])?.write(to:directory.appendingPathComponent("speaker-box.png"))}
+            }
+        }
+    }
     let output=directory.appendingPathComponent("saved-speaker-turns.txt");try view.transcriptExport().write(to:output,atomically:true,encoding:.utf8)
     if let marker=view.readingTurns().first,let range=view.textRanges[marker.id],let layout=view.output.layoutManager,let container=view.output.textContainer {
         let rect=layout.boundingRect(forGlyphRange:layout.glyphRange(forCharacterRange:NSRange(location:range.location,length:1),actualCharacterRange:nil),in:container)

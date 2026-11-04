@@ -101,14 +101,15 @@ enum SavedVoiceRecognition {
         // lets microphone echo contaminate a previously consistent voice.
         // Extract from the acoustic segmentation, before text cleanup. Keep
         // projection hashes above so an in-flight result still expires safely.
-        let events=try meeting.events(includeCoarseRefinement:false)
+        // The far end heard again through the microphone is never a voice sample of the microphone speaker.
+        let events=TranscriptTimeline.markCrossTrack(try meeting.events(includeCoarseRefinement:false),protected:[])
         var groups:[SessionSpeakerKey:[(String,[String:Any])]]=[:]
         for event in events {
             guard let parent=event["segment_id"] as? String else{continue}
             let runs=TranscriptTimeline.speakerRuns(event)
             for item in runs.isEmpty ? [event]:runs {
                 guard let key=SessionSpeakerKey.from(item),request.keys.contains(key),item["final"] as? Bool==true,item["end_time_known"] as? Bool==true,
-                      (item["speaker"] as? [String:Any])?["echo_of"] == nil,
+                      (item["speaker"] as? [String:Any])?["echo_of"] == nil,item["reading_echo_of"]==nil,
                       (item["speaker"] as? [String:Any])?["slot_continuity"] as? Bool != true,
                       (item["speaker"] as? [String:Any])?["local_continuity"] as? Bool != true,
                       (item["speaker"] as? [String:Any])?["bridged"] as? Bool != true,

@@ -143,10 +143,11 @@ extension Delegate {
         main.addArrangedSubview(header);readingAlignedRows.append(header)
         historyLiveButton=ImmediateButton(title:"返回当前记录",target:self,action:#selector(returnFromHistory));historyLiveButton.bezelStyle = .inline;historyLiveButton.lineBreakMode = .byTruncatingTail;historyLiveButton.isHidden=true;main.addArrangedSubview(historyLiveButton)
         let tools=stack(.horizontal,spacing:10);tools.distribution = .fill;tools.alignment = .centerY
+        let strip=stack(.horizontal,spacing:2);strip.alignment = .centerY;strip.isHidden=true;strip.setContentCompressionResistancePriority(.defaultLow,for:.horizontal);speakerStrip=strip;tools.addArrangedSubview(strip)
         let statusSpacer=NSView();statusSpacer.setContentHuggingPriority(.defaultLow,for:.horizontal);tools.addArrangedSubview(statusSpacer)
         tools.addArrangedSubview(makeTranslationControl())
         timelineToggle=ImmediateButton(checkboxWithTitle:"人物时间线",target:self,action:#selector(toggleSpeakerRanges));timelineToggle.controlSize = .small;timelineToggle.isHidden=true
-        let peopleButton=ImmediateButton(title:"发言人",target:self,action:#selector(showSpeakerReview));speakerReviewButton=peopleButton;peopleButton.bezelStyle = .inline;peopleButton.font = .systemFont(ofSize:12);peopleButton.controlSize = .small;peopleButton.contentTintColor=MeetingVisualStyle.ink;peopleButton.image=NSImage(systemSymbolName:"person.2",accessibilityDescription:"按发言人查看与修改");peopleButton.imagePosition = .imageLeading;peopleButton.setAccessibilityLabel("按发言人查看与修改");tools.addArrangedSubview(peopleButton)
+        let peopleButton=ImmediateButton(title:"发言人",target:self,action:#selector(showSpeakerReview));speakerReviewButton=peopleButton;peopleButton.bezelStyle = .inline;peopleButton.font = .systemFont(ofSize:12);peopleButton.controlSize = .small;peopleButton.contentTintColor=MeetingVisualStyle.ink;peopleButton.image=NSImage(systemSymbolName:"person.2",accessibilityDescription:"按发言人查看与修改");peopleButton.imagePosition = .imageLeading;peopleButton.setAccessibilityLabel("按发言人查看与修改")
         let voice=ImmediateButton(title:"",target:self,action:#selector(showQuickVoiceConfirmation));voice.bezelStyle = .inline;voice.controlSize = .small;voice.contentTintColor=MeetingVisualStyle.muted;voice.isHidden=true;voice.lineBreakMode = .byTruncatingTail;voice.widthAnchor.constraint(lessThanOrEqualToConstant:180).isActive=true;voiceCandidateButton=voice;tools.addArrangedSubview(voice)
         let archive=makeMeetingArchiveButton();archive.controlSize = .small;archiveButton=archive
         latest=ImmediateButton(title:"回到最新",target:self,action:#selector(goLatest));latest.bezelStyle = .inline;latest.isHidden=true;tools.addArrangedSubview(latest);main.addArrangedSubview(tools);readingAlignedRows.append(tools)
@@ -244,7 +245,7 @@ extension Delegate {
         }
         translationSwitch?.isEnabled=currentCacheID != nil && !translationCredentialJob.busy
         speakerReviewButton?.isHidden=sequence.isEmpty;meter.isHidden=true;footerDetails.isHidden=true
-        refreshQuickVoiceCandidate()
+        refreshQuickVoiceCandidate();refreshSpeakerStrip()
         refreshMeetingArchiveButtonState()
         diagnostic.isHidden = !showsMissingCredentialHint && speakerRefinementToken==nil && Date()>=feedbackExpiresAt && phase.error==nil && !diagnostic.stringValue.contains("失败") && !diagnostic.stringValue.contains("无法") && !diagnostic.stringValue.contains("请")
         feedbackUndoButton?.isHidden=Date()>=feedbackExpiresAt || !feedbackAllowsNameUndo || !naming.canUndo

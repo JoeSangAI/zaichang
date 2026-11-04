@@ -69,6 +69,17 @@ struct TranscriptTimeline {
         storedRecords[id]=event
         if needsPosition {insertOrdered(id)}
     }
+    /// Reading-only fields on a stored record; never moves it. A nil value removes the key.
+    mutating func annotate(_ id:String,_ fields:[String:Any?]) {
+        guard var record=storedRecords[id] else{return}
+        for (key,value) in fields {record[key]=value}
+        storedRecords[id]=record
+    }
+    /// Records starting in [lo, hi), in reading order.
+    func ids(startingFrom lo:Double,before hi:Double)->ArraySlice<String> {
+        func lower(_ t:Double)->Int {var a=0,b=sortedIDs.count;while a<b {let m=(a+b)/2;if Self.start(storedRecords[sortedIDs[m]]!)<t {a=m+1}else{b=m}};return a}
+        let a=lower(lo),b=max(a,lower(hi));return sortedIDs[a..<b]
+    }
     mutating func discard(_ ids: Set<String>) {
         discardedIDs.formUnion(ids)
         for id in ids { storedRecords.removeValue(forKey:id);arrivalRanks.removeValue(forKey:id) }
@@ -94,6 +105,7 @@ struct TranscriptTimeline {
             var next = run
             next["session"] = item["session"]; next["source_id"] = item["source_id"]; next["epoch"] = item["epoch"]; next["track"] = item["track"]
             next["reading_echo_of"] = item["reading_echo_of"] ?? speaker["echo_of"]
+            next["reading_aside_of"] = item["reading_aside_of"]
             next["reading_draft"] = item["reading_draft"]
             next["coarse_source_word_spans"] = item["coarse_source_word_spans"];next["parent_segment_id"] = item["segment_id"];next["revision"] = item["revision"];next["final"] = item["final"];next["end_time_known"] = item["end_time_known"];next["quality_flags"] = item["quality_flags"]
             func identity(_ value: [String: Any]) -> NSDictionary {
@@ -142,7 +154,7 @@ struct TranscriptTimeline {
         }
         func isManual(_ token:String?)->Bool {token?.hasPrefix("manual:")==true}
         var groups:[Group]=[]
-        for row in rows where row.item["reading_draft"] as? Bool != true && row.item["reading_echo_of"] == nil && (row.item["speaker"] as? [String:Any])?["echo_of"] == nil {
+        for row in rows where row.item["reading_draft"] as? Bool != true && row.item["reading_echo_of"] == nil && row.item["reading_aside_of"] == nil && (row.item["speaker"] as? [String:Any])?["echo_of"] == nil {
             let token=identity(row.id,row.item)
             let brief=token==nil && shortAmbiguity(row.item)
             if var current=groups.last,current.parent==row.parent,closeEnough(current,row.item) {
@@ -183,7 +195,7 @@ struct TranscriptTimeline {
     /// This only removes reading metadata; stored evidence remains unchanged.
     static func revealReadingEchoes(_ events:[[String:Any]])->[[String:Any]] {
         func reveal(_ input:[String:Any])->[String:Any] {
-            var row=input;row.removeValue(forKey:"reading_echo_of");row.removeValue(forKey:"reading_draft");row.removeValue(forKey:"reading_projection_notice")
+            var row=input;for key in crossTrackKeys {row.removeValue(forKey:key)};row.removeValue(forKey:"reading_draft");row.removeValue(forKey:"reading_projection_notice")
             if var speaker=row["speaker"] as? [String:Any] {speaker.removeValue(forKey:"echo_of");row["speaker"]=speaker}
             return row
         }
@@ -194,38 +206,77 @@ struct TranscriptTimeline {
         }
     }
 
-    /// Mark only a microphone copy fully contained in simultaneous app speech.
-    /// Match original text, never model output. Keep every event and its audio;
-    /// the original-transcript view has no markers and shows both sources.
-    static func markReadingEchoes(original:[[String:Any]],projected:[[String:Any]],protected:Set<String>)->[[String:Any]] {
-        struct Span {let id:String;let start:Double;let end:Double;let text:String;let session:String;let mic:Bool}
-        let spans=original.compactMap { event -> Span? in
-            guard event["final"] as? Bool==true,event["end_time_known"] as? Bool != false,
-                  let id=event["segment_id"] as? String,let session=event["session"] as? String,
-                  let source=event["source_id"] as? String,let core=audioSourceCoreID(source),
-                  core=="mic" || core=="remote" || core.hasPrefix("app-"),
-                  let start=event["start"] as? Double,let end=event["end"] as? Double,
-                  start.isFinite,end.isFinite,end>start,end-start<=120,
-                  let body=event["text"] as? String else{return nil}
-            let text=String(body.lowercased().unicodeScalars.filter{CharacterSet.alphanumerics.contains($0)})
-            guard text.count>=12 else{return nil}
-            return Span(id:id,start:start,end:end,text:text,session:session,mic:core=="mic")
+    /// The computer's own track is the record of what the far end said. A
+    /// microphone sentence that repeats it at the same moment is that sound
+    /// heard again through the speakers, whatever the device, room or echo
+    /// delay; a few microphone words inside far-end speech are an aside to it,
+    /// not a turn of their own. This is the only place either is decided, from
+    /// text and times every path has. Events, their text and audio stay intact;
+    /// the original-transcript view shows them all.
+    enum CrossTrackRole:Equatable {case echo(String),aside(String)}
+    static let crossTrackSlack=1.5
+    static func crossTrackText(_ value:Any?)->[Character] {
+        guard let text=value as? String else{return []}
+        var scalars=String.UnicodeScalarView()
+        scalars.append(contentsOf:text.lowercased().unicodeScalars.filter{CharacterSet.alphanumerics.contains($0)})
+        return Array(String(scalars).prefix(2000))
+    }
+    /// true for the microphone, false for computer sound, nil for anything else.
+    static func isMicrophone(_ event:[String:Any])->Bool? {
+        guard let source=event["source_id"] as? String ?? event["track"] as? String,let core=audioSourceCoreID(source) else{return nil}
+        if core=="mic" {return true}
+        return core=="remote" || core.hasPrefix("app-") ? false:nil
+    }
+    static func crossTrackRole(_ mic:[String:Any],among remote:[[String:Any]])->CrossTrackRole? {
+        guard mic["final"] as? Bool==true,isMicrophone(mic)==true,
+              let start=mic["start"] as? Double,let end=mic["end"] as? Double,start.isFinite,end.isFinite,end>start else{return nil}
+        let text=crossTrackText(mic["text"]);guard !text.isEmpty else{return nil}
+        let near=remote.compactMap { other -> (id:String,start:Double,end:Double,text:[Character])? in
+            guard other["final"] as? Bool==true,isMicrophone(other)==false,other["session"] as? String==mic["session"] as? String,
+                  let id=other["segment_id"] as? String,let lo=other["start"] as? Double,let hi=other["end"] as? Double,
+                  lo.isFinite,hi.isFinite,hi>lo,lo<end+crossTrackSlack,hi>start-crossTrackSlack else{return nil}
+            return (id,lo,hi,crossTrackText(other["text"]))
         }.sorted{$0.start<$1.start}
-        let remote=spans.filter{!$0.mic}
-        var cursor=0,active:[Span]=[],echoes:[String:String]=[:]
-        for mic in spans where mic.mic && !protected.contains(mic.id) {
-            while cursor<remote.count && remote[cursor].start<=mic.end {active.append(remote[cursor]);cursor+=1}
-            active.removeAll{$0.end<mic.start}
-            guard active.count<=256 else{continue}
-            if let match=active.first(where:{ other in
-                let overlap=max(0,min(mic.end,other.end)-max(mic.start,other.start))
-                return other.session==mic.session && overlap/(mic.end-mic.start)>=0.85 && other.text.contains(mic.text)
-            }) {echoes[mic.id]=match.id}
+        guard !near.isEmpty else{return nil}
+        let overlaps=near.map{max(0,min(end,$0.end)-max(start,$0.start))}
+        var host=0
+        for i in near.indices.dropFirst() where overlaps[i]>overlaps[host] || (overlaps[i]==overlaps[host] && abs(near[i].start-start)<abs(near[host].start-start)) {host=i}
+        let shared=longestCommonRun(text,near.flatMap(\.text))
+        if text.count>=3 && shared>=3 && Double(shared)>=0.6*Double(text.count) {return .echo(near[host].id)}
+        if text.count<=6 && overlaps[host]>0 && overlaps.reduce(0,+)>=0.3*(end-start) {return .aside(near[host].id)}
+        return nil
+    }
+    static func longestCommonRun(_ a:[Character],_ b:[Character])->Int {
+        guard !a.isEmpty,!b.isEmpty else{return 0}
+        var previous=[Int](repeating:0,count:b.count+1),current=previous,best=0
+        for x in a {
+            for j in 1...b.count {current[j]=x==b[j-1] ? previous[j-1]+1:0;best=max(best,current[j])}
+            swap(&previous,&current)
         }
-        return projected.map { event in
-            var result=event
-            if let id=event["segment_id"] as? String,let other=echoes[id] {result["reading_echo_of"]=other}
-            return result
+        return best
+    }
+    static func crossTrackRoles(_ events:[[String:Any]],protected:Set<String>)->[String:CrossTrackRole] {
+        let usable=events.filter{$0["final"] as? Bool==true && isMicrophone($0) != nil && start($0) != .greatestFiniteMagnitude}.sorted{start($0)<start($1)}
+        let remote=usable.filter{isMicrophone($0)==false}
+        var roles:[String:CrossTrackRole]=[:],cursor=0,active:[[String:Any]]=[]
+        for mic in usable where isMicrophone(mic)==true {
+            guard let id=mic["segment_id"] as? String,!protected.contains(id),let end=mic["end"] as? Double,end.isFinite else{continue}
+            while cursor<remote.count && start(remote[cursor])<end+crossTrackSlack {active.append(remote[cursor]);cursor+=1}
+            active.removeAll{($0["end"] as? Double ?? 0)<=start(mic)-crossTrackSlack}
+            if let role=crossTrackRole(mic,among:active) {roles[id]=role}
+        }
+        return roles
+    }
+    static let crossTrackKeys=["reading_echo_of","reading_aside_of"]
+    static func crossTrackFields(_ role:CrossTrackRole?)->[String:Any] {
+        switch role {case .echo(let host)?:return ["reading_echo_of":host];case .aside(let host)?:return ["reading_aside_of":host];case nil:return [:]}
+    }
+    static func markCrossTrack(_ events:[[String:Any]],protected:Set<String>)->[[String:Any]] {
+        let roles=crossTrackRoles(events,protected:protected)
+        return events.map {event in
+            var row=event;for key in crossTrackKeys {row.removeValue(forKey:key)}
+            if let id=event["segment_id"] as? String {row.merge(crossTrackFields(roles[id])){$1}}
+            return row
         }
     }
 }
@@ -308,14 +359,31 @@ func readingTurnChecks()->Int {
                     echoEvent("mic","mic-g1",0.1,4.9,sharedText),
                     echoEvent("repeat-later","mic-g1",10,15,sharedText),
                     echoEvent("different","mic-g1",0,5,"另一位同时讲话，内容并不相同，要完整留下。")]
-    let echoView=TranscriptTimeline.markReadingEchoes(original:echoEvents,projected:echoEvents,protected:[])
+    let echoView=TranscriptTimeline.markCrossTrack(echoEvents,protected:[])
     precondition(echoView.count==echoEvents.count && echoView[1]["reading_echo_of"] as? String=="remote" &&
                  echoView[2]["reading_echo_of"]==nil && echoView[3]["reading_echo_of"]==nil);checks+=1
     let echoRows=echoView.map{(id:$0["segment_id"] as! String,parent:$0["segment_id"] as! String,item:$0)}
     precondition(TranscriptTimeline.readingTurns(echoRows,identity:{_,_ in nil}).count==3 &&
                  echoView.map{$0["text"] as! String}==echoEvents.map{$0["text"] as! String});checks+=1
-    let protectedEcho=TranscriptTimeline.markReadingEchoes(original:echoEvents,projected:echoEvents,protected:["mic"])
+    let protectedEcho=TranscriptTimeline.markCrossTrack(echoEvents,protected:["mic"])
     precondition(protectedEcho.allSatisfy{$0["reading_echo_of"]==nil});checks+=1
+    // Echo arrives late and garbled; a short reply inside far-end speech is an
+    // aside to it; a short phrase alone or a long sentence of one's own stays.
+    let crossEvents=[echoEvent("far","app-1234567890abcdef-g1",10,16,"广告投放过来，导向到蚂蚁阿福，然后最终形成一个场域。"),
+                     echoEvent("late-echo","mic-g1",16.4,18,"导向到蚂蚁阿福，然后最终"),
+                     echoEvent("short-echo","mic-g1",11,11.6,"广告投放"),
+                     echoEvent("nod","mic-g1",12,12.5,"嗯，对对。"),
+                     echoEvent("grain","mic-g1",13,13.2,"腐。"),
+                     echoEvent("alone","mic-g1",30,30.5,"嗯。"),
+                     echoEvent("own","mic-g1",12.5,15.5,"我插一句，退款这块还没扣，要先算清楚再定预算。")]
+    let cross=TranscriptTimeline.markCrossTrack(crossEvents,protected:[])
+    func field(_ id:String,_ key:String)->Any? {cross.first{$0["segment_id"] as? String==id}?[key]}
+    precondition(field("late-echo","reading_echo_of") as? String=="far" && field("short-echo","reading_echo_of") as? String=="far" &&
+                 field("nod","reading_aside_of") as? String=="far" && field("grain","reading_aside_of") as? String=="far" &&
+                 cross.filter{["alone","own"].contains($0["segment_id"] as! String)}.allSatisfy{row in TranscriptTimeline.crossTrackKeys.allSatisfy{row[$0]==nil}});checks+=1
+    let crossRows=cross.map{(id:$0["segment_id"] as! String,parent:$0["segment_id"] as! String,item:$0)}
+    precondition(TranscriptTimeline.readingTurns(crossRows,identity:{_,_ in nil}).map{$0.id}.sorted()==["alone","far","own"]);checks+=1
+    precondition(TranscriptTimeline.revealReadingEchoes(cross).allSatisfy{row in TranscriptTimeline.crossTrackKeys.allSatisfy{row[$0]==nil}});checks+=1
     // 50k chronologically arriving segments must not sort the prior meeting.
     var indexed=TranscriptTimeline()
     for i in 0..<50_000 {indexed.put(["segment_id":String(format:"%06d",i),"start":Double(i),"text":"合成记录"])}
