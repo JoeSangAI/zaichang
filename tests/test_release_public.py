@@ -99,5 +99,26 @@ class UpdaterContractTests(unittest.TestCase):
         self.assertEqual(text.count('swap.sh'), 1)
 
 
+class QueueTests(unittest.TestCase):
+    def test_a_version_pushed_while_another_publishes_waits_its_turn(self):
+        import threading, time
+        order, first_in = [], threading.Event()
+        with tempfile.TemporaryDirectory() as temporary:
+            original, release_public.ROOT = release_public.ROOT, Path(temporary)
+            try:
+                def first():
+                    with release_public.publishing():
+                        first_in.set(); time.sleep(0.3); order.append('0.4.14')
+                def second():
+                    first_in.wait()
+                    with release_public.publishing(): order.append('0.4.15')
+                threads = [threading.Thread(target=first), threading.Thread(target=second)]
+                for thread in threads: thread.start()
+                for thread in threads: thread.join()
+            finally:
+                release_public.ROOT = original
+        self.assertEqual(order, ['0.4.14', '0.4.15'])
+
+
 if __name__ == '__main__':
     unittest.main()

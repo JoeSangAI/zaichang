@@ -40,6 +40,12 @@ and publishes the GitHub release once the push lands; every installed 在场 the
 swaps it in after a quit. A push that keeps `VERSION` reaches nobody. Enable the hook in a new checkout
 with `git config core.hooksPath .githooks`.
 
+Publishing runs in the background, one release at a time in push order: the next version can be pushed
+right away and waits its turn. `python3 scripts/release_public.py --wait` returns once nothing is publishing
+and says whether this version is out; use it instead of watching processes. Uploads are checked against
+GitHub's own digests before the release goes public. When `.local/upload-relay` names an ssh host with a
+faster line to GitHub, the packages are copied there and uploaded from it.
+
 Updates install only when the new app is signed by the release team (`AppUpdate.swift`), so the signing
 identity must stay the same: changing it strands everyone on the old version and resets their permissions.
 The Apple Development certificate is renewed once a year in Xcode → Settings → Accounts → Manage

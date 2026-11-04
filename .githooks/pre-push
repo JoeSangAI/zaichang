@@ -20,9 +20,11 @@ python3 -B "$ROOT/scripts/release_public.py" --needs-release || exit 0
 
 [ "$(git rev-parse HEAD)" = "$COMMIT" ] && [ -z "$(git status --porcelain --untracked-files=no)" ] \
   || { echo "push stopped: a new version is released from a clean checkout at HEAD" >&2; exit 1; }
-echo "new version: building and checking the release before anything leaves (about 15 minutes)…"
+echo "new version: building and checking the release before anything leaves (about 5 minutes)…"
 python3 -B "$ROOT/scripts/release_public.py" --build-only > "$ROOT/.runtime/release-build.log" 2>&1 \
   || { echo "push stopped: the release didn't pass. Log: .runtime/release-build.log" >&2; tail -5 "$ROOT/.runtime/release-build.log" >&2; exit 1; }
 mkdir -p "$ROOT/.local"
-nohup python3 -B "$ROOT/scripts/release_public.py" --publish-built > "$ROOT/.local/release.log" 2>&1 &
-echo "it will be published as soon as this push lands. Log: .local/release.log"
+echo "== $(date '+%F %T') $(sed -n "s/^VERSION *= *'\(.*\)'.*/\1/p" "$ROOT/app_version.py")" >> "$ROOT/.local/release.log"
+nohup python3 -B "$ROOT/scripts/release_public.py" --publish-built >> "$ROOT/.local/release.log" 2>&1 &
+echo "it will be published once this push lands, after any release still uploading."
+echo "scripts/release_public.py --wait reports when it is out. Log: .local/release.log"

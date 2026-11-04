@@ -10,11 +10,14 @@ is left alone.
   release_public.py --needs-release  exit 0 when this version has no release yet
   release_public.py --build-only     build and check into .runtime/release/<version>, publish nothing
   release_public.py --publish-built  wait for HEAD on GitHub, then publish what --build-only made
+  release_public.py --wait           wait until no publish is running, then say whether this version is out
 """
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime as dt
+import fcntl
 import hashlib
 import json
 import os
@@ -119,16 +122,10 @@ def models_tag(models_id):
     return f'models-{models_id[:12]}'
 
 
-def published_models():
-    """The models id of the release installed copies read now, or None before the first one."""
-    try: return json.loads(run('curl', '-fsSL', '--retry', '3', f'https://github.com/{REPO}/releases/latest/download/latest.json'))['patch']['models']
-    except (subprocess.CalledProcessError, ValueError, KeyError, TypeError): return None
-
-
-def package(app, dist, version, repo=REPO, previous_models=None):
-    """The small zip (everything but the models) every release, the models zip once per models id on its
-    own fixed release, and the whole zip only when the models changed: copies with the old models then
-    need it. The small one is proven to reassemble with the models into a correctly signed app."""
+def package(app, dist, version, repo=REPO):
+    """The small zip (everything but the models) and the whole zip every release, the models zip once per
+    models id on its own fixed release. Copies older than the models in use need the whole one, and they
+    don't read the "models" key. The small one is proven to reassemble with the models into a correctly signed app."""
     app, dist = Path(app), Path(dist)
     if dist.exists(): shutil.rmtree(dist)
     dist.mkdir(parents=True)
@@ -149,13 +146,10 @@ def package(app, dist, version, repo=REPO, previous_models=None):
         run('ditto', '-x', '-k', small, again)
         run('ditto', '-x', '-k', models, again)
         verify_signature(again / app.name)
-    if previous_models != models_id: run('ditto', '-c', '-k', '--keepParent', app, whole)
+    run('ditto', '-c', '-k', '--keepParent', app, whole)
     base = f'https://github.com/{repo}/releases/download/v{version}'
     changelog = app / 'Contents/Resources/Runtime/CHANGELOG.md'
-    # Older copies read "zip" only when the small package can't be used; with unchanged models that is
-    # never, so it names the small one rather than a whole package that wasn't built.
-    entire = whole if whole.exists() else small
-    feed = {'version': version, 'sha256': sha(entire), 'notes': notes(version, changelog), 'zip': f'{base}/{entire.name}',
+    feed = {'version': version, 'sha256': sha(whole), 'notes': notes(version, changelog), 'zip': f'{base}/{whole.name}',
             'patch': {'zip': f'{base}/{small.name}', 'sha256': sha(small), 'models': models_id},
             'models': {'id': models_id, 'sha256': sha(models),
                        'zip': f'https://github.com/{repo}/releases/download/{models_tag(models_id)}/{models.name}'}}
@@ -164,11 +158,42 @@ def package(app, dist, version, repo=REPO, previous_models=None):
     return feed
 
 
+RELAY = ROOT / '.local/upload-relay'  # optional: an ssh host with a faster line to GitHub than this Mac
+
+
+def relay_upload(host, tag, file):
+    """Copy the file over the local network to the relay and let it post the asset."""
+    release = next(r for r in json.loads(run('gh', 'api', f'repos/{REPO}/releases?per_page=100')) if r['tag_name'] == tag)
+    for asset in release['assets']:
+        if asset['name'] == file.name: run('gh', 'api', '-X', 'DELETE', f'repos/{REPO}/releases/assets/{asset["id"]}')
+    remote = f'/tmp/zaichang-release-{file.name}'
+    run('scp', '-q', '-o', 'BatchMode=yes', file, f'{host}:{remote}')
+    kind = 'application/json' if file.suffix == '.json' else 'application/zip'
+    url = f'https://uploads.github.com/repos/{REPO}/releases/{release["id"]}/assets?name={file.name}'
+    # The token reaches curl on stdin, never on a command line other processes can read.
+    post = (f'curl -fsS -o /dev/null -H @- -H "Content-Type: {kind}" --data-binary @{remote} "{url}"; '
+            f's=$?; rm -f {remote}; exit $s')
+    run('ssh', '-o', 'BatchMode=yes', host, post, input=f"Authorization: Bearer {run('gh', 'auth', 'token').strip()}\n")
+
+
 def upload(tag, file):
+    host = RELAY.read_text().strip() if RELAY.exists() else ''
     for attempt in range(6):
+        if host:
+            try: return relay_upload(host, tag, Path(file))
+            except (subprocess.CalledProcessError, StopIteration) as error:
+                print(f'经 {host} 中转没传上去，改由本机上传：{error}', file=sys.stderr); host = ''
         if subprocess.run(['gh', 'release', 'upload', tag, file, '--clobber', '--repo', REPO], capture_output=True).returncode == 0: return
         time.sleep(20 * (attempt + 1))
     raise RuntimeError(f'{Path(file).name} 传不上去；草稿还在，重跑 release_public.py --publish-built 会接着传')
+
+
+def uploaded(tag, names, dist):
+    """GitHub's own digest of every asset must be the file that was checked here."""
+    release = next(r for r in json.loads(run('gh', 'api', f'repos/{REPO}/releases?per_page=100')) if r['tag_name'] == tag)
+    digests = {a['name']: a.get('digest') for a in release['assets']}
+    wrong = [name for name in names if digests.get(name) != f'sha256:{sha(dist / name)}']
+    if wrong: raise RuntimeError(f'传上去的文件和本地不一致：{", ".join(wrong)}；草稿还在，重跑 release_public.py --publish-built')
 
 
 def publish_models(dist, feed):
@@ -182,6 +207,7 @@ def publish_models(dist, feed):
         run('gh', 'release', 'create', tag, '--draft', '--repo', REPO, '--title', f'在场语音模型 {tag[7:]}',
             '--notes', '在场的语音模型，新安装时和应用一起下载。只在模型变化时更新。')
     upload(tag, dist / 'Zaichang-models.zip')
+    uploaded(tag, ['Zaichang-models.zip'], dist)
     run('gh', 'release', 'edit', tag, '--draft=false', '--latest=false', '--repo', REPO)
 
 
@@ -222,6 +248,7 @@ def publish(clone, dist, version, wait=0):
     publish_models(dist, json.loads((dist / 'latest.json').read_text(encoding='utf-8')))
     for name in ('Zaichang.zip', 'Zaichang-update.zip', 'latest.json'):
         if (dist / name).exists(): upload(tag, dist / name)
+    uploaded(tag, ['Zaichang.zip', 'Zaichang-update.zip', 'latest.json'], dist)
     run('gh', 'release', 'edit', tag, '--draft=false', '--latest', '--repo', REPO)
     # What installed copies will actually read.
     url = f'https://github.com/{REPO}/releases/latest/download/latest.json'
@@ -235,16 +262,37 @@ def release_if_new(clone, build_only=False):
     problem = changelog_problem(version, clone / 'CHANGELOG.md')
     if problem: raise RuntimeError(problem)
     dist = ROOT / '.runtime/release' / version
-    feed = package(build(clone, version), dist, version, previous_models=published_models())
+    feed = package(build(clone, version), dist, version)
     if build_only: return {'released': False, 'version': version, 'dist': str(dist), 'feed': feed}
-    publish(clone, dist, version)
-    return {'released': True, 'version': version, 'whole': (dist / 'Zaichang.zip').exists(),
-            'update_mb': (dist / 'Zaichang-update.zip').stat().st_size >> 20}
+    with publishing(): publish(clone, dist, version)
+    return {'released': True, 'version': version, 'update_mb': (dist / 'Zaichang-update.zip').stat().st_size >> 20}
+
+
+@contextlib.contextmanager
+def publishing():
+    """One publish at a time, in push order: a newer version pushed meanwhile waits here, so it never
+    goes out before, or is overtaken by, the one still uploading."""
+    lock = ROOT / '.local/release.lock'
+    lock.parent.mkdir(exist_ok=True)
+    with lock.open('w') as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        yield
 
 
 def publish_built(clone):
     """After the push: publish exactly what the pre-push build checked."""
     clone = Path(clone); version = clone_version(clone)
+    with publishing(): return publish_checked(clone, version)
+
+
+def wait_published(clone):
+    time.sleep(5)  # the hook starts the publisher just before the push returns
+    with publishing(): pass
+    version = clone_version(clone)
+    return {'version': version, 'released': released(version)}
+
+
+def publish_checked(clone, version):
     if released(version): return {'released': False, 'version': version, 'reason': '这个版本已经发布过'}
     dist = ROOT / '.runtime/release' / version
     feed = json.loads((dist / 'latest.json').read_text(encoding='utf-8'))
@@ -260,10 +308,13 @@ def main():
     mode.add_argument('--build-only', action='store_true')
     mode.add_argument('--publish-built', action='store_true')
     mode.add_argument('--needs-release', action='store_true')
+    mode.add_argument('--wait', action='store_true')
     args = parser.parse_args()
     try:
         if args.needs_release: return 1 if released(clone_version(args.clone)) else 0
-        result = publish_built(args.clone) if args.publish_built else release_if_new(args.clone, args.build_only)
+        if args.wait: result = wait_published(args.clone)
+        elif args.publish_built: result = publish_built(args.clone)
+        else: result = release_if_new(args.clone, args.build_only)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
     except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError) as error:
