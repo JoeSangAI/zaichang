@@ -159,6 +159,11 @@ final class MeetingAgentController: NSObject {
         width = panel.widthAnchor.constraint(equalToConstant: 370)
         width.priority = NSLayoutConstraint.Priority(999)
         panel.onCommand = { [weak self] method, params in self?.command(method, params) }
+        panel.onExport = { [weak self] button in
+            guard let owner = self?.owner else { return }
+            let main = owner.workspaceOwner ?? owner
+            main.exportButton = button; main.showMeetingExportMenu()
+        }
         panel.speakerOfSegment = { [weak self] id in
             guard let owner = self?.owner, let turn = owner.readingTurns().first(where: { $0.id == id || $0.parts.contains { $0.0 == id } }) else { return nil }
             return owner.readingTurnLabel(turn)

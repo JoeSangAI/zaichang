@@ -15,7 +15,6 @@ extension Delegate {
         localOnlyMode=mode == .localOnly;modeUserSelected=true
         defaults.set(mode.rawValue,forKey:RecordingStartChoice.preferenceKey)
         defaults.set(true,forKey:RecordingStartChoice.dashboardDefaultKey)
-        recordingModePicker?.selectItem(at:localOnlyMode ? 1:0)
     }
     func persistRecordingStartPreference() {
         guard !Credential.offline,!mock else{return}
@@ -25,7 +24,6 @@ extension Delegate {
     func beginRecordingModeFlow() {
         guard child==nil,!preparingModels,!processingAudio,!credentialReadJob.waiting,
               [.idle,.stopped,.failed,.ended].contains(phase.phase) else{return}
-        recordingModePicker?.selectItem(at:localOnlyMode ? 1:0)
         // The explicit Start click launches the previously configured mode and
         // scope. OS permissions, credential failures and hard limits still apply.
         if localOnlyMode {beginLocalOnlyFlow()}else{beginCloudSessionFlow()}

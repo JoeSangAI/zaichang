@@ -301,7 +301,7 @@ extension Delegate {
     }
     @objc func selectDashboardMode(_ sender:NSSegmentedControl) {
         guard canSelectRecordingMode else {updateRecordingDashboard();return}
-        recordingModePicker?.selectItem(at:sender.selectedSegment);changeRecordingMode()
+        setRecordingMode(localOnly:sender.selectedSegment==1)
     }
     func receiveAudioLevels(_ event:[String:Any],now:Double=ProcessInfo.processInfo.systemUptime) {
         guard phase.phase == .recording,event["session"] as? String==activeSession,

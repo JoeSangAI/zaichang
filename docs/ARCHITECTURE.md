@@ -45,6 +45,8 @@ Swift 使用 macOS 音频接口采集麦克风与电脑声音，并按音轨持�
 
 ## Codex 助理
 
+没有可用的 Codex 时，提问改由百炼 `deepseek-v4.1-flash` 依据本场发言一次回答（不联网、不读写文件），旁听不出现；找不到或未登录的 Codex 一分钟内不再重复探测。
+
 原生界面通过本机进程启动 `assistant_runtime.py`，通过 `codex_runtime.py` 以 stdio JSON-RPC 连接 `codex app-server`。每场会议只有一个助理对话。所有线程使用 `ephemeral: true`，不依赖 Codex 持久会话，用户与助理历史以在场数据库为准。
 
 助理长时间在开会的电脑上跑，只能占用有限的资源，出问题要让用户看得见。下面四条由结构保证，改动运行层时不能破坏：

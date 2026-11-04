@@ -83,11 +83,8 @@ extension Delegate:NSMenuDelegate {
     func requestDeleteMeeting(_ item:CachedMeeting) {
         guard !meetingDeletionBusy,libraryManagement?.busy != true else{return}
         guard item.id != currentCacheID || canDeleteCurrentMeeting else {showTransientFeedback(currentMeetingDeleteBlockReason);return}
-        let confirmed:Bool
-        if let override=deletionConfirmationOverride {confirmed=override(item)}
-        else {
-            let alert=NSAlert();alert.messageText="删除「"+item.displayTitle+"」？";alert.informativeText="已录内容会先保存，再将本场录音、转写文字和会议资料一起移入回收站，之后可从回收站找回。另存到其他位置的文件、共享人物声纹档案保留。";alert.addButton(withTitle:"删除会议");alert.addButton(withTitle:"取消");confirmed=alert.runModal() == .alertFirstButtonReturn
-        }
+        // The meeting goes to the recycle bin and comes back with "撤销": nothing to confirm beforehand.
+        let confirmed=deletionConfirmationOverride?(item) ?? true
         guard confirmed,!meetingDeletionBusy,libraryManagement?.busy != true,item.id != currentCacheID || canDeleteCurrentMeeting else{return}
         cancelSpeakerRefinement(cacheID:item.id);historyReader?.cancelSpeakerRefinement(cacheID:item.id)
         meetingDeletionBusy=true;deletingCacheID=item.id;libraryJob.cancel();pendingLibraryOpen=nil;libraryOpenJob.cancel();librarySearchJob.cancel();libraryFilterWork?.cancel()
@@ -139,10 +136,12 @@ extension Delegate:NSMenuDelegate {
             DispatchQueue.main.async {
                 guard let self else{return}
                 switch result {
-                case .success:
+                case .success(let receipt):
                     if self.historyReader?.currentCacheID==item.id {self.returnToCurrent()}
                     if self.currentCacheID==item.id {self.meetingDeletionBusy=false;self.newMeeting();self.contextSession=nil;self.contextPublisher?.clearCurrent()}
-                    self.recoveries.removeAll{$0.id==item.id};self.libraryVisible.removeAll{$0.id==item.id};self.renderLibraryList();self.reloadLibrary();self.finishMeetingDeletion("会议已移入回收站，可随时恢复")
+                    self.recoveries.removeAll{$0.id==item.id};self.libraryVisible.removeAll{$0.id==item.id};self.renderLibraryList();self.reloadLibrary();self.finishMeetingDeletion("")
+                    self.showTransientFeedback("「\(item.displayTitle)」已移到回收站") {[weak self] in self?.restoreDeletedMeetings([receipt]) {[weak self] result in
+                        self?.reloadLibrary();self?.showTransientFeedback(result.failures.isEmpty ? "已恢复":"没能恢复，可以在回收站里再试")}}
                 case .failure(let error):self.finishMeetingDeletion((error as? Failure)?.code.contains("recovery_required")==true ? "部分文件已移入回收站，请使用恢复会议":"删除失败；会议文件已保留，可重试")
                 }
             }
@@ -323,13 +322,8 @@ final class MeetingRecycleBinController:NSWindowController,NSTableViewDataSource
     @objc func restoreSelected() {
         guard !restoring,let owner=meetingOwner,!owner.meetingDeletionBusy,owner.libraryManagement?.busy != true else{return}
         let selected=rows.filter{selectedIDs.contains($0.receipt.id)};guard !selected.isEmpty else{return}
-        let confirmed:Bool
-        if let confirmationOverride {confirmed=confirmationOverride(selected)}else {
-            let alert=NSAlert();alert.messageText="恢复所选的\(selected.count)场会议？";alert.informativeText="以下会议的录音、转写和资料会一起恢复。"
-            let list=NSTextField(wrappingLabelWithString:selected.map{"· "+$0.receipt.title+"　"+$0.dateText($0.recordingDate)}.joined(separator:"\n"));list.frame=NSRect(x:0,y:0,width:480,height:max(44,Double(selected.count)*36));list.font = .systemFont(ofSize:13)
-            let scroll=NSScrollView(frame:NSRect(x:0,y:0,width:500,height:min(220,list.frame.height)));scroll.hasVerticalScroller=true;scroll.documentView=list;alert.accessoryView=scroll
-            alert.addButton(withTitle:"恢复\(selected.count)场会议");alert.addButton(withTitle:"取消");confirmed=alert.runModal() == .alertFirstButtonReturn
-        }
+        // Restoring loses nothing, so it just happens.
+        let confirmed=confirmationOverride?(selected) ?? true
         guard confirmed else{return}
         guard !owner.meetingDeletionBusy,owner.libraryManagement?.busy != true else{status.stringValue="会议资料正在处理，请稍后重试";return}
         restoring=true;status.stringValue="正在恢复\(selected.count)场会议…";updateControls()

@@ -120,18 +120,26 @@ class MeetingIncrementalOverviewTests(unittest.IsolatedAsyncioTestCase):
             raise fixtures.RuntimeErrorCode("codex_not_installed")
         await self.service.runtime.close()
         self.service.runtime = None; self.service.runtime_factory = absent
+        answered = []
+
+        async def answer(key, messages, timeout):
+            answered.append(messages)
+            return {"text": "你好，我在。"}
+        self.service.answer_call = answer
         await self.service.bind(self.workspace_id, {"session_id": "session-1", "cache_id": "cache-1"})
         state = await self.service._snapshot(self.workspace_id, announce=False)
-        self.assertEqual(state["runtime_status"], "auth_required")
-        self.assertIn("概览、转写和纪要不受影响", state["runtime_message"])
+        # Without Codex the assistant still answers, on the Bailian key; that is not a problem to report.
+        self.assertEqual((state["engine"], state["runtime_status"]), ("bailian", "ready"))
         await self.context(1, "stopped"); await self.settle()
         self.assertEqual(self.row()["status"], "ready")
         response = await self.service.dispatch({"id": "1", "method": "send", "workspace_id": self.workspace_id, "params": {"text": "你好"}})
-        self.assertFalse(response["ok"])
-        self.assertIn("使用引导", response["error"]["message"])
+        self.assertTrue(response["ok"])
+        await self.settle()
+        self.assertEqual(len(answered), 1)
+        # Listening needs Codex's tools.
         response = await self.service.dispatch({"id": "2", "method": "proactive", "workspace_id": self.workspace_id, "params": {"enabled": True}})
         self.assertFalse(response["ok"])
-        self.assertIn("使用引导", response["error"]["message"])
+        self.assertIn("设置", response["error"]["message"])
         self.assertEqual(self.store.workspace(self.workspace_id)["proactive"], 0)
 
     async def test_key_waits_silently_until_the_app_has_said(self):

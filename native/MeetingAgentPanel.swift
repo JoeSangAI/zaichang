@@ -6,14 +6,19 @@ final class MeetingAgentPanel: NSView {
     typealias CommandHandler = (String, [String: Any]) -> Void
 
     private enum Tab: Int, CaseIterable {
-        case assistant, overview, notes
-        var title: String { ["助理", "概览", "笔记"][rawValue] }
+        case overview, assistant, notes
+        var title: String { ["概览", "助理", "笔记"][rawValue] }
     }
 
     var onCommand: CommandHandler?
     var onResize: ((CGFloat, Bool) -> Void)?
+    /// Export lives under the overview, where the minutes are read.
+    var onExport: ((NSButton) -> Void)?
+    let overviewExport = NSButton(title: "导出…", target: nil, action: nil)
+    private var listCloseToStatus: NSLayoutConstraint!
+    private var listBelowPresence: NSLayoutConstraint!
     var referenceBaseURL = URL(fileURLWithPath: NSHomeDirectory())
-    private(set) var selectedTab: String = "助理"
+    private(set) var selectedTab: String = "概览"
     private var state: [String: Any] = [:]
     private var suppressSwitchAction = false
     private var statusHeight: NSLayoutConstraint!
@@ -97,6 +102,9 @@ final class MeetingAgentPanel: NSView {
         let working = (snapshot["work"] as? [[String: Any]] ?? []).count
         let name = AssistantProfile.name
         composerPlaceholder.stringValue = "问\(name)，或直接在会上交办"
+        let tools = snapshot["engine"] as? String != "bailian"
+        presenceCard.isHidden = !tools
+        listBelowPresence.isActive = tools; listCloseToStatus.isActive = !tools
         presenceCard.show(on: enabled, title: enabled ? "\(name)正在旁听" : "旁听已关闭",
                           detail: enabled ? "会上交办的事会自动接手" + (working > 0 ? " · 正在做 \(working) 件" : "") : "开启后，会上交办的事会自动开始")
     }
@@ -190,7 +198,7 @@ final class MeetingAgentPanel: NSView {
         buildAssistantPage()
         buildOverviewPage()
         buildNotesPage()
-        showTab(.assistant)
+        showTab(.overview)
         addSubview(resizeHandle, positioned: .above, relativeTo: nil)
     }
 
@@ -208,6 +216,9 @@ final class MeetingAgentPanel: NSView {
         proactiveSwitch.target = self; proactiveSwitch.action = #selector(toggleProactive(_:))
         proactiveSwitch.setAccessibilityLabel("旁听")
         presenceCard.install(title: proactiveLabel, toggle: proactiveSwitch)
+        // Listening needs Codex's tools: without them the card isn't there at all.
+        listBelowPresence = transcriptScroll.topAnchor.constraint(equalTo: presenceCard.bottomAnchor, constant: 4)
+        listCloseToStatus = transcriptScroll.topAnchor.constraint(equalTo: statusLabel.bottomAnchor, constant: 4)
         presenceCard.translatesAutoresizingMaskIntoConstraints = false
         assistantPage.addSubview(presenceCard)
 
@@ -296,7 +307,7 @@ final class MeetingAgentPanel: NSView {
             presenceCard.topAnchor.constraint(equalTo: statusLabel.bottomAnchor, constant: 4),
             transcriptScroll.leadingAnchor.constraint(equalTo: assistantPage.leadingAnchor),
             transcriptScroll.trailingAnchor.constraint(equalTo: assistantPage.trailingAnchor),
-            transcriptScroll.topAnchor.constraint(equalTo: presenceCard.bottomAnchor, constant: 4),
+            listBelowPresence,
             transcriptScroll.bottomAnchor.constraint(equalTo: activityContainer.topAnchor, constant: -8),
             activityContainer.leadingAnchor.constraint(equalTo: assistantPage.leadingAnchor, constant: 22),
             activityContainer.trailingAnchor.constraint(equalTo: assistantPage.trailingAnchor, constant: -22),
@@ -393,6 +404,9 @@ final class MeetingAgentPanel: NSView {
         overviewRefresh.contentTintColor = MeetingVisualStyle.muted; overviewRefresh.target = self; overviewRefresh.action = #selector(refreshOverview)
         overviewRefresh.toolTip = "更新概览"; overviewRefresh.translatesAutoresizingMaskIntoConstraints = false
         overviewPage.addSubview(overviewRefresh)
+        overviewExport.bezelStyle = .rounded; overviewExport.controlSize = .small; overviewExport.target = self; overviewExport.action = #selector(exportMeeting)
+        overviewExport.translatesAutoresizingMaskIntoConstraints = false
+        overviewPage.addSubview(overviewExport)
         let scroll = NSScrollView()
         scroll.documentView = overviewTextView
         scroll.hasVerticalScroller = true
@@ -410,7 +424,9 @@ final class MeetingAgentPanel: NSView {
             overviewRefresh.centerYAnchor.constraint(equalTo: overviewStatus.centerYAnchor),
             overviewRefresh.widthAnchor.constraint(equalToConstant: 24), overviewRefresh.heightAnchor.constraint(equalToConstant: 24),
             scroll.topAnchor.constraint(equalTo: overviewStatus.bottomAnchor, constant: 2),
-            scroll.bottomAnchor.constraint(equalTo: overviewPage.bottomAnchor),
+            scroll.bottomAnchor.constraint(equalTo: overviewExport.topAnchor, constant: -8),
+            overviewExport.trailingAnchor.constraint(equalTo: overviewPage.trailingAnchor, constant: -18),
+            overviewExport.bottomAnchor.constraint(equalTo: overviewPage.bottomAnchor, constant: -14),
             overviewTextView.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor)
         ])
     }
@@ -513,6 +529,8 @@ final class MeetingAgentPanel: NSView {
         overviewTextView.textStorage?.setAttributedString(rich)
         overviewTextView.enclosingScrollView?.contentView.scroll(to: scroll)
     }
+
+    @objc private func exportMeeting() { onExport?(overviewExport) }
 
     @objc private func changeTab(_ sender: MeetingAgentTabs) {
         guard let tab = Tab(rawValue: sender.selectedSegment) else { return }
@@ -777,7 +795,7 @@ private final class MeetingAgentTabs: NSControl {
         super.init(frame: frameRect)
         let row = NSStackView(); row.orientation = .horizontal; row.distribution = .fill; row.spacing = 22
         row.translatesAutoresizingMaskIntoConstraints = false; addSubview(row)
-        for (i, title) in ["助理", "概览", "笔记"].enumerated() {
+        for (i, title) in ["概览", "助理", "笔记"].enumerated() {
             let button = NSButton(title: title, target: self, action: #selector(selectTab(_:)))
             button.tag = i; button.bezelStyle = .regularSquare; button.isBordered = false
             button.setAccessibilityLabel(title); row.addArrangedSubview(button); buttons.append(button)

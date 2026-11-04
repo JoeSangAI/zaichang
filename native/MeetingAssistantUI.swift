@@ -97,7 +97,7 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
     var sidebarDivider:MeetingSidebarDivider?;var preferredSidebarWidth:CGFloat=200;var sidebarPreferencesOverride:UserDefaults?
     var meetingDeletionBusy=false;var deletingCacheID:String?;var deletionConfirmationOverride:((CachedMeeting)->Bool)?
     var libraryManagement:MeetingLibraryManagement?
-    var feedbackExpiresAt=Date.distantPast;var feedbackUndoButton:NSButton?;var feedbackAllowsNameUndo=false
+    var feedbackExpiresAt=Date.distantPast;var feedbackUndoButton:NSButton?;var feedbackAllowsNameUndo=false;var feedbackUndo:(()->Void)?
     var deletionStoreOverride:MeetingDeletionStore?;var libraryMenuTarget:CachedMeeting?;var restoreSelectionOverride:(([MeetingDeletionReceipt])->MeetingDeletionReceipt?)?
     var agentController:MeetingAgentController?;var agentSidebarButton:NSButton?;var agentFeatureOverride=false;var agentLiveProbe=false;var agentStoreOverride:URL?
     var notesController:MeetingNotesController?;var notesExpanded=false;var notesPausedRelative:Double?
@@ -105,7 +105,7 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
     var librarySearch:NSSearchField!;var libraryTable:NSTableView!;var libraryStatus:NSTextField!;var libraryRetryButton:NSButton!;var libraryVisible:[CachedMeeting]=[];var librarySelectionChanging=false
     let libraryJob=CacheReadJob();let libraryOpenJob=CacheReadJob();let librarySearchJob=CacheReadJob();let librarySummaryJob=CacheReadJob();var librarySummaryPending:CachedMeeting?;var librarySummaryGeneration=0;var librarySummaryLoaded:Set<String>=[];var libraryFilterWork:DispatchWorkItem?;var pendingLibraryOpen:CachedMeeting?;var libraryReloadPending=false;var librarySelectRecentPending=false
     var liveReturn:NSButton!;var timelineToggle:NSButton!;var historyLiveButton:NSButton!;var showsSpeakerRanges=false
-    var speakerReviewButton:NSButton?;var speakerStrip:NSStackView?;var speakerStripSignature="";var speakerStripRefreshedAt=0.0;var speakerStripRefreshPending=false;var voiceCandidateButton:NSButton?;var speakerReviewWindow:NSWindow?;var libraryParticipants:[String:[String]]=[:]
+    var speakerReviewButton:NSButton?;var meetingMoreButton:NSButton?;var speakerStrip:NSStackView?;var speakerStripSignature="";var speakerStripRefreshedAt=0.0;var speakerStripRefreshPending=false;var voiceCandidateButton:NSButton?;var speakerReviewWindow:NSWindow?;var libraryParticipants:[String:[String]]=[:]
     let autoTitle=MeetingAutoTitle();var titleProvider:MeetingTitleProvider?;var titleTextAllowed=false;var titleTask:Task<Void,Never>?;var titleRevision=0;var titleProviderFactory:((String)->MeetingTitleProvider)?;var owedTitleTask:Task<Void,Never>?;var owedTitleLastPass=0.0;var owedTitlePassInterval=600.0
     var finalTitleTasks:[String:Task<Void,Never>]=[:]
     var isHistoryReader=false;weak var workspaceOwner:Delegate?;var historyReader:Delegate?;var historyReaderShell:NSWindow?
@@ -123,7 +123,7 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
     var meetingMinutesBusy=false;var meetingMinutesTask:Task<Void,Never>?;var meetingMinutesCompletion:(String,MeetingMinutesRequest) async throws->String=Delegate.dashScopeMinutes;let meetingMinutesCredentialJob=CacheReadJob();let meetingMinutesReferenceJob=CacheReadJob()
     var availableCloudSeconds=0;let budgetReadJob=CacheReadJob();let credentialReadJob=CacheReadJob()
     let cacheReadJob=CacheReadJob();let cacheExportJob=CacheReadJob();let recordDetailsJob=CacheReadJob();let cacheWriteQueue=DispatchQueue(label:"meeting.cache.writes");
-    var localOnlyMode=false;var modeUserSelected=false;var recordingModePicker:NSPopUpButton?;var exportButton:NSButton?;var startupWorkerFixture:(([String:Any])->Void)?;var startupCredentialFixture:(()throws->String?)?
+    var localOnlyMode=false;var modeUserSelected=false;var exportButton:NSButton?;var startupWorkerFixture:(([String:Any])->Void)?;var startupCredentialFixture:(()throws->String?)?
     var recordingTimeLabel:NSTextField?;var recordingActionCaption:NSTextField?;var recordingTransportView:NSView?
     lazy var recordingAttention=RecordingAttention(owner:self)
     var coarseStopButton:NSButton?
@@ -224,7 +224,8 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
     }
     func toolbarAllowedItemIdentifiers(_ toolbar:NSToolbar)->[NSToolbarItem.Identifier] {[NSToolbarItem.Identifier("history"),.flexibleSpace,NSToolbarItem.Identifier("search"),NSToolbarItem.Identifier("export"),NSToolbarItem.Identifier("details"),NSToolbarItem.Identifier("assistant"),NSToolbarItem.Identifier("more")]}
     func toolbarDefaultItemIdentifiers(_ toolbar:NSToolbar)->[NSToolbarItem.Identifier] {
-        assistantEnabled ? [NSToolbarItem.Identifier("history"),.flexibleSpace,NSToolbarItem.Identifier("assistant"),NSToolbarItem.Identifier("export"),NSToolbarItem.Identifier("more")] : [NSToolbarItem.Identifier("history"),.flexibleSpace,NSToolbarItem.Identifier("search"),NSToolbarItem.Identifier("export"),NSToolbarItem.Identifier("details")]
+        // With the side panel, the meeting's own actions live beside its title and export under the overview.
+        assistantEnabled ? [NSToolbarItem.Identifier("history"),.flexibleSpace,NSToolbarItem.Identifier("assistant")] : [NSToolbarItem.Identifier("history"),.flexibleSpace,NSToolbarItem.Identifier("search"),NSToolbarItem.Identifier("export"),NSToolbarItem.Identifier("details")]
     }
     func toolbar(_ toolbar:NSToolbar,itemForItemIdentifier id:NSToolbarItem.Identifier,willBeInsertedIntoToolbar flag:Bool)->NSToolbarItem? {
         let spec:(String,String,Selector)
@@ -257,14 +258,10 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
         if let container=output.textContainer,abs(container.containerSize.width-textWidth)>0.5 {container.containerSize=NSSize(width:textWidth,height:CGFloat.greatestFiniteMagnitude)}
     }
     func buildSettings() {
-        sheet=FocusPanel(contentRect:NSRect(x:0,y:0,width:520,height:360),styleMask:[.titled,.closable],backing:.buffered,defer:false);sheet.title="设置";sheet.delegate=self;sheet.autorecalculatesKeyViewLoop=false
+        // Recording-only vs transcribing is chosen where a recording starts; Settings holds only what lasts.
+        sheet=FocusPanel(contentRect:NSRect(x:0,y:0,width:520,height:236),styleMask:[.titled,.closable],backing:.buffered,defer:false);sheet.title="设置";sheet.delegate=self;sheet.autorecalculatesKeyViewLoop=false
         let content=sheet.contentView!
         func place(_ v:NSView,_ x:CGFloat,_ y:CGFloat,_ width:CGFloat,_ height:CGFloat){v.frame=NSRect(x:x,y:y,width:width,height:height);content.addSubview(v)}
-        place(label("记录方式",size:13,weight:.medium),24,308,100,24)
-        let mode=FocusPopup();mode.addItems(withTitles:["录音并转写", "仅录音"]);mode.selectItem(at:localOnlyMode ? 1:0);mode.target=self;mode.action=#selector(changeRecordingMode);recordingModePicker=mode;place(mode,130,306,220,28)
-        place(label("麦克风和电脑声音同时收录，无需切换应用。",size:13),24,271,472,32)
-        let captureHint=label("包括会议软件、浏览器、播放器，以及会议中共享的声音。",size:12);captureHint.textColor = .secondaryLabelColor;place(captureHint,24,242,472,28)
-        let separator=NSBox();separator.boxType = .separator;place(separator,24,233,472,1)
         savedLabel=label("密钥已保存在这台Mac",size:13);place(savedLabel,24,195,472,24)
         keyLabel=label("百炼密钥",size:13,weight:.medium);place(keyLabel,24,195,472,24)
         key=NSSecureTextField();key.delegate=self;key.placeholderString=mock ? "仅输入假密钥" : "粘贴API密钥";key.bezelStyle = .roundedBezel;place(key,24,157,472,30)
@@ -275,6 +272,8 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
         if mock || humanIdentityAuthorized || !trialCandidate {place(label("更多设置",size:12,weight:.medium),24,78,76,24)}
         let peopleButton=ImmediateButton(title:"人物资料…",target:self,action:#selector(manageConsent));peopleButton.identifier=NSUserInterfaceItemIdentifier("settings-people");peopleButton.bezelStyle = .rounded;peopleButton.isHidden = !mock && !humanIdentityAuthorized;place(peopleButton,112,76,88,28)
         let balanceButton=ImmediateButton(title:"余额…",target:self,action:#selector(configureBalance));balanceButton.identifier=NSUserInterfaceItemIdentifier("settings-balance");balanceButton.bezelStyle = .rounded;place(balanceButton,208,76,88,28);balanceButton.isHidden=trialCandidate
+        let codexButton=ImmediateButton(title:"Codex…",target:self,action:#selector(showCodexConnection));codexButton.identifier=NSUserInterfaceItemIdentifier("settings-codex");codexButton.bezelStyle = .rounded;place(codexButton,304,76,88,28)
+        let updateButton=ImmediateButton(title:"检查更新…",target:self,action:#selector(checkForUpdatesFromSettings));updateButton.identifier=NSUserInterfaceItemIdentifier("settings-update");updateButton.bezelStyle = .rounded;updateButton.isHidden = !AppUpdater.enabled;place(updateButton,400,76,96,28)
         change=ImmediateButton(title:"更换密钥",target:self,action:#selector(changeKey));change.bezelStyle = .rounded;place(change,24,20,108,28)
         let cancel=ImmediateButton(title:"取消",target:self,action:#selector(dismissSettings));settingsCancel=cancel;cancel.bezelStyle = .rounded;cancel.keyEquivalent="\u{1b}";place(cancel,296,20,84,28)
         save=ImmediateButton(title:"保存密钥",target:self,action:#selector(saveKey));save.bezelStyle = .rounded;save.keyEquivalent="\r";place(save,388,20,108,28)
@@ -305,7 +304,7 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
         // Collapse the absent input row and shorten the sheet. Always derive
         // frames from the editing layout, so repeated replacements never drift.
         let reduction:CGFloat=enteringKey ? 0:60
-        sheet.setContentSize(NSSize(width:520,height:360-reduction))
+        sheet.setContentSize(NSSize(width:520,height:236-reduction))
         for (view,baseline) in settingsLayoutFrames {
             var frame=baseline
             if baseline.minY>=157 {frame.origin.y-=reduction}
@@ -402,7 +401,8 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
         do {try handle.write(contentsOf:data+Data([10]))}
         catch {recordingControlInFlight=nil;end();diagnostic.stringValue="控制连接中断，正在停止采集和上传；已有记录保留";updateUI()}
     }
-    @objc func changeRecordingMode(){guard canSelectRecordingMode else{recordingModePicker?.selectItem(at:displayedLocalMode ? 1:0);return};modeUserSelected=true;localOnlyMode=recordingModePicker?.indexOfSelectedItem==1;persistRecordingStartPreference();newRecordingPending=localOnlyMode;diagnostic.stringValue=localOnlyMode ? "只保存录音，不上传":"边录音，边生成文字";updateUI()}
+    /// Recording only, or recording and transcribing: chosen where a recording starts.
+    func setRecordingMode(localOnly:Bool){guard canSelectRecordingMode else{updateRecordingDashboard();return};modeUserSelected=true;localOnlyMode=localOnly;persistRecordingStartPreference();newRecordingPending=localOnlyMode;diagnostic.stringValue=localOnlyMode ? "只保存录音，不上传":"边录音，边生成文字";updateUI()}
     func beginLocalOnlyFlow(){
         guard !audioAssetOperationBusy else{showTransientFeedback("录音文件正在保存，请稍后开始");return}
         prepareAutomaticCapture()
@@ -1247,7 +1247,6 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
         historyButton?.isEnabled = true;newButton?.isEnabled = !sessionBusy
         meter.stringValue="\(phase.time)  ·  预计费用 \(phase.price)"+(balanceState.checked == nil ? "":"  ·  "+balanceState.display)
         meter.toolTip=meter.stringValue
-        recordingModePicker?.isEnabled = ![.connecting,.recording,.paused,.stopping].contains(phase.phase) && !cacheReadJob.waiting && !cacheExportJob.waiting && !qaWriteJob.waiting && !credentialReadJob.waiting
         exportButton?.isEnabled = !sequence.isEmpty || recoveredArchiveText != nil || currentCacheID != nil
         footerDetails?.isHidden = false
         updateWorkspacePresentation()
@@ -2082,7 +2081,7 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
         if quitting {DispatchQueue.main.asyncAfter(deadline:.now()+0.25){if proc.isRunning {proc.interrupt()}}}
     }
     func remainingSeconds()->Int {availableCloudSeconds}
-    func refreshCloudBudget(){budgetReadJob.run(work:{self.readRemainingSeconds()}){[weak self] result in guard let self=self else{return};switch result {case .success(let seconds):self.availableCloudSeconds=seconds;self.newRecordingPending=seconds<=0;if seconds<=0 && !self.modeUserSelected {self.localOnlyMode=true;self.recordingModePicker?.selectItem(at:1)};self.diagnostic.stringValue=seconds<=0 ? "转写用量已达上限，仍可录音":"转写服务可用";case .failure:self.availableCloudSeconds=0;self.newRecordingPending=true;self.diagnostic.stringValue="无法获取转写用量，请稍后重试"};self.updateUI()}}
+    func refreshCloudBudget(){budgetReadJob.run(work:{self.readRemainingSeconds()}){[weak self] result in guard let self=self else{return};switch result {case .success(let seconds):self.availableCloudSeconds=seconds;self.newRecordingPending=seconds<=0;if seconds<=0 && !self.modeUserSelected {self.localOnlyMode=true};self.diagnostic.stringValue=seconds<=0 ? "转写用量已达上限，仍可录音":"转写服务可用";case .failure:self.availableCloudSeconds=0;self.newRecordingPending=true;self.diagnostic.stringValue="无法获取转写用量，请稍后重试"};self.updateUI()}}
     func readRemainingSeconds()->Int {
         guard let data=try? Data(contentsOf:URL(fileURLWithPath:root+"/trial-health.json")),let h=(try? JSONSerialization.jsonObject(with:data)) as? [String:Any] else {return 450}
         let prior=h["previous_wall_seconds"] as? Double ?? 0
@@ -2146,7 +2145,7 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
         let recovery=edit.addItem(withTitle:"历史会议…",action:#selector(showRecoveries),keyEquivalent:"");recovery.target=self
         let libraryFind=edit.addItem(withTitle:"搜索会议…",action:#selector(showLibrarySearch),keyEquivalent:"f");libraryFind.keyEquivalentModifierMask=[.command,.shift];libraryFind.target=self
         let rename=edit.addItem(withTitle:"重命名所选记录…",action:#selector(renameSelectedLibraryMeeting),keyEquivalent:"r");rename.keyEquivalentModifierMask=[.command,.shift];rename.target=self
-        let delete=edit.addItem(withTitle:"删除所选记录…",action:#selector(deleteSelectedLibraryMeeting),keyEquivalent:"");delete.target=self
+        let delete=edit.addItem(withTitle:"删除所选记录",action:#selector(deleteSelectedLibraryMeeting),keyEquivalent:"");delete.target=self
         let transcribe=edit.addItem(withTitle:"转写所选录音…",action:#selector(transcribeSelectedLibraryMeeting),keyEquivalent:"");transcribe.target=self
         let exportMinutes=edit.addItem(withTitle:"导出纪要…",action:#selector(exportVisibleMinutes),keyEquivalent:"");exportMinutes.target=self
         let exportText=edit.addItem(withTitle:"导出原文…",action:#selector(exportVisibleDocument),keyEquivalent:"");exportText.target=self

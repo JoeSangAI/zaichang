@@ -14,6 +14,7 @@ final class AppUpdater:NSObject {
     static let requirement="identifier \"com.joesang.zaichang.standalone\" and anchor apple generic and certificate leaf[subject.OU] = \"\(teamID)\""
     static let checkEvery:TimeInterval=6*3600
     static let retryFetchAfter:TimeInterval=30*60
+    static let resumeAfter:TimeInterval=60
     static var current:String {Bundle.main.object(forInfoDictionaryKey:"CFBundleShortVersionString") as? String ?? "0"}
     /// Only the public edition has a feed; a QA build must never touch the network.
     static var enabled:Bool {!Credential.offline && Bundle.main.object(forInfoDictionaryKey:"OfflineQA") as? Bool != true}
@@ -33,7 +34,7 @@ final class AppUpdater:NSObject {
     private var lastCheck:Date?
     private var retryAt=Date.distantPast
     private var clock:Timer?
-    private var observation:NSKeyValueObservation?
+    private var resumable:ResumableFetch?
     private var card:Card?
     private var whatsNew:(version:String,notes:String)?
     private let accessory=NSTitlebarAccessoryViewController()
@@ -143,29 +144,35 @@ final class AppUpdater:NSObject {
         let small=release.small.flatMap{$0.models==AppUpdater.modelsID(in:Bundle.main.bundleURL) ? $0:nil}
         download(small ?? release.whole,of:release)
     }
+    /// The bytes received so far stay in "<sha256>.part" across quits and dropped connections, and the next
+    /// attempt asks only for the rest: on a slow line an update arrives over several short sessions.
     private func download(_ package:Package,of release:Release) {
-        let folder=self.folder
-        try? FileManager.default.removeItem(at:folder)
+        let folder=self.folder,part=folder.appendingPathComponent(package.sha256.lowercased()+".part")
         try? FileManager.default.createDirectory(at:folder,withIntermediateDirectories:true)
-        let task=URLSession.shared.downloadTask(with:package.url) {file,response,error in
-            let kept=folder.appendingPathComponent("update.zip")
-            let good=error==nil && (response as? HTTPURLResponse)?.statusCode==200
-            let moved=good && file != nil && (try? FileManager.default.moveItem(at:file!,to:kept)) != nil
-            let problem=moved ? AppUpdater.prepare(kept,package,version:release.version,in:folder):"下载没有完成，检查网络后再试一次。"
-            DispatchQueue.main.async {AppUpdater.shared.fetched(package,of:release,problem:problem)}
+        for name in (try? FileManager.default.contentsOfDirectory(atPath:folder.path)) ?? [] where name != part.lastPathComponent {
+            try? FileManager.default.removeItem(at:folder.appendingPathComponent(name))
         }
-        observation=task.progress.observe(\.fractionCompleted) {seen,_ in
-            let value=seen.fractionCompleted
+        resumable=ResumableFetch(part:part,progress:{value in
             DispatchQueue.main.async {AppUpdater.shared.fraction=value;AppUpdater.shared.renderCard()}
+        }) {arrived in
+            var problem:String?,network=false
+            if arrived {
+                let kept=folder.appendingPathComponent("update.zip")
+                if (try? FileManager.default.moveItem(at:part,to:kept)) != nil {problem=AppUpdater.prepare(kept,package,version:release.version,in:folder)}
+                else {problem="下载的文件读不出来，再试一次。"}
+            } else {problem="下载没有完成，会自动接着下载。";network=true}
+            DispatchQueue.main.async {AppUpdater.shared.fetched(package,of:release,problem:problem,network:network)}
         }
-        task.resume()
+        resumable?.start(package.url)
     }
-    private func fetched(_ package:Package,of release:Release,problem failure:String?) {
-        // The small package didn't come together: the whole one doesn't depend on anything here.
-        if failure != nil,package.models != nil {download(release.whole,of:release);return}
-        fetching=false;fraction=nil;observation=nil
+    private func fetched(_ package:Package,of release:Release,problem failure:String?,network:Bool) {
+        resumable=nil
+        // The small package arrived but didn't come together: the whole one doesn't depend on anything here.
+        // A dropped connection is no reason to fetch eight times as much.
+        if failure != nil,!network,package.models != nil {download(release.whole,of:release);return}
+        fetching=false;fraction=nil
         if let failure {
-            problem=failure;retryAt=Date().addingTimeInterval(AppUpdater.retryFetchAfter)
+            problem=failure;retryAt=Date().addingTimeInterval(network ? AppUpdater.resumeAfter:AppUpdater.retryFetchAfter)
         } else {ready=release.version;problem=nil}
         refresh()
     }
@@ -284,6 +291,8 @@ final class AppUpdater:NSObject {
     private static func retitle(_ button:SpeakerPillButton,_ text:String) {
         guard button.title != text else{return}
         button.title=text;button.isEnabled=button.isEnabled;button.setAccessibilityLabel(text);button.invalidateIntrinsicContentSize()
+        // A title bar accessory isn't laid out again by itself: without this the pill keeps the width of its first, empty title.
+        button.superview?.needsLayout=true;button.superview?.layoutSubtreeIfNeeded()
     }
     private func pillPressed() {
         if latest != nil,ready==latest?.version {present(.offer)}
@@ -305,7 +314,8 @@ final class AppUpdater:NSObject {
             field.translatesAutoresizingMaskIntoConstraints=false;field.widthAnchor.constraint(equalToConstant:404).isActive=true
         }
         notes.isEditable=false;notes.drawsBackground=false;notes.font=MeetingVisualStyle.textFont(13);notes.textColor=MeetingVisualStyle.ink
-        notes.textContainerInset=NSSize(width:0,height:2);notes.isVerticallyResizable=true;notes.autoresizingMask=[.width]
+        notes.textContainerInset=NSSize(width:0,height:2);notes.isVerticallyResizable=true;notes.isHorizontallyResizable=false;notes.autoresizingMask=[.width]
+        notes.textContainer?.widthTracksTextView=true;notes.textContainer?.containerSize=NSSize(width:404,height:CGFloat.greatestFiniteMagnitude)
         notesFrame.documentView=notes;notesFrame.hasVerticalScroller=true;notesFrame.drawsBackground=false;notesFrame.borderType = .noBorder
         notesFrame.translatesAutoresizingMaskIntoConstraints=false
         NSLayoutConstraint.activate([notesFrame.widthAnchor.constraint(equalToConstant:404),notesFrame.heightAnchor.constraint(equalToConstant:190)])
@@ -360,4 +370,38 @@ extension Delegate {
         return nil
     }
     @objc func checkForUpdates() {AppUpdater.shared.showOrCheck()}
+}
+
+/// One download that appends to its .part file as bytes arrive and, when that file already holds some, asks only
+/// for the rest. A server that ignores the range answers 200 and the file starts over.
+final class ResumableFetch:NSObject,URLSessionDataDelegate {
+    private let part:URL,progress:(Double)->Void,done:(Bool)->Void
+    private var session:URLSession?,handle:FileHandle?,have:Int64=0,total:Int64=0,finished=false
+    init(part:URL,progress:@escaping (Double)->Void,done:@escaping (Bool)->Void) {self.part=part;self.progress=progress;self.done=done}
+    func start(_ url:URL) {
+        have=((try? FileManager.default.attributesOfItem(atPath:part.path))?[.size] as? NSNumber)?.int64Value ?? 0
+        var request=URLRequest(url:url,cachePolicy:.reloadIgnoringLocalCacheData,timeoutInterval:60)
+        if have>0 {request.setValue("bytes=\(have)-",forHTTPHeaderField:"Range")}
+        session=URLSession(configuration:.default,delegate:self,delegateQueue:nil)
+        session?.dataTask(with:request).resume()
+    }
+    func urlSession(_ session:URLSession,dataTask:URLSessionDataTask,didReceive response:URLResponse,completionHandler:@escaping (URLSession.ResponseDisposition)->Void) {
+        let code=(response as? HTTPURLResponse)?.statusCode ?? 0
+        if code==416 && have>0 {finished=true;completionHandler(.cancel);return}  // the part is already whole
+        guard code==200 || code==206 else {completionHandler(.cancel);return}
+        if code==200 {have=0;try? FileManager.default.removeItem(at:part)}
+        if !FileManager.default.fileExists(atPath:part.path) {FileManager.default.createFile(atPath:part.path,contents:nil)}
+        handle=try? FileHandle(forWritingTo:part);_=try? handle?.seekToEnd()
+        total=have+max(0,response.expectedContentLength)
+        completionHandler(handle==nil ? .cancel:.allow)
+    }
+    func urlSession(_ session:URLSession,dataTask:URLSessionDataTask,didReceive data:Data) {
+        guard (try? handle?.write(contentsOf:data)) != nil else {dataTask.cancel();return}
+        have+=Int64(data.count);if total>0 {progress(min(1,Double(have)/Double(total)))}
+    }
+    func urlSession(_ session:URLSession,task:URLSessionTask,didCompleteWithError error:Error?) {
+        try? handle?.close();handle=nil;session.finishTasksAndInvalidate()
+        let code=(task.response as? HTTPURLResponse)?.statusCode ?? 0
+        done(finished || (error==nil && (code==200 || code==206)))
+    }
 }

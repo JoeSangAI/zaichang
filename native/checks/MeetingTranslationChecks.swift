@@ -149,7 +149,7 @@ import AppKit
     try check(!app.output.string.contains(translations[1]) && !app.transcriptExport().contains("中译："),"off_refreshes_native_view_and_export")
     try snapshot("translation-off")
     app.window.setContentSize(NSSize(width:640,height:720));app.layoutWorkspace();settle()
-    try check(!controller.expanded && app.translationSwitch?.isHiddenOrHasHiddenAncestor==false,"narrow_keeps_translation_and_collapses_assistant")
+    try check(!controller.expanded && app.meetingMoreButton?.isHiddenOrHasHiddenAncestor==false,"narrow_keeps_the_meeting_menu_and_collapses_assistant")
     try snapshot("narrow")
     controller.panel.onCommand=previousCommand
     var stopped=false;controller.shutdown{stopped=true};try wait{stopped}

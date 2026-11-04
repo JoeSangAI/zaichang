@@ -137,7 +137,17 @@ extension Delegate {
         let header=stack(.horizontal,spacing:16);header.alignment = .centerY;header.distribution = .fill
         let words=stack(.vertical,spacing:7);words.alignment = .leading;words.distribution = .fill;words.setContentHuggingPriority(.defaultLow,for:.horizontal)
         let eyebrow=label("新会议 · 实时转写",size:13);eyebrow.textColor=MeetingVisualStyle.muted;meetingEyebrow=eyebrow;words.addArrangedSubview(eyebrow)
-        meetingTitleField=NSTextField();meetingTitleField.isBordered=false;meetingTitleField.drawsBackground=false;meetingTitleField.focusRingType = .none;meetingTitleField.font = MeetingVisualStyle.titleFont();meetingTitleField.textColor=MeetingVisualStyle.ink;meetingTitleField.stringValue=meetingTitle;meetingTitleField.placeholderString="会议名称";meetingTitleField.delegate=self;meetingTitleField.lineBreakMode = .byTruncatingTail;meetingTitleField.setAccessibilityLabel("会议名称");words.addArrangedSubview(meetingTitleField)
+        meetingTitleField=NSTextField();meetingTitleField.isBordered=false;meetingTitleField.drawsBackground=false;meetingTitleField.focusRingType = .none;meetingTitleField.font = MeetingVisualStyle.titleFont();meetingTitleField.textColor=MeetingVisualStyle.ink;meetingTitleField.stringValue=meetingTitle;meetingTitleField.placeholderString="会议名称";meetingTitleField.delegate=self;meetingTitleField.lineBreakMode = .byTruncatingTail;meetingTitleField.setAccessibilityLabel("会议名称")
+        let more=ImmediateButton(title:"",target:self,action:#selector(showMeetingMore(_:)));more.bezelStyle = .inline;more.isBordered=false
+        more.image=NSImage(systemSymbolName:"ellipsis",accessibilityDescription:"这场会议的操作");more.contentTintColor=MeetingVisualStyle.muted;more.setAccessibilityLabel("这场会议的操作")
+        more.symbolConfiguration=NSImage.SymbolConfiguration(pointSize:16,weight:.semibold)
+        more.setContentHuggingPriority(.required,for:.horizontal);more.setContentCompressionResistancePriority(.required,for:.horizontal);meetingMoreButton=more
+        // The title takes its own width, so "…" sits right after it; a long title truncates before pushing it out.
+        meetingTitleField.setContentHuggingPriority(.defaultHigh,for:.horizontal);meetingTitleField.setContentCompressionResistancePriority(.defaultLow,for:.horizontal)
+        let titleEnd=NSView();titleEnd.setContentHuggingPriority(.defaultLow,for:.horizontal)
+        let titleRow=stack(.horizontal,spacing:4);titleRow.alignment = .centerY;titleRow.distribution = .fill
+        for view in [meetingTitleField!,more,titleEnd] {titleRow.addArrangedSubview(view)}
+        words.addArrangedSubview(titleRow);titleRow.widthAnchor.constraint(equalTo:words.widthAnchor).isActive=true
         heading=label("准备就绪",size:12);heading.textColor = MeetingVisualStyle.muted;heading.lineBreakMode = .byTruncatingTail;heading.setContentCompressionResistancePriority(.defaultLow,for:.horizontal);header.addArrangedSubview(words)
         action=RecordingPrimaryButton(title:"开始录音",target:self,action:#selector(primaryWorkspaceAction));action.bezelStyle = .rounded;action.controlSize = .large;action.isBordered=false;action.wantsLayer=true;action.layer?.cornerRadius=12;action.widthAnchor.constraint(equalToConstant:34).isActive=true;action.heightAnchor.constraint(equalToConstant:34).isActive=true;action.font = .systemFont(ofSize:14,weight:.semibold);action.setAccessibilityLabel("开始录音或继续录音");(action as? RecordingPrimaryButton)?.circularTransport=true
         main.addArrangedSubview(header);readingAlignedRows.append(header)
@@ -145,7 +155,8 @@ extension Delegate {
         let tools=stack(.horizontal,spacing:10);tools.distribution = .fill;tools.alignment = .centerY
         let strip=stack(.horizontal,spacing:2);strip.alignment = .centerY;strip.isHidden=true;strip.setContentCompressionResistancePriority(.defaultLow,for:.horizontal);speakerStrip=strip;tools.addArrangedSubview(strip)
         let statusSpacer=NSView();statusSpacer.setContentHuggingPriority(.defaultLow,for:.horizontal);tools.addArrangedSubview(statusSpacer)
-        tools.addArrangedSubview(makeTranslationControl())
+        // The switch keeps the translation state; it is turned on and off from the title's menu.
+        let translation=makeTranslationControl();translation.isHidden=true;tools.addArrangedSubview(translation)
         timelineToggle=ImmediateButton(checkboxWithTitle:"人物时间线",target:self,action:#selector(toggleSpeakerRanges));timelineToggle.controlSize = .small;timelineToggle.isHidden=true
         let peopleButton=ImmediateButton(title:"发言人",target:self,action:#selector(showSpeakerReview));speakerReviewButton=peopleButton;peopleButton.bezelStyle = .inline;peopleButton.font = .systemFont(ofSize:12);peopleButton.controlSize = .small;peopleButton.contentTintColor=MeetingVisualStyle.ink;peopleButton.image=NSImage(systemSymbolName:"person.2",accessibilityDescription:"按发言人查看与修改");peopleButton.imagePosition = .imageLeading;peopleButton.setAccessibilityLabel("按发言人查看与修改")
         let voice=ImmediateButton(title:"",target:self,action:#selector(showQuickVoiceConfirmation));voice.bezelStyle = .inline;voice.controlSize = .small;voice.contentTintColor=MeetingVisualStyle.muted;voice.isHidden=true;voice.lineBreakMode = .byTruncatingTail;voice.widthAnchor.constraint(lessThanOrEqualToConstant:180).isActive=true;voiceCandidateButton=voice;tools.addArrangedSubview(voice)
@@ -180,7 +191,7 @@ extension Delegate {
         let footer=stack(.horizontal,spacing:10)
         diagnostic=label("",size:11);diagnostic.textColor = .secondaryLabelColor;diagnostic.lineBreakMode = .byTruncatingTail;diagnostic.maximumNumberOfLines=1;diagnostic.setContentHuggingPriority(.defaultLow,for:.horizontal);diagnostic.setContentCompressionResistancePriority(.defaultLow,for:.horizontal);footer.addArrangedSubview(diagnostic)
         let translationStatus=label("",size:11);translationStatus.textColor=MeetingVisualStyle.muted;translationStatus.lineBreakMode = .byTruncatingTail;translationStatus.setContentCompressionResistancePriority(.defaultLow,for:.horizontal);translationStatus.isHidden=true;translationStatusLabel=translationStatus;footer.addArrangedSubview(translationStatus)
-        let undoFeedback=NSButton(title:"撤销",target:self,action:#selector(undoName));undoFeedback.bezelStyle = .inline;undoFeedback.isHidden=true;undoFeedback.setAccessibilityLabel("撤销上次发言人修改及对应声音学习");feedbackUndoButton=undoFeedback;footer.addArrangedSubview(undoFeedback)
+        let undoFeedback=NSButton(title:"撤销",target:self,action:#selector(undoFeedbackAction));undoFeedback.bezelStyle = .inline;undoFeedback.isHidden=true;undoFeedback.setAccessibilityLabel("撤销上次发言人修改及对应声音学习");feedbackUndoButton=undoFeedback;footer.addArrangedSubview(undoFeedback)
         meter=label("",size:11);meter.textColor = .secondaryLabelColor;meter.font = .monospacedDigitSystemFont(ofSize:11,weight:.regular);meter.isHidden=true
         footerDetails=ImmediateButton(title:"会议详情",target:self,action:#selector(showDetails));footerDetails.bezelStyle = .inline;footerDetails.isHidden=true;main.addArrangedSubview(footer)
         for row in main.arrangedSubviews {row.widthAnchor.constraint(equalTo:main.widthAnchor).isActive=true}
@@ -193,6 +204,7 @@ extension Delegate {
         refreshMeetingNotes();agentController?.layout()
         if meetingTitleField.currentEditor()==nil {meetingTitleField.stringValue=meetingTitle}
         meetingTitleField.isEditable = !(workspaceOwner ?? self).meetingDeletionBusy && (currentCacheID != nil || !sequence.isEmpty)
+        meetingMoreButton?.isHidden=currentCacheID==nil
         let owner=isHistoryReader ? (workspaceOwner ?? self):self
         let state=owner.phase.phase
         switch state {
@@ -248,7 +260,7 @@ extension Delegate {
         refreshQuickVoiceCandidate();refreshSpeakerStrip()
         refreshMeetingArchiveButtonState()
         diagnostic.isHidden = !showsMissingCredentialHint && speakerRefinementToken==nil && Date()>=feedbackExpiresAt && phase.error==nil && !diagnostic.stringValue.contains("失败") && !diagnostic.stringValue.contains("无法") && !diagnostic.stringValue.contains("请")
-        feedbackUndoButton?.isHidden=Date()>=feedbackExpiresAt || !feedbackAllowsNameUndo || !naming.canUndo
+        feedbackUndoButton?.isHidden=Date()>=feedbackExpiresAt || (feedbackUndo==nil && (!feedbackAllowsNameUndo || !naming.canUndo))
         if [.stopped,.ended].contains(phase.phase),currentCacheID != nil,cachedTranscriptionComplete {heading.stringValue="已保存 · "+phase.time}
         source.toolTip=source.stringValue
         timelineToggle?.state=showsSpeakerRanges ? .on:.off
@@ -331,12 +343,17 @@ extension Delegate {
         agentController?.layout();historyReader?.agentController?.layout()
         window.contentView?.layoutSubtreeIfNeeded();resizeTranscript();historyReader?.resizeTranscript();updateWorkspacePresentation()
     }
-    func showTransientFeedback(_ message:String,nameUndo:Bool=false) {
-        feedbackAllowsNameUndo=nameUndo;diagnostic.stringValue=message;feedbackExpiresAt=Date().addingTimeInterval(7)
+    /// A short note under the transcript. `undo` puts back what was just done, instead of asking before doing it.
+    func showTransientFeedback(_ message:String,nameUndo:Bool=false,undo:(()->Void)?=nil) {
+        feedbackAllowsNameUndo=nameUndo;feedbackUndo=undo;diagnostic.stringValue=message;feedbackExpiresAt=Date().addingTimeInterval(undo==nil ? 7:10)
         let deadline=feedbackExpiresAt;updateWorkspacePresentation()
-        DispatchQueue.main.asyncAfter(deadline:.now()+7) { [weak self] in
-            guard let self,self.feedbackExpiresAt==deadline else{return};self.updateWorkspacePresentation()
+        DispatchQueue.main.asyncAfter(deadline:.now()+(undo==nil ? 7:10)) { [weak self] in
+            guard let self,self.feedbackExpiresAt==deadline else{return};self.feedbackUndo=nil;self.updateWorkspacePresentation()
         }
+    }
+    @objc func undoFeedbackAction() {
+        if let undo=feedbackUndo {feedbackUndo=nil;feedbackExpiresAt=Date.distantPast;updateWorkspacePresentation();undo();return}
+        undoName()
     }
     @objc func showLibrarySearch(){sidebarManualVisible=true;librarySearch.isHidden=false;layoutWorkspace();window.makeFirstResponder(librarySearch)}
     @objc func showDocumentSearch(){let document=displayedDocument;document.cancelTranscriptReadingRestore();document.window.makeFirstResponder(document.output);let command=NSMenuItem();command.tag=Int(NSFindPanelAction.showFindPanel.rawValue);document.output.performFindPanelAction(command)}
@@ -634,5 +651,39 @@ enum MeetingLibraryDate {
         guard seconds.isFinite,seconds>=60 else{return "不到 1 分钟"}
         let minutes=Int((seconds/60).rounded())
         return minutes<60 ? "\(minutes)分钟":"\(minutes/60)小时\(minutes%60)分"
+    }
+}
+
+extension Delegate {
+    /// Everything about this one meeting, in one place beside its title. Archiving appears only where it is configured.
+    @objc func showMeetingMore(_ sender:NSButton) {
+        let document=displayedDocument,menu=NSMenu();menu.autoenablesItems=false
+        func add(_ title:String,_ action:Selector,_ target:AnyObject,enabled:Bool=true)->NSMenuItem {
+            let item=menu.addItem(withTitle:title,action:action,keyEquivalent:"");item.target=target;item.isEnabled=enabled;return item
+        }
+        _=add("搜索原文",#selector(showDocumentSearch),self)
+        add("中文翻译",#selector(toggleTranslationFromMenu),self,enabled:translationSwitch?.isEnabled==true).state=translationService.enabled ? .on:.off
+        _=add("会议详情",#selector(showWorkspaceDetails),self)
+        _=add("重命名…",#selector(beginMeetingRename),self,enabled:meetingTitleField.isEditable)
+        if RuntimeConfiguration.archiveEnabled {_=add("归档到项目…",#selector(openMeetingArchive),document,enabled:document.meetingArchiveEligible)}
+        menu.addItem(.separator())
+        _=add("删除",#selector(deleteDisplayedMeeting),self,enabled:displayedMeetingItem != nil)
+        menu.popUp(positioning:nil,at:NSPoint(x:0,y:sender.bounds.height+4),in:sender)
+    }
+    @objc func toggleTranslationFromMenu() {
+        guard let toggle=translationSwitch else{return}
+        toggle.state=toggle.state == .on ? .off:.on;toggleTranslation()
+    }
+    @objc func beginMeetingRename() {
+        guard meetingTitleField.isEditable,window.makeFirstResponder(meetingTitleField) else{return}
+        meetingTitleField.currentEditor()?.selectAll(nil)
+    }
+    var displayedMeetingItem:CachedMeeting? {
+        let owner=workspaceOwner ?? self,id=displayedDocument.currentCacheID
+        return owner.libraryVisible.first{$0.id==id} ?? owner.selectedLibraryManagementItem.flatMap{$0.id==id ? $0:nil}
+    }
+    @objc func deleteDisplayedMeeting() {
+        guard let item=displayedMeetingItem else{return}
+        (workspaceOwner ?? self).requestDeleteMeeting(item)
     }
 }

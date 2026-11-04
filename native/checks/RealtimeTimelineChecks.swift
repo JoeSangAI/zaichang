@@ -174,7 +174,7 @@ import Foundation
     view.phase.phase = .recording;view.sourceBundle="com.tencent.meeting";view.prepareAutomaticCapture()
     try check(view.sourceBundle=="com.tencent.meeting","active_or_recovered_capture_scope_is_not_mutated")
     view.phase.phase = .idle;view.prepareAutomaticCapture()
-    try check(view.sheet.contentView!.subviews.compactMap{$0 as? NSPopUpButton}.allSatisfy{$0===view.recordingModePicker},"settings_has_no_source_picker")
+    try check(view.sheet.contentView!.subviews.compactMap{$0 as? NSPopUpButton}.isEmpty,"settings_has_no_pickers")
     try check(view.historyButton?.superview != view.output.superview && ["history","search","export"].allSatisfy{identifier in view.window.toolbar!.items.contains{$0.itemIdentifier.rawValue==identifier}},"session_actions_in_window_toolbar")
     // Disk round trip contains revisions, out-of-order delivery and final result protection.
     let cacheRoot=directory.appendingPathComponent("sessions");let cache=cacheRoot.appendingPathComponent(UUID().uuidString)

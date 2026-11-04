@@ -677,6 +677,55 @@ class AssistantRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
 
 
+    async def test_without_codex_questions_are_answered_on_bailian_and_codex_is_not_probed_each_time(self):
+        starts, answers = [], []
+
+        def missing_codex(**options):
+            starts.append(options)
+            raise RuntimeErrorCode("codex_not_installed")
+
+        async def answer(key, messages, timeout):
+            answers.append({"key": key, "messages": messages})
+            return {"text": "何川周五前拉各渠道的转化成本。", "model": "fake"}
+
+        service = AssistantRuntime(self.store, self.root, output_root=self.root / "outputs", runtime_factory=missing_codex,
+                                   overview_call=self.overview_model, overview_key="fake-key", answer_call=answer)
+        try:
+            bound = await service.bind("bailian-workspace", {"session_id": "bailian-session", "title": "渠道预算"})
+            workspace = bound["workspace_id"]
+            self.assertEqual((bound["state"]["engine"], bound["state"]["runtime_status"]), ("bailian", "ready"))
+            await service.cmd_context(workspace, {"segments": [
+                {"id": "s1", "text": "那我周五前把各渠道的转化成本拉一版出来", "speaker": "何川", "final": True}]})
+            await service.cmd_send(workspace, {"text": "何川要交什么？"})
+            await self.wait_until(lambda: any(m["role"] == "assistant" for m in self.store.messages(workspace)))
+            state = await service._snapshot(workspace, announce=False)
+            self.assertEqual([m["text"] for m in state["messages"]], ["何川要交什么？", "何川周五前拉各渠道的转化成本。"])
+            self.assertFalse(state["awaiting_response"])
+            prompt = answers[0]["messages"][1]["content"]
+            self.assertEqual(answers[0]["key"], "fake-key")
+            self.assertIn("何川：那我周五前把各渠道的转化成本拉一版出来", prompt)
+            self.assertTrue(prompt.endswith("用户的问题：何川要交什么？"))
+            await service.cmd_send(workspace, {"text": "还有吗？"})
+            await self.wait_until(lambda: len(answers) == 2)
+            self.assertEqual(len(starts), 1)  # missing Codex is looked for again only after a minute
+            self.assertIn("何川周五前拉各渠道的转化成本。", answers[1]["messages"][1]["content"])
+        finally:
+            await service.shutdown()
+
+    async def test_without_codex_or_key_a_question_is_refused(self):
+        def missing_codex(**options):
+            raise RuntimeErrorCode("codex_not_installed")
+
+        service = AssistantRuntime(self.store, self.root, output_root=self.root / "outputs", runtime_factory=missing_codex,
+                                   overview_call=self.overview_model, overview_key="")
+        try:
+            bound = await service.bind("no-key-workspace", {"session_id": "no-key-session"})
+            self.assertEqual(bound["state"]["engine"], "none")
+            with self.assertRaises(RuntimeErrorCode):
+                await service.cmd_send(bound["workspace_id"], {"text": "在吗"})
+        finally:
+            await service.shutdown()
+
     async def test_offline_bind_does_not_construct_or_launch_codex(self):
         calls = []
 

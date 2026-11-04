@@ -42,7 +42,7 @@ import AppKit
     let missing=owner();var missingRequests:[[String:Any]]=[];missing.startupCredentialFixture={nil};missing.startupWorkerFixture={missingRequests.append($0)}
     missing.action.performClick(nil);try await wait{!missing.credentialReadJob.waiting}
     try check(missing.phase.phase == .failed && missingRequests.isEmpty && missing.action.isEnabled && missing.sheet.sheetParent==nil,"missing_key_shows_retryable_inline_failure_without_capture_or_modal")
-    missing.recordingModePicker!.selectItem(at:1);missing.changeRecordingMode();missing.action.performClick(nil)
+    missing.setRecordingMode(localOnly:true);missing.action.performClick(nil)
     try check(missingRequests.count==1 && missingRequests[0]["local_only"] as? Bool==true && missingRequests[0]["key"] as? String=="" && missingRequests[0]["local_max_seconds"] as? Int==7200,"selected_local_mode_starts_in_one_click_without_cloud_key")
 
     let denied=owner();var deniedRequests=0;denied.startupCredentialFixture={"synthetic-key"};denied.startupWorkerFixture={_ in deniedRequests+=1;denied.receive(["type":"error","code":"microphone_permission_denied"])}

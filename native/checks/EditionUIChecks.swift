@@ -29,7 +29,7 @@ import AppKit
         try check(owner.keyLabel.isHidden==owner.key.isHidden,"settings_key_caption_and_field_share_visibility_"+name)
         let target=owner.sheet.contentView!
         let enteringKey = !owner.key.isHidden
-        try check(target.bounds.height==(enteringKey ? 360:300),"settings_height_tracks_visible_input_"+name)
+        try check(target.bounds.height==(enteringKey ? 236:176),"settings_height_tracks_visible_input_"+name)
         guard let privacy=target.subviews.first(where:{$0.identifier==NSUserInterfaceItemIdentifier("settings-privacy")}) else {throw Failure(code:"settings_privacy_missing")}
         let credential=enteringKey ? owner.key!:owner.savedLabel!
         let gap=credential.frame.minY-privacy.frame.maxY
@@ -47,7 +47,7 @@ import AppKit
                     "frame":[Double(view.frame.minX),Double(view.frame.minY),Double(view.frame.width),Double(view.frame.height)]]
         }
         try JSONSerialization.data(withJSONObject:layout,options:[.prettyPrinted,.sortedKeys]).write(to:directory.appendingPathComponent(name+"-layout.json"))
-        let moreButtons=visible.filter{["settings-people","settings-balance"].contains($0.identifier?.rawValue ?? "")}
+        let moreButtons=visible.filter{["settings-people","settings-balance","settings-codex","settings-update"].contains($0.identifier?.rawValue ?? "")}
         try check(owner.setupMessage.frame.height>=ceil(owner.setupMessage.font!.ascender-owner.setupMessage.font!.descender+owner.setupMessage.font!.leading),"settings_message_has_full_line_height_"+name)
         for button in moreButtons {try check(owner.setupMessage.frame.minY-button.frame.maxY>=2,"settings_message_clear_of_more_settings_"+name+"_"+button.identifier!.rawValue)}
         for (index,view) in visible.enumerated() {
