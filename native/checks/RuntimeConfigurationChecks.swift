@@ -7,6 +7,7 @@ func runtimeConfigurationChecks() throws -> [String] {
         checks.append(name)
     }
     try check(RuntimeConfiguration.dataRoot(info:[:],environment:[:]).lastPathComponent=="ZaichangStandalone","one_data_root")
+    try check(AssistantProfile.myNames(from:"林岚、小林，Lan, lan\n、")==["林岚","小林","Lan"] && AssistantProfile.myNames(from:"").isEmpty,"user_names_split_once_each")
     try check(RuntimeConfiguration.dataRoot(info:["DataRootName":"SyntheticQA"],environment:[:]).lastPathComponent=="SyntheticQA","qa_bundle_names_its_root")
     try check(RuntimeConfiguration.dataRoot(info:[:],environment:["ZAICHANG_DATA_ROOT":"/tmp/zaichang-test-data"]).path=="/tmp/zaichang-test-data","absolute_override")
     try check(RuntimeConfiguration.dataRoot(info:[:],environment:["ZAICHANG_DATA_ROOT":"SyntheticQA"]).lastPathComponent=="SyntheticQA","named_override")

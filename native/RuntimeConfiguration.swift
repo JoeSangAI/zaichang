@@ -76,18 +76,39 @@ enum AssistantProfile {
         guard !value.isEmpty,value.count<=maxNameLength,!value.unicodeScalars.contains(where:{CharacterSet.controlCharacters.contains($0)}) else{return nil}
         return value
     }
-    static func load()->String {
+    /// What the user is called in meetings, so the overview can put their own to-dos first. Empty until they say.
+    private(set) static var myNames:[String]=loadMyNames()
+    static let maxMyNames=6
+    private static func stored()->[String:Any] {
         guard let size=(try? url.resourceValues(forKeys:[.fileSizeKey]))?.fileSize,size<=4096,
               let data=try? Data(contentsOf:url),let value=(try? JSONSerialization.jsonObject(with:data)) as? [String:Any],
-              let schema=value["schema"] as? NSNumber,schema.intValue==1,let stored=value["name"] as? String else{return defaultName}
+              let schema=value["schema"] as? NSNumber,schema.intValue==1 else{return [:]}
+        return value
+    }
+    static func load()->String {
+        guard let stored=stored()["name"] as? String else{return defaultName}
         return validated(stored) ?? defaultName
+    }
+    static func loadMyNames()->[String] {myNames(from:(stored()["me"] as? [String] ?? []).joined(separator:"、"))}
+    /// "林岚、小林，Lan" → each valid name once, in order.
+    static func myNames(from raw:String)->[String] {
+        var seen=Set<String>()
+        return raw.components(separatedBy:CharacterSet(charactersIn:"、，,;；/\n")).compactMap(validated).filter{seen.insert($0.lowercased()).inserted}.prefix(maxMyNames).map{$0}
+    }
+    private static func write(_ fields:[String:Any]) throws {
+        var value=stored();value["schema"]=1;for (key,field) in fields {value[key]=field}
+        try FileManager.default.createDirectory(at:url.deletingLastPathComponent(),withIntermediateDirectories:true)
+        try JSONSerialization.data(withJSONObject:value,options:[.sortedKeys]).write(to:url,options:.atomic)
     }
     /// Saves the name (an invalid or empty one restores the default) and tells open windows.
     static func save(name raw:String) throws {
         let value=validated(raw) ?? defaultName
-        try FileManager.default.createDirectory(at:url.deletingLastPathComponent(),withIntermediateDirectories:true)
-        let data=try JSONSerialization.data(withJSONObject:["schema":1,"name":value],options:[.sortedKeys])
-        try data.write(to:url,options:.atomic)
+        try write(["name":value])
         name=value;NotificationCenter.default.post(name:changed,object:nil)
+    }
+    static func save(myNames raw:String) throws {
+        let values=myNames(from:raw)
+        try write(["me":values])
+        myNames=values;NotificationCenter.default.post(name:changed,object:nil)
     }
 }

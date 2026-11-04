@@ -523,6 +523,20 @@ class AssistantRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(accepted["discussion_points"]), 1)
 
 
+    async def test_overview_owner_is_the_speaker_who_takes_the_task(self):
+        line = "新老客我来拆，下周一给大家。"
+        ctx = {"segments": [{"id": "take", "text": line, "final": True, "speaker": "周宁"},
+                            {"id": "unsure", "text": line, "final": True, "speaker": "林岚", "speaker_uncertain": True}]}
+        def action(owner, sid="take"):
+            return {"current_topic": {"text": "", "evidence": []}, "discussion_points": [], "decisions": [], "open_questions": [],
+                    "actions": [{"text": "拆分订单：按新老客拆开", "owner": owner, "deadline": "下周一",
+                                 "evidence": [{"segment_id": sid, "quote": line}]}]}
+        kept = self.service._validate_overview(json.dumps(action("周宁")), ctx)["actions"][0]
+        self.assertEqual((kept["owner"], kept["deadline"]), ("周宁", "下周一"))
+        # Someone who did not say it, or a voice nobody is sure of, is not taken as the owner.
+        self.assertIsNone(self.service._validate_overview(json.dumps(action("林岚")), ctx)["actions"][0]["owner"])
+        self.assertIsNone(self.service._validate_overview(json.dumps(action("林岚", "unsure")), ctx)["actions"][0]["owner"])
+
     async def test_overview_all_unreliable_input_does_not_start_model(self):
         ctx = {"segments": [{"id": "fragment", "text": "不。", "final": True},
                             {"id": "bad", "text": "仍然保留的原文", "final": True,
