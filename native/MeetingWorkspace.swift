@@ -137,7 +137,7 @@ extension Delegate {
         let header=stack(.horizontal,spacing:16);header.alignment = .centerY;header.distribution = .fill
         let words=stack(.vertical,spacing:7);words.alignment = .leading;words.distribution = .fill;words.setContentHuggingPriority(.defaultLow,for:.horizontal)
         let eyebrow=label("新会议 · 实时转写",size:13);eyebrow.textColor=MeetingVisualStyle.muted;meetingEyebrow=eyebrow;words.addArrangedSubview(eyebrow)
-        meetingTitleField=NSTextField();meetingTitleField.isBordered=false;meetingTitleField.drawsBackground=false;meetingTitleField.focusRingType = .none;meetingTitleField.font = MeetingVisualStyle.titleFont();meetingTitleField.textColor=MeetingVisualStyle.ink;meetingTitleField.stringValue=meetingTitle;meetingTitleField.placeholderString="会议名称";meetingTitleField.delegate=self;meetingTitleField.lineBreakMode = .byTruncatingTail;meetingTitleField.setAccessibilityLabel("会议名称")
+        meetingTitleField=FittingTitleField();meetingTitleField.isBordered=false;meetingTitleField.drawsBackground=false;meetingTitleField.focusRingType = .none;meetingTitleField.font = MeetingVisualStyle.titleFont();meetingTitleField.textColor=MeetingVisualStyle.ink;meetingTitleField.stringValue=meetingTitle;meetingTitleField.placeholderString="会议名称";meetingTitleField.delegate=self;meetingTitleField.lineBreakMode = .byTruncatingTail;meetingTitleField.setAccessibilityLabel("会议名称")
         let more=ImmediateButton(title:"",target:self,action:#selector(showMeetingMore(_:)));more.bezelStyle = .inline;more.isBordered=false
         more.image=NSImage(systemSymbolName:"ellipsis",accessibilityDescription:"这场会议的操作");more.contentTintColor=MeetingVisualStyle.muted;more.setAccessibilityLabel("这场会议的操作")
         more.symbolConfiguration=NSImage.SymbolConfiguration(pointSize:16,weight:.semibold)
@@ -686,4 +686,14 @@ extension Delegate {
         guard let item=displayedMeetingItem else{return}
         (workspaceOwner ?? self).requestDeleteMeeting(item)
     }
+}
+
+/// An editable title that is only as wide as its words, so the "…" after it stays beside it.
+final class FittingTitleField:NSTextField {
+    override var intrinsicContentSize:NSSize {
+        let words=currentEditor()?.string ?? stringValue,shown=words.isEmpty ? (placeholderString ?? ""):words
+        return NSSize(width:ceil(shown.size(withAttributes:[.font:font ?? NSFont.systemFont(ofSize:24)]).width)+8,height:super.intrinsicContentSize.height)
+    }
+    override var stringValue:String {didSet {invalidateIntrinsicContentSize()}}
+    override func textDidChange(_ notification:Notification) {super.textDidChange(notification);invalidateIntrinsicContentSize()}
 }

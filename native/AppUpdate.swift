@@ -88,8 +88,9 @@ final class AppUpdater:NSObject {
         accessory.layoutAttribute = .trailing
         let holder=NSView(frame:NSRect(x:0,y:0,width:170,height:38));holder.addSubview(pill)
         NSLayoutConstraint.activate([pill.trailingAnchor.constraint(equalTo:holder.trailingAnchor,constant:-10),pill.centerYAnchor.constraint(equalTo:holder.centerYAnchor)])
-        accessory.view=holder;accessory.isHidden=true
-        owner.window.addTitlebarAccessoryViewController(accessory)
+        accessory.view=holder
+        // Hidden only once it is in the title bar: hiding it before is lost, and the empty pill shows as a circle.
+        owner.window.addTitlebarAccessoryViewController(accessory);showPill(false)
         NotificationCenter.default.addObserver(forName:NSApplication.willTerminateNotification,object:nil,queue:.main) {[weak self] _ in self?.swapOnExit()}
         refresh()
         DispatchQueue.main.asyncAfter(deadline:.now()+20) {[weak self] in self?.check(quietly:true)}
@@ -281,12 +282,13 @@ final class AppUpdater:NSObject {
         let quiet=owner?.recordingBusy==true
         let pending=latest.flatMap{ready==$0.version ? $0.version:nil}
         if let pending,!quiet {
-            AppUpdater.retitle(pill,"更新到 \(pending)");accessory.isHidden=false
+            AppUpdater.retitle(pill,"更新到 \(pending)");showPill(true)
         } else if let whatsNew,!quiet {
-            AppUpdater.retitle(pill,"\(whatsNew.version) 更新了什么");accessory.isHidden=false
-        } else {accessory.isHidden=true}
+            AppUpdater.retitle(pill,"\(whatsNew.version) 更新了什么");showPill(true)
+        } else {showPill(false)}
         renderCard()
     }
+    private func showPill(_ visible:Bool) {accessory.isHidden = !visible;accessory.view.isHidden = !visible}
     /// The pill draws its title when it is enabled or disabled, so that is what makes a new one show.
     private static func retitle(_ button:SpeakerPillButton,_ text:String) {
         guard button.title != text else{return}
