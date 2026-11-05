@@ -523,6 +523,34 @@ class AssistantRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(accepted["discussion_points"]), 1)
 
 
+    async def test_overview_agenda_reads_in_meeting_order_and_summary_needs_words(self):
+        lines = ["先看两套素材的点击对比。", "再算每单贡献怎么算。", "最后说预算怎么分。"]
+        ctx = {"segments": [{"id": f"s{i}", "text": text, "final": True} for i, text in enumerate(lines)]}
+        def ref(i): return [{"segment_id": f"s{i}", "quote": lines[i]}]
+        data = {"summary": {"text": "先小预算复测，周五再定", "evidence": ref(2)},
+                "agenda": [{"text": "预算：怎么分", "evidence": ref(2)}, {"text": "素材：点击对比", "evidence": ref(0)},
+                           {"text": "贡献：每单怎么算", "evidence": ref(1)}],
+                "current_topic": {"text": "", "evidence": []}, "decisions": [], "actions": [], "open_questions": []}
+        result = self.service._validate_overview(json.dumps(data), ctx)
+        self.assertEqual([item["text"] for item in result["agenda"]], ["素材：点击对比", "贡献：每单怎么算", "预算：怎么分"])
+        self.assertEqual(result["summary"]["text"], "先小预算复测，周五再定")
+        data["summary"]["evidence"] = []
+        self.assertEqual(self.service._validate_overview(json.dumps(data), ctx)["summary"], {"text": "", "evidence": []})
+
+    async def test_overview_saved_before_the_agenda_still_reads(self):
+        line = "先做两个团队的试点。"
+        ctx = {"segments": [{"id": "a", "text": line, "final": True}]}
+        old = {"current_topic": {"text": "试点范围", "evidence": [{"segment_id": "a", "quote": line}]},
+               "discussion_points": [{"text": "试点：两个团队", "evidence": [{"segment_id": "a", "quote": line}]}],
+               "decisions": [], "actions": [], "open_questions": []}
+        result = self.service._validate_overview(json.dumps(old), ctx)
+        self.assertEqual((result["agenda"], result["summary"]["text"]), ([], ""))
+        self.assertEqual(len(result["discussion_points"]), 1)
+        with self.assertRaises(ValueError):
+            self.service._validate_overview(json.dumps({**old, "unexpected": []}), ctx)
+        self.assertIn("一句话总结", self.service._overview_prompt(ctx))
+        self.assertIn('"agenda"', assistant_runtime.OVERVIEW_SYSTEM_PROMPT)
+
     async def test_overview_owner_is_the_speaker_who_takes_the_task(self):
         line = "新老客我来拆，下周一给大家。"
         ctx = {"segments": [{"id": "take", "text": line, "final": True, "speaker": "周宁"},

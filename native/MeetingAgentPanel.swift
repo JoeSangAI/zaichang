@@ -12,14 +12,13 @@ final class MeetingAgentPanel: NSView {
 
     var onCommand: CommandHandler?
     var onResize: ((CGFloat, Bool) -> Void)?
-    /// Export lives under the overview, where the minutes are read.
-    var onExport: ((NSButton) -> Void)?
-    let overviewExport = NSButton(title: "导出…", target: nil, action: nil)
+    /// 导出纪要／原文／录音 for the meeting on screen, built by the workspace that owns those files.
+    var exportItems: (() -> [NSMenuItem])?
     private var listCloseToStatus: NSLayoutConstraint!
     private var listBelowPresence: NSLayoutConstraint!
     var referenceBaseURL = URL(fileURLWithPath: NSHomeDirectory())
     private(set) var selectedTab: String = "概览"
-    private var state: [String: Any] = [:]
+    private(set) var state: [String: Any] = [:]
     private var suppressSwitchAction = false
     private var statusHeight: NSLayoutConstraint!
     private let moreButton = NSButton(title: "", target: nil, action: nil)
@@ -35,6 +34,8 @@ final class MeetingAgentPanel: NSView {
     private var draftAliases: [String: String] = [:]
 
     private let tabs = MeetingAgentTabs()
+    /// 概览 · 助理 · 笔记 and 「···」, shown in the title bar row above the panel.
+    let headerBar = NSView()
     private let content = NSView()
     private let assistantPage = NSView()
     private let overviewPage = NSView()
@@ -145,14 +146,16 @@ final class MeetingAgentPanel: NSView {
         tabs.controlSize = .large
         tabs.font = .systemFont(ofSize: 14, weight: .medium)
         tabs.setAccessibilityLabel("助理工作区")
-        addSubview(tabs)
+        headerBar.addSubview(tabs)
         moreButton.translatesAutoresizingMaskIntoConstraints = false
         moreButton.isBordered = false
-        moreButton.image = NSImage(systemSymbolName: "ellipsis", accessibilityDescription: "更多助理操作")
+        moreButton.image = NSImage(systemSymbolName: "ellipsis", accessibilityDescription: "导出和助理")
         moreButton.contentTintColor = MeetingVisualStyle.muted
         moreButton.target = self; moreButton.action = #selector(showMore)
-        moreButton.setAccessibilityLabel("更多助理操作")
-        addSubview(moreButton)
+        moreButton.setAccessibilityLabel("导出和助理")
+        headerBar.addSubview(moreButton)
+        // The tabs and 「···」 sit in the window's title bar row, over this panel; the workspace hosts `headerBar` there.
+        headerBar.translatesAutoresizingMaskIntoConstraints = false
 
         resizeHandle.translatesAutoresizingMaskIntoConstraints = false
         resizeHandle.onResize = { [weak self] width, persist in self?.onResize?(width, persist) }
@@ -167,12 +170,13 @@ final class MeetingAgentPanel: NSView {
         NSLayoutConstraint.activate([
             rule.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
             rule.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
-            rule.topAnchor.constraint(equalTo: tabs.bottomAnchor, constant: 8),
-            tabs.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
-            tabs.trailingAnchor.constraint(equalTo: moreButton.leadingAnchor, constant: -10),
-            tabs.topAnchor.constraint(equalTo: topAnchor, constant: 16),
-            tabs.heightAnchor.constraint(equalToConstant: 34),
-            moreButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
+            rule.topAnchor.constraint(equalTo: topAnchor, constant: MeetingVisualStyle.chromeHeight - 1),
+            headerBar.heightAnchor.constraint(equalToConstant: MeetingVisualStyle.chromeHeight - 8),
+            tabs.leadingAnchor.constraint(equalTo: headerBar.leadingAnchor, constant: 14),
+            tabs.trailingAnchor.constraint(lessThanOrEqualTo: moreButton.leadingAnchor, constant: -10),
+            tabs.centerYAnchor.constraint(equalTo: headerBar.centerYAnchor),
+            tabs.heightAnchor.constraint(equalToConstant: MeetingVisualStyle.chromeHeight - 8),
+            moreButton.trailingAnchor.constraint(equalTo: headerBar.trailingAnchor, constant: -2),
             moreButton.centerYAnchor.constraint(equalTo: tabs.centerYAnchor),
             moreButton.widthAnchor.constraint(equalToConstant: 24),
             moreButton.heightAnchor.constraint(equalToConstant: 28),
@@ -182,7 +186,7 @@ final class MeetingAgentPanel: NSView {
             resizeHandle.widthAnchor.constraint(equalToConstant: 8),
             content.leadingAnchor.constraint(equalTo: leadingAnchor),
             content.trailingAnchor.constraint(equalTo: trailingAnchor),
-            content.topAnchor.constraint(equalTo: tabs.bottomAnchor, constant: 10),
+            content.topAnchor.constraint(equalTo: topAnchor, constant: MeetingVisualStyle.chromeHeight + 2),
             content.bottomAnchor.constraint(equalTo: bottomAnchor)
         ])
         [assistantPage, overviewPage, notesPage].forEach {
@@ -344,19 +348,21 @@ final class MeetingAgentPanel: NSView {
     }
 
     @objc private func showMore() {
-        let menu = NSMenu()
+        let menu = NSMenu(); menu.autoenablesItems = false
         func item(_ title: String, _ action: Selector) -> NSMenuItem {
             let item = NSMenuItem(title: title, action: action, keyEquivalent: ""); item.target = self; menu.addItem(item); return item
         }
-        let stop = item("停止回答", #selector(cancelCurrentTask)); stop.isEnabled = state["conversation_status"] as? String == "running"
-        _ = item("助理名字…", #selector(renameAssistant))
+        // Exports first; stopping an answer is the 「停止」 beside the answer itself.
+        for entry in exportItems?() ?? [] { menu.addItem(entry) }
+        if !menu.items.isEmpty { menu.addItem(.separator()) }
         let recent = NSMenu(); for workspace in state["workspaces"] as? [[String:Any]] ?? [] {
             guard let id = workspace["id"] as? String else { continue }
             let item = NSMenuItem(title: workspace["title"] as? String ?? "会前对话", action: #selector(openRecentMenu(_:)), keyEquivalent: "")
             item.target = self; item.representedObject = id; recent.addItem(item)
         }
         if !recent.items.isEmpty { let history = NSMenuItem(title: "最近对话", action: nil, keyEquivalent: ""); history.submenu = recent; menu.addItem(history) }
-        menu.addItem(.separator()); let status = NSMenuItem(title: statusLabel.stringValue, action: nil, keyEquivalent: ""); menu.addItem(status)
+        _ = item("助理名字…", #selector(renameAssistant))
+        menu.addItem(.separator()); let status = NSMenuItem(title: statusLabel.stringValue, action: nil, keyEquivalent: ""); status.isEnabled = false; menu.addItem(status)
         menu.popUp(positioning: nil, at: NSPoint(x: 0, y: moreButton.bounds.minY), in: moreButton)
     }
     @objc private func renameAssistant() {
@@ -379,9 +385,25 @@ final class MeetingAgentPanel: NSView {
     }
     /// Who said a transcript line, by the overview's segment ID; set by the bridge.
     var speakerOfSegment: ((String) -> String?)?
+    /// The time shown beside an agenda entry, as the transcript shows it.
+    var timeOfSegment: ((String) -> String?)?
+    /// Scrolls the transcript to where a segment is.
+    var revealSegment: ((String) -> Void)?
+    /// Whether this meeting is being recorded now: the last agenda entry is then the one under way.
+    var isLive: (() -> Bool)?
+    /// Each speaker's share of the talking, largest first; anyone not yet named is `unknownSpeaker`.
+    var speakingShare: (() -> [(String, Double)])?
+    static let unknownSpeaker = "未确认"
+    var overviewTextForChecks: String { overviewTextView.string }
     @objc private func openRecentMenu(_ sender: NSMenuItem) { if let id = sender.representedObject as? String { onCommand?("open_workspace", ["workspace_id": id]) } }
 
     private func buildOverviewPage() {
+        // Cards are text blocks, which only TextKit 1 draws; switch while the view is empty.
+        _ = overviewTextView.layoutManager
+        overviewTextView.postsFrameChangedNotifications = true
+        NotificationCenter.default.addObserver(forName: NSView.frameDidChangeNotification, object: overviewTextView, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { guard let self else { return }; self.renderOverview(self.state["meeting_overview"] as? [String: Any] ?? [:]) }
+        }
         overviewTextView.isEditable = false
         overviewTextView.isSelectable = true
         overviewTextView.drawsBackground = false
@@ -396,17 +418,17 @@ final class MeetingAgentPanel: NSView {
         overviewTextView.textContainer?.widthTracksTextView = true
         overviewTextView.textContainer?.containerSize = NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude)
         overviewTextView.delegate = self
-        overviewTextView.linkTextAttributes = [.foregroundColor: MeetingVisualStyle.faint]
+        // Each item is its own link to the words behind it: same colour as the text, a hand under the pointer.
+        overviewTextView.linkTextAttributes = [.underlineStyle: 0, .cursor: NSCursor.pointingHand]
         overviewStatus.font = .systemFont(ofSize: 11); overviewStatus.textColor = MeetingVisualStyle.muted
         overviewStatus.lineBreakMode = .byTruncatingTail; overviewStatus.translatesAutoresizingMaskIntoConstraints = false
         overviewPage.addSubview(overviewStatus)
-        overviewRefresh.isBordered = false; overviewRefresh.image = NSImage(systemSymbolName: "arrow.clockwise", accessibilityDescription: "更新概览")
-        overviewRefresh.contentTintColor = MeetingVisualStyle.muted; overviewRefresh.target = self; overviewRefresh.action = #selector(refreshOverview)
-        overviewRefresh.toolTip = "更新概览"; overviewRefresh.translatesAutoresizingMaskIntoConstraints = false
+        overviewRefresh.isBordered = false; overviewRefresh.bezelStyle = .inline
+        overviewRefresh.attributedTitle = NSAttributedString(string: "重新整理", attributes: [.font: NSFont.systemFont(ofSize: 12), .foregroundColor: NSColor.linkColor])
+        overviewRefresh.target = self; overviewRefresh.action = #selector(refreshOverview); overviewRefresh.setAccessibilityLabel("重新整理概览")
+        overviewRefresh.toolTip = "按目前的原文重新整理概览"; overviewRefresh.translatesAutoresizingMaskIntoConstraints = false
+        overviewRefresh.setContentHuggingPriority(.required, for: .horizontal); overviewRefresh.setContentCompressionResistancePriority(.required, for: .horizontal)
         overviewPage.addSubview(overviewRefresh)
-        overviewExport.bezelStyle = .rounded; overviewExport.controlSize = .small; overviewExport.target = self; overviewExport.action = #selector(exportMeeting)
-        overviewExport.translatesAutoresizingMaskIntoConstraints = false
-        overviewPage.addSubview(overviewExport)
         let scroll = NSScrollView()
         scroll.documentView = overviewTextView
         scroll.hasVerticalScroller = true
@@ -422,11 +444,9 @@ final class MeetingAgentPanel: NSView {
             overviewStatus.topAnchor.constraint(equalTo: overviewPage.topAnchor, constant: 12),
             overviewRefresh.trailingAnchor.constraint(equalTo: overviewPage.trailingAnchor, constant: -18),
             overviewRefresh.centerYAnchor.constraint(equalTo: overviewStatus.centerYAnchor),
-            overviewRefresh.widthAnchor.constraint(equalToConstant: 24), overviewRefresh.heightAnchor.constraint(equalToConstant: 24),
+            overviewRefresh.heightAnchor.constraint(equalToConstant: 24),
             scroll.topAnchor.constraint(equalTo: overviewStatus.bottomAnchor, constant: 2),
-            scroll.bottomAnchor.constraint(equalTo: overviewExport.topAnchor, constant: -8),
-            overviewExport.trailingAnchor.constraint(equalTo: overviewPage.trailingAnchor, constant: -18),
-            overviewExport.bottomAnchor.constraint(equalTo: overviewPage.bottomAnchor, constant: -14),
+            scroll.bottomAnchor.constraint(equalTo: overviewPage.bottomAnchor),
             overviewTextView.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor)
         ])
     }
@@ -444,8 +464,11 @@ final class MeetingAgentPanel: NSView {
 
     @objc private func refreshOverview() { onCommand?("overview", ["active": true, "refresh": true]) }
 
+    static let readyHint = "点任意一条可看原话"
     private func renderOverview(_ overview: [String: Any]) {
-        let key = try? JSONSerialization.data(withJSONObject: overview, options: [.sortedKeys])
+        // Cards and the share bar are laid out for the panel's width, so a new width redraws them.
+        let lineWidth = floor((overviewTextView.textContainer?.size.width ?? 300) - 2 * (overviewTextView.textContainer?.lineFragmentPadding ?? 5))
+        let key = try? JSONSerialization.data(withJSONObject: ["overview": overview, "live": isLive?() ?? false, "width": lineWidth], options: [.sortedKeys])
         guard key != overviewRenderKey else { return }; overviewRenderKey = key
         let status = overview["status"] as? String ?? "inactive"
         let busy = ["queued", "running"].contains(status)
@@ -457,11 +480,11 @@ final class MeetingAgentPanel: NSView {
              error == "overview_content_rejected" ? "百炼拒绝处理这段内容，概览未更新" : "暂时无法更新 · 可点击重试") :
             error == "overview_evidence_filtered" ? "缺少依据的判断已排除 · 请核对原文" :
             error == "overview_source_needs_review" ? "仅依据可用原文整理 · 部分片段待核实" :
-            overview["stale"] as? Bool == true ? "会议有新内容 · 等待更新" : status == "ready" ? "根据本场会议整理" : "会议概览"
+            overview["stale"] as? Bool == true ? "会议有新内容 · 等待更新" : status == "ready" ? Self.readyHint : "会议概览"
         if overview["stale"] as? Bool == true && !busy {
             let previous = overviewStatus.stringValue
             let freshness = "会议有新内容 · 等待更新"
-            overviewStatus.stringValue = (previous == freshness || previous == "根据本场会议整理")
+            overviewStatus.stringValue = (previous == freshness || previous == Self.readyHint)
                 ? freshness : "会议有新内容 · " + previous
         }
         overviewStatus.toolTip = error.isEmpty ? overviewStatus.stringValue : overviewStatus.stringValue + "\n" + error
@@ -473,53 +496,170 @@ final class MeetingAgentPanel: NSView {
             let style = NSMutableParagraphStyle(); style.lineSpacing = 4; style.paragraphSpacingBefore = before; style.paragraphSpacing = after
             rich.append(NSAttributedString(string: text + "\n", attributes: [.font: MeetingVisualStyle.textFont(size, weight: weight), .foregroundColor: color, .paragraphStyle: style]))
         }
-        // The source quote is a trailing glyph on the same line, not a line of its own.
-        func evidenceLink(_ item: [String: Any]) -> NSAttributedString? {
+        // Clicking anywhere on an item shows the words it came from; no extra glyph to decode.
+        func linkEvidence(_ item: [String: Any], from start: Int) {
             let refs = item["evidence"] as? [[String: Any]] ?? []
             let quotes = refs.compactMap { $0["quote"] as? String }.filter { !$0.isEmpty }
-            guard !quotes.isEmpty else { return nil }
+            guard !quotes.isEmpty, rich.length > start else { return }
             let id = String(overviewEvidence.count); overviewEvidence[id] = quotes.map { "“\($0)”" }.joined(separator: "\n\n")
-            return NSAttributedString(string: "\u{00A0}↗", attributes: [.font: MeetingVisualStyle.textFont(12), .foregroundColor: MeetingVisualStyle.faint,
-                                                                 .link: URL(string: "zaichang-evidence://quote/\(id)")!, .toolTip: "查看原话"])
+            rich.addAttributes([.link: URL(string: "zaichang-evidence://quote/\(id)")!, .toolTip: "查看原话"], range: NSRange(location: start, length: rich.length - start))
         }
-        if let topic = data["current_topic"] as? [String: Any], let text = topic["text"] as? String, !text.isEmpty {
-            paragraph("当前议题", size: 11, color: MeetingVisualStyle.muted, after: 4)
-            let style = NSMutableParagraphStyle(); style.lineSpacing = 3; style.paragraphSpacing = 6
-            rich.append(NSAttributedString(string: text, attributes: [.font: MeetingVisualStyle.textFont(19, weight: .semibold), .foregroundColor: MeetingVisualStyle.ink, .paragraphStyle: style]))
-            if let link = evidenceLink(topic) { rich.append(link) }
+        // Read top to bottom like the mainstream meeting tools: the gist, the agenda in time order,
+        // then what was decided, who does what, what is still open, and (after the meeting) who spoke.
+        func keyword(_ raw: String) -> (String, String) {
+            let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let colon = text.firstIndex(where: { $0 == "：" || $0 == ":" }),
+                  (2...12).contains(text.distance(from: text.startIndex, to: colon)) else { return ("", text) }
+            return (String(text[..<colon]), String(text[text.index(after: colon)...]).trimmingCharacters(in: .whitespaces))
+        }
+        func header(_ title: String, _ count: Int?) {
+            paragraph(count.map { "\(title)  \($0)" } ?? title, size: 12, weight: .semibold, color: MeetingVisualStyle.quietAccent, before: rich.length == 0 ? 0 : 16, after: 6)
+        }
+        func items(_ key: String) -> [[String: Any]] { (data[key] as? [[String: Any]] ?? []).filter { !(($0["text"] as? String) ?? "").isEmpty } }
+        let ink = MeetingVisualStyle.ink, muted = MeetingVisualStyle.muted
+        if let summary = data["summary"] as? [String: Any], let text = summary["text"] as? String, !text.isEmpty {
+            let style = NSMutableParagraphStyle(); style.lineSpacing = 4; style.paragraphSpacing = 4
+            let start = rich.length
+            rich.append(NSAttributedString(string: text, attributes: [.font: MeetingVisualStyle.textFont(16, weight: .semibold), .foregroundColor: ink, .paragraphStyle: style]))
+            linkEvidence(summary, from: start)
             rich.append(NSAttributedString(string: "\n", attributes: [.paragraphStyle: style]))
         }
-        // Conclusions first; background last. Each item is one bulleted line led by a bold keyword or owner.
-        for (key, title, bullet) in [("decisions", "已定事项", "✓"), ("actions", "接下来", "→"), ("open_questions", "待讨论", "?"), ("discussion_points", "讨论要点", "•")] {
-            let items = (data[key] as? [[String: Any]] ?? []).filter { !(($0["text"] as? String) ?? "").isEmpty }
-            guard !items.isEmpty else { continue }
-            paragraph("\(title)  \(items.count)", size: 12, weight: .semibold, color: MeetingVisualStyle.quietAccent, before: rich.length == 0 ? 0 : 14, after: 6)
-            let style = NSMutableParagraphStyle(); style.lineSpacing = 4; style.paragraphSpacing = 8
-            style.firstLineHeadIndent = 0; style.headIndent = 18
-            style.tabStops = [NSTextTab(textAlignment: .left, location: 18)]; style.defaultTabInterval = 18
-            let body: [NSAttributedString.Key: Any] = [.font: MeetingVisualStyle.textFont(14), .foregroundColor: MeetingVisualStyle.ink, .paragraphStyle: style]
-            var strong = body; strong[.font] = MeetingVisualStyle.textFont(14, weight: .semibold)
-            var quiet = body; quiet[.font] = MeetingVisualStyle.textFont(12); quiet[.foregroundColor] = MeetingVisualStyle.muted
-            for item in items {
-                var text = (item["text"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-                var lead = ""
-                if var owner = item["owner"] as? String, !owner.isEmpty {
-                    // "我" is whoever said it; show that person's name.
-                    if owner == "我", let said = (item["evidence"] as? [[String: Any]])?.first?["segment_id"] as? String,
-                       let speaker = speakerOfSegment?(said) { owner = speaker }
-                    lead = owner
-                    if text.hasPrefix(owner) { text = String(text.dropFirst(owner.count)).trimmingCharacters(in: CharacterSet(charactersIn: " ：:，,")) }
-                } else if let colon = text.firstIndex(where: { $0 == "：" || $0 == ":" }), (2...12).contains(text.distance(from: text.startIndex, to: colon)) {
-                    lead = String(text[..<colon]); text = String(text[text.index(after: colon)...]).trimmingCharacters(in: .whitespaces)
+        let agenda = items("agenda"), live = isLive?() ?? false
+        if !agenda.isEmpty {
+            header("议程", agenda.count)
+            for (index, item) in agenda.enumerated() {
+                let (title, gist) = keyword(item["text"] as? String ?? "")
+                let current = live && index == agenda.count - 1
+                let first = (item["evidence"] as? [[String: Any]])?.first?["segment_id"] as? String
+                let style = NSMutableParagraphStyle(); style.lineSpacing = 2; style.paragraphSpacing = 1
+                style.headIndent = 18; style.tabStops = [NSTextTab(textAlignment: .left, location: 18)]
+                rich.append(NSAttributedString(string: (current ? "●" : "○") + "\t", attributes: [.font: MeetingVisualStyle.textFont(11), .foregroundColor: current ? MeetingVisualStyle.accent : MeetingVisualStyle.faint, .paragraphStyle: style]))
+                let start = rich.length
+                if let first, let time = timeOfSegment?(first) {
+                    rich.append(NSAttributedString(string: time + "  ", attributes: [.font: NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .regular), .foregroundColor: muted, .paragraphStyle: style]))
                 }
-                var bulletAttributes = quiet; bulletAttributes[.font] = MeetingVisualStyle.textFont(13)
-                rich.append(NSAttributedString(string: bullet + "\t", attributes: bulletAttributes))
-                if !lead.isEmpty { rich.append(NSAttributedString(string: lead + "：", attributes: strong)) }
-                rich.append(NSAttributedString(string: text, attributes: body))
-                if let deadline = item["deadline"] as? String, !deadline.isEmpty { rich.append(NSAttributedString(string: " · " + deadline, attributes: quiet)) }
-                if let link = evidenceLink(item) { rich.append(link) }
-                rich.append(NSAttributedString(string: "\n", attributes: body))
+                rich.append(NSAttributedString(string: title.isEmpty ? gist : title, attributes: [.font: MeetingVisualStyle.textFont(14, weight: .semibold), .foregroundColor: ink, .paragraphStyle: style]))
+                if current { rich.append(NSAttributedString(string: "  进行中", attributes: [.font: NSFont.systemFont(ofSize: 11, weight: .medium), .foregroundColor: MeetingVisualStyle.accent, .paragraphStyle: style])) }
+                let detail = NSMutableParagraphStyle(); detail.lineSpacing = 2; detail.paragraphSpacing = 10; detail.firstLineHeadIndent = 18; detail.headIndent = 18
+                if !title.isEmpty && !gist.isEmpty {
+                    rich.append(NSAttributedString(string: "\n", attributes: [.paragraphStyle: style]))
+                    rich.append(NSAttributedString(string: gist, attributes: [.font: MeetingVisualStyle.textFont(13), .foregroundColor: muted, .paragraphStyle: detail]))
+                }
+                // An agenda entry takes you to where that part of the meeting starts.
+                if let first { rich.addAttributes([.link: URL(string: "zaichang-agenda://segment/" + (first.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? first))!, .toolTip: "跳到原文这里"], range: NSRange(location: start, length: rich.length - start)) }
+                rich.append(NSAttributedString(string: "\n", attributes: [.paragraphStyle: detail]))
             }
+        } else if let topic = data["current_topic"] as? [String: Any], let text = topic["text"] as? String, !text.isEmpty {
+            // Overviews made before the agenda: the topic line, as before.
+            paragraph("当前议题", size: 11, color: muted, after: 4)
+            let style = NSMutableParagraphStyle(); style.lineSpacing = 3; style.paragraphSpacing = 6
+            let start = rich.length
+            rich.append(NSAttributedString(string: text, attributes: [.font: MeetingVisualStyle.textFont(19, weight: .semibold), .foregroundColor: ink, .paragraphStyle: style]))
+            linkEvidence(topic, from: start)
+            rich.append(NSAttributedString(string: "\n", attributes: [.paragraphStyle: style]))
+        }
+        // Decisions and to-dos are cards: one box per item, a coloured edge for decisions, the owner's face for to-dos.
+        func card(edge: NSColor?) -> NSTextBlock {
+            let block = NSTextBlock(); block.backgroundColor = MeetingVisualStyle.cardFill
+            // A text block is only as wide as its words unless told; fill the line, less padding and edges.
+            block.setValue(max(80, lineWidth - 12 - 9 - (edge == nil ? 1 : 3.5) - 2), type: .absoluteValueType, for: .width)
+            block.setWidth(9, type: .absoluteValueType, for: .padding); block.setWidth(12, type: .absoluteValueType, for: .padding, edge: .minX)
+            block.setWidth(0.5, type: .absoluteValueType, for: .border); block.setBorderColor(MeetingVisualStyle.border)
+            if let edge { block.setWidth(3, type: .absoluteValueType, for: .border, edge: .minX); block.setBorderColor(edge, for: .minX) }
+            return block
+        }
+        // The gap between cards is a thin line of its own: a block's margin is painted with its background.
+        func cardGap() {
+            let gap = NSMutableParagraphStyle(); gap.minimumLineHeight = 6; gap.maximumLineHeight = 6
+            rich.append(NSAttributedString(string: "\n", attributes: [.font: NSFont.systemFont(ofSize: 2), .paragraphStyle: gap]))
+        }
+        func cardStyle(_ block: NSTextBlock, after: CGFloat = 0) -> NSParagraphStyle {
+            let style = NSMutableParagraphStyle(); style.textBlocks = [block]; style.lineSpacing = 3; style.paragraphSpacing = after; return style
+        }
+        let decisions = items("decisions")
+        if !decisions.isEmpty {
+            header("已定", decisions.count)
+            for item in decisions {
+                let style = cardStyle(card(edge: MeetingVisualStyle.decidedEdge)), (lead, text) = keyword(item["text"] as? String ?? "")
+                let start = rich.length
+                if !lead.isEmpty { rich.append(NSAttributedString(string: lead + "：", attributes: [.font: MeetingVisualStyle.textFont(14, weight: .semibold), .foregroundColor: ink, .paragraphStyle: style])) }
+                rich.append(NSAttributedString(string: text, attributes: [.font: MeetingVisualStyle.textFont(14), .foregroundColor: ink, .paragraphStyle: style]))
+                linkEvidence(item, from: start)
+                rich.append(NSAttributedString(string: "\n", attributes: [.paragraphStyle: style])); cardGap()
+            }
+        }
+        let actions = items("actions")
+        if !actions.isEmpty {
+            header("待办", actions.count)
+            for item in actions {
+                let block = card(edge: nil), style = cardStyle(block)
+                var owner = (item["owner"] as? String ?? "").trimmingCharacters(in: .whitespaces)
+                // "我" is whoever said it; show that person's name.
+                if owner == "我", let said = (item["evidence"] as? [[String: Any]])?.first?["segment_id"] as? String, let speaker = speakerOfSegment?(said) { owner = speaker }
+                var (lead, text) = keyword(item["text"] as? String ?? "")
+                if !owner.isEmpty && lead == owner { lead = "" }
+                if !owner.isEmpty && text.hasPrefix(owner) { text = String(text.dropFirst(owner.count)).trimmingCharacters(in: CharacterSet(charactersIn: " ：:，,")) }
+                let start = rich.length
+                if !owner.isEmpty {
+                    let face = NSTextAttachment(); face.image = MeetingVisualStyle.speakerAvatar(MeetingVisualStyle.speakerInitial(owner), color: MeetingVisualStyle.speakerColor(owner), diameter: 20)
+                    face.bounds = NSRect(x: 0, y: -5, width: 20, height: 20)
+                    let avatar = NSMutableAttributedString(attachment: face); avatar.addAttribute(.paragraphStyle, value: style, range: NSRange(location: 0, length: avatar.length))
+                    rich.append(avatar); rich.append(NSAttributedString(string: "  ", attributes: [.paragraphStyle: style]))
+                }
+                if !lead.isEmpty { rich.append(NSAttributedString(string: lead + "：", attributes: [.font: MeetingVisualStyle.textFont(14, weight: .semibold), .foregroundColor: ink, .paragraphStyle: style])) }
+                rich.append(NSAttributedString(string: text, attributes: [.font: MeetingVisualStyle.textFont(14), .foregroundColor: ink, .paragraphStyle: style]))
+                let deadline = (item["deadline"] as? String ?? "").trimmingCharacters(in: .whitespaces)
+                let who = [owner.isEmpty ? "未定负责人" : owner, deadline].filter { !$0.isEmpty }.joined(separator: " · ")
+                rich.append(NSAttributedString(string: "\n", attributes: [.paragraphStyle: style]))
+                let meta = NSMutableParagraphStyle(); meta.setParagraphStyle(style); meta.firstLineHeadIndent = owner.isEmpty ? 0 : 26; meta.headIndent = meta.firstLineHeadIndent
+                rich.append(NSAttributedString(string: who, attributes: [.font: MeetingVisualStyle.textFont(12), .foregroundColor: muted, .paragraphStyle: meta]))
+                linkEvidence(item, from: start)
+                rich.append(NSAttributedString(string: "\n", attributes: [.paragraphStyle: meta])); cardGap()
+            }
+        }
+        // Open questions, and the discussion points of overviews made before the agenda, stay plain lines.
+        for (key, title, bullet) in [("open_questions", "待讨论", "?"), ("discussion_points", "讨论要点", "•")] where key != "discussion_points" || agenda.isEmpty {
+            let list = items(key)
+            guard !list.isEmpty else { continue }
+            header(title, list.count)
+            let style = NSMutableParagraphStyle(); style.lineSpacing = 4; style.paragraphSpacing = 8
+            style.headIndent = 18; style.tabStops = [NSTextTab(textAlignment: .left, location: 18)]
+            for item in list {
+                let (lead, text) = keyword(item["text"] as? String ?? "")
+                rich.append(NSAttributedString(string: bullet + "\t", attributes: [.font: MeetingVisualStyle.textFont(13), .foregroundColor: muted, .paragraphStyle: style]))
+                let start = rich.length
+                if !lead.isEmpty { rich.append(NSAttributedString(string: lead + "：", attributes: [.font: MeetingVisualStyle.textFont(14, weight: .semibold), .foregroundColor: ink, .paragraphStyle: style])) }
+                rich.append(NSAttributedString(string: text, attributes: [.font: MeetingVisualStyle.textFont(14), .foregroundColor: ink, .paragraphStyle: style]))
+                linkEvidence(item, from: start)
+                rich.append(NSAttributedString(string: "\n", attributes: [.paragraphStyle: style]))
+            }
+        }
+        // Who spoke how much: only once the meeting is over, where it helps and embarrasses nobody.
+        let shares = rich.length > 0 && !live ? (speakingShare?() ?? []) : []
+        if shares.count > 1 {
+            header("谁说得多", nil)
+            let width = max(120, lineWidth - 4)
+            let bar = NSImage(size: NSSize(width: width, height: 8), flipped: false) { rect in
+                var x: CGFloat = 0
+                for (index, share) in shares.enumerated() {
+                    let w = index == shares.count - 1 ? rect.width - x : (rect.width * share.1).rounded()
+                    MeetingVisualStyle.speakerColor(share.0 == Self.unknownSpeaker ? nil : share.0).setFill()
+                    NSBezierPath(rect: NSRect(x: x, y: 0, width: max(0, w - 2), height: rect.height)).fill(); x += w
+                }
+                return true
+            }
+            let attachment = NSTextAttachment(); attachment.image = bar; attachment.bounds = NSRect(x: 0, y: 0, width: width, height: 8)
+            let style = NSMutableParagraphStyle(); style.paragraphSpacing = 6
+            let line = NSMutableAttributedString(attachment: attachment); line.addAttribute(.paragraphStyle, value: style, range: NSRange(location: 0, length: line.length))
+            rich.append(line); rich.append(NSAttributedString(string: "\n", attributes: [.paragraphStyle: style]))
+            let legend = NSMutableAttributedString()
+            for share in shares {
+                legend.append(NSAttributedString(string: "● ", attributes: [.font: MeetingVisualStyle.textFont(10), .foregroundColor: MeetingVisualStyle.speakerColor(share.0 == Self.unknownSpeaker ? nil : share.0)]))
+                legend.append(NSAttributedString(string: "\(share.0) \(Int((share.1 * 100).rounded()))%    ", attributes: [.font: MeetingVisualStyle.textFont(12), .foregroundColor: muted]))
+            }
+            let legendStyle = NSMutableParagraphStyle(); legendStyle.lineSpacing = 4
+            legend.addAttribute(.paragraphStyle, value: legendStyle, range: NSRange(location: 0, length: legend.length))
+            rich.append(legend); rich.append(NSAttributedString(string: "\n"))
         }
 
         if rich.length == 0 {
@@ -530,7 +670,6 @@ final class MeetingAgentPanel: NSView {
         overviewTextView.enclosingScrollView?.contentView.scroll(to: scroll)
     }
 
-    @objc private func exportMeeting() { onExport?(overviewExport) }
 
     @objc private func changeTab(_ sender: MeetingAgentTabs) {
         guard let tab = Tab(rawValue: sender.selectedSegment) else { return }
@@ -590,7 +729,7 @@ final class MeetingAgentPanel: NSView {
         // Listening shows in the presence card; this line is only for problems.
         let needsAttention = ["unavailable", "auth_required"].contains(status) || interrupted
         statusLabel.isHidden = !needsAttention; statusHeight.constant = needsAttention ? 24 : 0
-        moreButton.toolTip = statusLabel.stringValue
+        moreButton.toolTip = "导出、最近对话、助理名字"
     }
 
     func activateWorkspace(_ id: String) {
@@ -1053,6 +1192,9 @@ extension MeetingAgentPanel: NSTextViewDelegate {
                 if let error { self?.overviewStatus.stringValue = error }
             }
             return true
+        }
+        if textView === overviewTextView, let url = link as? URL, url.scheme == "zaichang-agenda" {
+            revealSegment?(url.lastPathComponent.removingPercentEncoding ?? url.lastPathComponent); return true
         }
         guard textView === overviewTextView, let url = link as? URL, url.scheme == "zaichang-evidence",
               let quote = overviewEvidence[url.lastPathComponent] else { return false }

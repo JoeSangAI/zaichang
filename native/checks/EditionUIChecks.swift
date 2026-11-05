@@ -10,9 +10,9 @@ import AppKit
     defer {owner.cancelMeetingMinutes();owner.window.orderOut(nil)}
     try check(owner.archiveButton?.isHidden == !RuntimeConfiguration.archiveEnabled,"archive_visibility_matches_configuration")
     let menu=owner.makeMeetingExportMenu()
-    try check(menu.items.map(\.title).contains("导出原文…") && menu.items.map(\.title).contains("导出纪要…"),"both_export_entries_visible")
-    try check(menu.items.first?.action == #selector(Delegate.exportVisibleDocument),"transcript_uses_existing_export")
-    try check(menu.items.last?.action == #selector(Delegate.beginMeetingMinutes),"minutes_uses_shared_generator")
+    try check(Array(menu.items.map(\.title).prefix(3))==["导出纪要…","导出原文…","导出录音…"],"three_exports_in_one_place")
+    try check(menu.items.first{$0.title=="导出原文…"}?.action == #selector(Delegate.exportVisibleDocument),"transcript_uses_existing_export")
+    try check(menu.items.first?.action == #selector(Delegate.beginMeetingMinutes),"minutes_uses_shared_generator")
     try check(menu.items.last?.isEnabled==false,"offline_minutes_cannot_call_cloud")
     try check(Credential.service==RuntimeConfiguration.bailianService,"minutes_and_transcription_share_credential")
     try check(owner.translationSwitch != nil && owner.speakerReviewButton != nil && owner.notesController != nil,"translation_people_notes_retained")
@@ -25,15 +25,18 @@ import AppKit
     try FileManager.default.createDirectory(at:directory,withIntermediateDirectories:true)
     func settingsSnapshot(_ name:String)throws {
         owner.sheet.appearance=NSAppearance(named:.aqua);owner.sheet.layoutIfNeeded()
-        try check(owner.savedLabel.isHidden != owner.keyLabel.isHidden,"settings_labels_mutually_exclusive_"+name)
-        try check(owner.keyLabel.isHidden==owner.key.isHidden,"settings_key_caption_and_field_share_visibility_"+name)
+        try check(!owner.keyLabel.isHidden && owner.savedLabel.isHidden != owner.key.isHidden,"settings_key_row_shows_state_or_field_"+name)
         let target=owner.sheet.contentView!
         let enteringKey = !owner.key.isHidden
-        try check(target.bounds.height==(enteringKey ? 236:176),"settings_height_tracks_visible_input_"+name)
-        guard let privacy=target.subviews.first(where:{$0.identifier==NSUserInterfaceItemIdentifier("settings-privacy")}) else {throw Failure(code:"settings_privacy_missing")}
-        let credential=enteringKey ? owner.key!:owner.savedLabel!
-        let gap=credential.frame.minY-privacy.frame.maxY
-        try check(gap>=8 && gap<=14,"settings_privacy_follows_visible_credential_without_hole_"+name)
+        try check(owner.setupMessage.isHidden == !enteringKey && owner.settingsCancel.isHidden == !enteringKey && owner.change.isHidden==enteringKey,"settings_editing_controls_track_key_entry_"+name)
+        try check(owner.save.title==(owner.editing ? "保存密钥":"完成"),"settings_footer_says_what_it_does_"+name)
+        if enteringKey {
+            let gap=owner.key.frame.minY-owner.setupMessage.frame.maxY
+            try check(gap>=2 && gap<=8 && !owner.setupMessage.stringValue.isEmpty,"settings_hint_sits_under_key_field_"+name)
+        }
+        for row in owner.settingsRows where !row.name.isHidden && !(row.name===owner.keyLabel && enteringKey) {
+            try check(abs(row.name.frame.midY-row.value.frame.midY)<1 && abs(row.value.frame.midY-row.button.frame.midY)<2,"settings_row_is_one_line_"+name+"_"+row.name.stringValue)
+        }
         let visible=owner.settingsLayoutFrames.map{$0.0}.filter{!$0.isHidden}
         // Keep the exact visible ordering and native frames in the QA receipt,
         // even if a following overlap assertion fails before the PNG is written.
@@ -47,9 +50,7 @@ import AppKit
                     "frame":[Double(view.frame.minX),Double(view.frame.minY),Double(view.frame.width),Double(view.frame.height)]]
         }
         try JSONSerialization.data(withJSONObject:layout,options:[.prettyPrinted,.sortedKeys]).write(to:directory.appendingPathComponent(name+"-layout.json"))
-        let moreButtons=visible.filter{["settings-people","settings-balance","settings-codex","settings-update"].contains($0.identifier?.rawValue ?? "")}
         try check(owner.setupMessage.frame.height>=ceil(owner.setupMessage.font!.ascender-owner.setupMessage.font!.descender+owner.setupMessage.font!.leading),"settings_message_has_full_line_height_"+name)
-        for button in moreButtons {try check(owner.setupMessage.frame.minY-button.frame.maxY>=2,"settings_message_clear_of_more_settings_"+name+"_"+button.identifier!.rawValue)}
         for (index,view) in visible.enumerated() {
             try check(target.bounds.contains(view.frame),"settings_content_inside_sheet_"+name+"_\(index)")
             for other in visible.dropFirst(index+1) {try check(!view.frame.intersects(other.frame),"settings_no_visible_overlap_"+name+"_\(index)_\(visible.firstIndex(where:{$0 === other})!)")}

@@ -107,7 +107,7 @@ private final class MeetingLibraryMouseProbe:NSTableView {
           let menuPeople=menuCell.subviews.compactMap({$0 as? MeetingParticipantLabel}).first else{throw Failure(code:"library_context_actual_row")}
     menuCell.layoutSubtreeIfNeeded()
     var presented=0,preparedIDs:[String]=[],preparedOperations:Set<Int>=[],presentationRow = -1
-    var loadedInTracking=false,renameEnabledInTracking=false,renameTitleInTracking=""
+    var loadedInTracking=false,deleteEnabledInTracking=false,deleteTitleInTracking=""
     menuTable.contextMenuPresenter={menu,_,view in
         presented += 1;presentationRow=(view as? NSTableView)?.clickedRow ?? -1
         app.menuWillOpen(menu)
@@ -116,8 +116,8 @@ private final class MeetingLibraryMouseProbe:NSTableView {
             _ = RunLoop.current.run(mode:.eventTracking,before:Date().addingTimeInterval(0.01))
         }
         loadedInTracking=app.libraryManagementController.files?.localOnly==true
-        let rename=menu.items.first{($0.representedObject as? [String:Any])?["operation"] as? Int == MeetingLibraryOperation.rename.rawValue}
-        renameEnabledInTracking=rename?.isEnabled==true;renameTitleInTracking=rename?.title ?? ""
+        let delete=menu.items.first{($0.representedObject as? [String:Any])?["operation"] as? Int == MeetingLibraryOperation.delete.rawValue}
+        deleteEnabledInTracking=delete?.isEnabled==true;deleteTitleInTracking=delete?.title ?? ""
         let commands=menu.items.compactMap{$0.representedObject as? [String:Any]}
         preparedIDs=commands.compactMap{$0["id"] as? String};preparedOperations=Set(commands.compactMap{$0["operation"] as? Int})
         app.menuDidClose(menu)
@@ -126,7 +126,7 @@ private final class MeetingLibraryMouseProbe:NSTableView {
         let point=child.convert(NSPoint(x:child.bounds.midX,y:child.bounds.midY),to:nil)
         guard let click=NSEvent.mouseEvent(with:.rightMouseDown,location:point,modifierFlags:[],timestamp:3,windowNumber:app.window.windowNumber,context:nil,eventNumber:3,clickCount:1,pressure:1) else{throw Failure(code:"library_menu_event")}
         let prepared=menuCell.menu(for:click)
-        try check(prepared === menuTable.menu && prepared!.items.count>=6,"library_"+name+"_prepares_nonempty_context_menu")
+        try check(prepared === menuTable.menu && prepared!.items.map(\.title)==["删除"],"library_"+name+"_prepares_delete_context_menu")
         let hit=menuTable.hitTest(menuTable.superview!.convert(point,from:nil))
         // NSTableView may retain the hit itself to handle row selection. Both
         // production receivers must take the same explicit context-menu path.
@@ -136,10 +136,9 @@ private final class MeetingLibraryMouseProbe:NSTableView {
         }
         try check(hit === menuCell || hit === menuTable,"library_"+name+"_actual_hit_routes_to_context_receiver")
         hit?.rightMouseDown(with:click)
-        let expectedActions:[MeetingLibraryOperation]=[.rename,.renameAudio,.transcribe,.exportAudio,.meetingFiles,.delete]
-        try check(presentationRow==menuRow && preparedIDs.count==6 && preparedIDs.allSatisfy{$0==menuTarget.id} && preparedOperations==Set(expectedActions.map{$0.rawValue}),"library_"+name+"_presents_six_actions_with_one_meeting_files_entrance_for_clicked_row")
+        try check(presentationRow==menuRow && preparedIDs==[menuTarget.id] && preparedOperations==[MeetingLibraryOperation.delete.rawValue],"library_"+name+"_presents_only_delete_for_clicked_row")
         try check(menuTable.selectedRow==menuRow && app.displayedDocument === documentBeforeMenu,"library_"+name+"_context_selection_preserves_document")
-        try check(loadedInTracking && renameEnabledInTracking && renameTitleInTracking=="重命名会议…","library_"+name+"_first_open_updates_during_menu_tracking")
+        try check(loadedInTracking && deleteEnabledInTracking && deleteTitleInTracking=="删除","library_"+name+"_first_open_updates_during_menu_tracking")
     }
     try check(presented==3,"library_real_context_route_reaches_popup_once_per_click")
     let controlPoint=menuDate.convert(NSPoint(x:menuDate.bounds.midX,y:menuDate.bounds.midY),to:nil)

@@ -160,7 +160,7 @@ private final class MeetingLibraryExportGate {
     app.meetingDeletionBusy=false
     app.phase.phase = .stopped;app.populateLibraryActions(menu)
     try check(operation(.delete)?.isEnabled==true && (operation(.delete)?.representedObject as? [String:Any])?["id"] as? String==failureItem.id,"actual_delete_menu_freezes_cache_target")
-    try check(MeetingLibraryOperation.visibleOperations.allSatisfy{operation($0) != nil} && operation(.audioFolder)==nil && operation(.transcriptFolder)==nil && operation(.meetingFiles) != nil,"context_menu_exposes_one_meeting_files_action_without_duplicate_folders")
+    try check(menu.items.count==1 && operation(.delete) != nil,"context_menu_holds_only_delete")
     try check(management.enabled(.audioFolder) && management.enabled(.transcriptFolder),"existing_original_record_folders_are_available")
     let nameBefore=failureItem.displayTitle,rawBefore=try Data(contentsOf:failureItem.directory.appendingPathComponent("mic-000000.pcm"))
     management.renameOverride={_ in nil};management.requestRename(failureItem)
@@ -218,8 +218,8 @@ private final class MeetingLibraryExportGate {
     try check(blocked.count(fastA.id)==2 && blocked.count(fastB.id)==0,"cancelled_A_B_A_reissues_exactly_one_fresh_A_read")
     let menuProbe=MeetingLibraryReadProbe(fastA.id);defer{menuProbe.release.signal()};management.readOverride={try menuProbe.read($0,root:$1)}
     let contextMenu=app.libraryTable.menu!;app.libraryMenuTarget=fastA;app.populateLibraryActions(contextMenu)
-    let renameEntry=contextMenu.items.first{($0.representedObject as? [String:Any])?["operation"] as? Int==MeetingLibraryOperation.rename.rawValue}!
-    try check(renameEntry.isEnabled,"loaded_context_menu_rename_is_enabled_before_open")
+    let renameEntry=NSMenuItem(title:"重命名会议",action:#selector(Delegate.performLibraryManagementMenu(_:)),keyEquivalent:"");renameEntry.representedObject=["id":fastA.id,"operation":MeetingLibraryOperation.rename.rawValue]
+    try check(management.enabled(.rename,for:fastA),"loaded_record_rename_is_enabled_before_open")
     app.menuWillOpen(contextMenu)
     try check(!management.readJob.busy && menuProbe.count(fastA.id)==0 && management.enabled(.rename),"opening_loaded_menu_keeps_snapshot_and_does_not_start_redundant_read")
     app.menuDidClose(contextMenu);var renamedFromMenu:String?;management.renameOverride={renamedFromMenu=$0.id;return nil}

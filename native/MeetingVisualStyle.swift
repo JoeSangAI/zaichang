@@ -27,6 +27,9 @@ enum MeetingVisualStyle {
     static let border=color(0xE6E2DA,0x313136)
     static let faint=color(0xA2A4AA,0x6C6D74)
     static let quietFill=color(0xF1EFEB,0x2A2A2F)
+    /// Overview cards: a shade off the panel, and the green edge that marks a decision.
+    static let cardFill=color(0xFAF9F6,0x26262B)
+    static let decidedEdge=color(0x5E8C6A,0x7FAE8A)
     static let disabledAccent=color(0x565963,0x5B5E69)
     static let keyboardFocus=NSColor.keyboardFocusIndicatorColor
 
@@ -45,6 +48,8 @@ enum MeetingVisualStyle {
     }()
     /// Maximum line length of the transcript and its header, in points.
     static let readingWidth:CGFloat=700
+    /// The compact title bar row: traffic lights, the panel toggles and the right panel's tabs. Content starts below it.
+    static let chromeHeight:CGFloat=38
     // Fixed tones on the charcoal capsule, the same in light and dark mode.
     static let capsuleInk=rgb(0x1C1D21)
     static let capsulePaper=rgb(0xF2F0EC)

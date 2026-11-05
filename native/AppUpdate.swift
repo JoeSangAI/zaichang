@@ -15,6 +15,8 @@ final class AppUpdater:NSObject {
     static let checkEvery:TimeInterval=6*3600
     static let retryFetchAfter:TimeInterval=30*60
     static let resumeAfter:TimeInterval=60
+    /// A Mac app can run for weeks without a quit; an update that has waited this long asks once (Sparkle's gentle reminder).
+    static let remindAfter:TimeInterval=3*24*3600
     static var current:String {Bundle.main.object(forInfoDictionaryKey:"CFBundleShortVersionString") as? String ?? "0"}
     /// Only the public edition has a feed; a QA build must never touch the network.
     static var enabled:Bool {!Credential.offline && Bundle.main.object(forInfoDictionaryKey:"OfflineQA") as? Bool != true}
@@ -28,6 +30,7 @@ final class AppUpdater:NSObject {
     private var latest:Release?
     private var fetching=false
     private var ready:String?           // the version already fetched, checked and waiting for a quit
+    private var readySince:Date?,reminded:String?,pillItem:NSToolbarItem?
     private var problem:String?
     private var fraction:Double?
     private var reopen=false
@@ -37,7 +40,6 @@ final class AppUpdater:NSObject {
     private var resumable:ResumableFetch?
     private var card:Card?
     private var whatsNew:(version:String,notes:String)?
-    private let accessory=NSTitlebarAccessoryViewController()
     private lazy var pill=SpeakerPillButton(title:"",primary:false,small:true) {[weak self] in self?.pillPressed()}
     private let panel=NSPanel(contentRect:NSRect(x:0,y:0,width:460,height:200),styleMask:[.titled],backing:.buffered,defer:false)
     private let heading=NSTextField(labelWithString:""),detail=NSTextField(wrappingLabelWithString:""),status=NSTextField(wrappingLabelWithString:"")
@@ -85,12 +87,8 @@ final class AppUpdater:NSObject {
         guard AppUpdater.enabled,clock==nil else{return}
         self.owner=owner
         buildPanel();announceIfJustUpdated()
-        accessory.layoutAttribute = .trailing
-        let holder=NSView(frame:NSRect(x:0,y:0,width:170,height:38));holder.addSubview(pill)
-        NSLayoutConstraint.activate([pill.trailingAnchor.constraint(equalTo:holder.trailingAnchor,constant:-10),pill.centerYAnchor.constraint(equalTo:holder.centerYAnchor)])
-        accessory.view=holder
-        // Hidden only once it is in the title bar: hiding it before is lost, and the empty pill shows as a circle.
-        owner.window.addTitlebarAccessoryViewController(accessory);showPill(false)
+        // In the title bar row right after the sidebar toggle, so it shows whether the sidebar is open or not.
+        pillItem=owner.placeUpdatePill(pill);showPill(false)
         NotificationCenter.default.addObserver(forName:NSApplication.willTerminateNotification,object:nil,queue:.main) {[weak self] _ in self?.swapOnExit()}
         refresh()
         DispatchQueue.main.asyncAfter(deadline:.now()+20) {[weak self] in self?.check(quietly:true)}
@@ -133,7 +131,7 @@ final class AppUpdater:NSObject {
             if !quietly {present(.current)}
             return
         }
-        if latest?.version != found.version {ready=nil;problem=nil;retryAt = .distantPast}
+        if latest?.version != found.version {ready=nil;readySince=nil;problem=nil;retryAt = .distantPast}
         latest=found;fetch(found);refresh()
         if !quietly {present(.offer)}
     }
@@ -155,9 +153,10 @@ final class AppUpdater:NSObject {
         }
         resumable=ResumableFetch(part:part,progress:{value in
             DispatchQueue.main.async {AppUpdater.shared.fraction=value;AppUpdater.shared.renderCard()}
-        }) {arrived in
+        }) {arrived,refused in
             var problem:String?,network=false
-            if arrived {
+            if refused {problem="更新文件暂时取不到，稍后再试。"}
+            else if arrived {
                 let kept=folder.appendingPathComponent("update.zip")
                 if (try? FileManager.default.moveItem(at:part,to:kept)) != nil {problem=AppUpdater.prepare(kept,package,version:release.version,in:folder)}
                 else {problem="下载的文件读不出来，再试一次。"}
@@ -174,7 +173,7 @@ final class AppUpdater:NSObject {
         fetching=false;fraction=nil
         if let failure {
             problem=failure;retryAt=Date().addingTimeInterval(network ? AppUpdater.resumeAfter:AppUpdater.retryFetchAfter)
-        } else {ready=release.version;problem=nil}
+        } else {ready=release.version;readySince=readySince ?? Date();problem=nil}
         refresh()
     }
     /// Off the main thread. Returns what went wrong, in words for the panel.
@@ -286,14 +285,16 @@ final class AppUpdater:NSObject {
         } else if let whatsNew,!quiet {
             AppUpdater.retitle(pill,"\(whatsNew.version) 更新了什么");showPill(true)
         } else {showPill(false)}
+        if let pending,!quiet,reminded != pending,let readySince,Date().timeIntervalSince(readySince)>=AppUpdater.remindAfter,
+           owner?.window.attachedSheet==nil {reminded=pending;present(.offer)}
         renderCard()
     }
-    private func showPill(_ visible:Bool) {accessory.isHidden = !visible;accessory.view.isHidden = !visible}
+    private func showPill(_ visible:Bool) {pill.isHidden = !visible;pillItem?.isHidden = !visible}
     /// The pill draws its title when it is enabled or disabled, so that is what makes a new one show.
     private static func retitle(_ button:SpeakerPillButton,_ text:String) {
         guard button.title != text else{return}
         button.title=text;button.isEnabled=button.isEnabled;button.setAccessibilityLabel(text);button.invalidateIntrinsicContentSize()
-        // A title bar accessory isn't laid out again by itself: without this the pill keeps the width of its first, empty title.
+        // Lay the row out again now: otherwise the pill keeps the width of its first, empty title.
         button.superview?.needsLayout=true;button.superview?.layoutSubtreeIfNeeded()
     }
     private func pillPressed() {
@@ -375,11 +376,12 @@ extension Delegate {
 }
 
 /// One download that appends to its .part file as bytes arrive and, when that file already holds some, asks only
-/// for the rest. A server that ignores the range answers 200 and the file starts over.
+/// for the rest. A server that ignores the range answers 200 and the file starts over. `done` says whether the
+/// file is whole, and whether the server refused it (a 404, say), which waiting a minute won't fix.
 final class ResumableFetch:NSObject,URLSessionDataDelegate {
-    private let part:URL,progress:(Double)->Void,done:(Bool)->Void
-    private var session:URLSession?,handle:FileHandle?,have:Int64=0,total:Int64=0,finished=false
-    init(part:URL,progress:@escaping (Double)->Void,done:@escaping (Bool)->Void) {self.part=part;self.progress=progress;self.done=done}
+    private let part:URL,progress:(Double)->Void,done:(Bool,Bool)->Void
+    private var session:URLSession?,handle:FileHandle?,have:Int64=0,total:Int64=0,finished=false,refused=false
+    init(part:URL,progress:@escaping (Double)->Void,done:@escaping (Bool,Bool)->Void) {self.part=part;self.progress=progress;self.done=done}
     func start(_ url:URL) {
         have=((try? FileManager.default.attributesOfItem(atPath:part.path))?[.size] as? NSNumber)?.int64Value ?? 0
         var request=URLRequest(url:url,cachePolicy:.reloadIgnoringLocalCacheData,timeoutInterval:60)
@@ -390,7 +392,7 @@ final class ResumableFetch:NSObject,URLSessionDataDelegate {
     func urlSession(_ session:URLSession,dataTask:URLSessionDataTask,didReceive response:URLResponse,completionHandler:@escaping (URLSession.ResponseDisposition)->Void) {
         let code=(response as? HTTPURLResponse)?.statusCode ?? 0
         if code==416 && have>0 {finished=true;completionHandler(.cancel);return}  // the part is already whole
-        guard code==200 || code==206 else {completionHandler(.cancel);return}
+        guard code==200 || code==206 else {refused=true;completionHandler(.cancel);return}
         if code==200 {have=0;try? FileManager.default.removeItem(at:part)}
         if !FileManager.default.fileExists(atPath:part.path) {FileManager.default.createFile(atPath:part.path,contents:nil)}
         handle=try? FileHandle(forWritingTo:part);_=try? handle?.seekToEnd()
@@ -404,6 +406,6 @@ final class ResumableFetch:NSObject,URLSessionDataDelegate {
     func urlSession(_ session:URLSession,task:URLSessionTask,didCompleteWithError error:Error?) {
         try? handle?.close();handle=nil;session.finishTasksAndInvalidate()
         let code=(task.response as? HTTPURLResponse)?.statusCode ?? 0
-        done(finished || (error==nil && (code==200 || code==206)))
+        done(finished || (error==nil && (code==200 || code==206)),refused)
     }
 }

@@ -129,12 +129,23 @@ import AppKit
     let previousCommand=controller.panel.onCommand;controller.panel.onCommand=nil
     controller.panel.chooseTab("概览")
     controller.panel.apply(["runtime_status":"offline","meeting_overview":["status":"ready","stale":false,"data":[
+        "summary":["text":"下个月先在新加坡两个团队试点，前三个月预算 2.5 万美元。"],
+        "agenda":[["text":"试点范围：先确认范围，再谈价格和实施","evidence":[["segment_id":"english-0","quote":sources[0]]]],
+                  ["text":"预算：前三个月 2.5 万美元","evidence":[["segment_id":"english-2","quote":sources[2]]]],
+                  ["text":"成功标准：还没有明确定义","evidence":[["segment_id":"english-4","quote":sources[4]]]]],
         "current_topic":["text":"试点范围与启动时间"],
-        "discussion_points":[["text":"先从新加坡的两个团队开始，逐项核对范围、预算与实施。"]],
-        "decisions":[["text":"先做两个团队的试点。"]],
-        "actions":[["text":"发送试点时间表。","owner":"Alice","deadline":"周五前"]],
+        "decisions":[["text":"试点：先做新加坡两个团队"]],
+        "actions":[["text":"发送试点时间表。","owner":"Alice","deadline":"周五前"],["text":"成功标准：拟一版衡量指标","owner":NSNull(),"deadline":NSNull()]],
         "open_questions":[["text":"明确成功的衡量标准。"]]]]])
     settle();app.window.contentView?.layoutSubtreeIfNeeded()
+    let rendered=controller.panel.overviewTextForChecks
+    try check(rendered.contains("议程  3") && rendered.contains("已定  1") && rendered.contains("待办  2") && !rendered.contains("讨论要点"),"overview_reads_summary_agenda_then_cards")
+    // An agenda entry leads to its place in the transcript: the last one scrolls the transcript there.
+    app.output.scrollRangeToVisible(NSRange(location:0,length:0));settle()
+    guard let target=app.incrementalTranscript.range(forPart:"english-4"),let layout=app.output.layoutManager,let container=app.output.textContainer else {throw Failure(code:"translation_ui_agenda_target_missing")}
+    controller.panel.revealSegment?("english-4");settle()
+    var box=layout.boundingRect(forGlyphRange:layout.glyphRange(forCharacterRange:target,actualCharacterRange:nil),in:container);box.origin.y+=app.output.textContainerOrigin.y
+    try check(app.output.visibleRect.intersects(box) && controller.panel.timeOfSegment?("english-4")=="01:00","agenda_entry_scrolls_transcript_to_its_start")
     var images:[String]=[]
     func snapshot(_ name:String)throws {
         guard let target=app.window.contentView,let bitmap=target.bitmapImageRepForCachingDisplay(in:target.bounds) else {throw Failure(code:"translation_ui_bitmap")}
@@ -144,12 +155,36 @@ import AppKit
     }
     try check(abs(controller.panel.bounds.width-340)<1,"panel_actual_width_matches_requested_width")
     try snapshot("bilingual-overview")
+    // The panel's tabs sit in the title bar row, starting where the panel starts; closing the panel takes them away.
+    func chrome(_ name:String)throws {
+        guard let frame=app.window.contentView?.superview,let bitmap=frame.bitmapImageRepForCachingDisplay(in:frame.bounds) else {throw Failure(code:"translation_ui_chrome_bitmap")}
+        frame.layoutSubtreeIfNeeded();frame.effectiveAppearance.performAsCurrentDrawingAppearance {frame.cacheDisplay(in:frame.bounds,to:bitmap)}
+        let file=directory.appendingPathComponent(name+".png");try bitmap.representation(using:.png,properties:[:])!.write(to:file);images.append(file.path)
+    }
+    // An update waiting shows right after the sidebar toggle and leaves the panel row where it is.
+    let pillItem=app.placeUpdatePill(SpeakerPillButton(title:"更新到 9.9.9",primary:false,small:true){})
+    try check(pillItem != nil && app.window.toolbar?.items.firstIndex{$0.itemIdentifier.rawValue=="update"}==1,"update_pill_sits_after_sidebar_toggle")
+    app.refreshPanelHeader();settle();app.window.contentView?.superview?.layoutSubtreeIfNeeded()
+    let bar=controller.panel.headerBar.convert(controller.panel.headerBar.bounds,to:nil),panelFrame=controller.panel.convert(controller.panel.bounds,to:nil)
+    try check(app.panelHeaderItem?.isHidden==false && controller.panel.headerBar.window===app.window && abs(bar.minX-panelFrame.minX)<=1,"panel_tabs_sit_in_title_bar_over_the_panel")
+    try chrome("window-chrome")
+    controller.toggle();settle()
+    try check(app.panelHeaderItem?.isHidden==true && app.agentSidebarButton?.isHiddenOrHasHiddenAncestor==false,"closed_panel_leaves_only_its_toggle")
+    try chrome("window-chrome-panel-closed")
+    controller.manualVisible=nil;controller.layout();settle()
+    // After the meeting: no 「进行中」, and who spoke how much at the end (shares supplied, the bar is what is checked).
+    let liveBefore=controller.panel.isLive,shareBefore=controller.panel.speakingShare
+    controller.panel.isLive={false};controller.panel.speakingShare={[("Alice",0.5),("Bob",0.3),(MeetingAgentPanel.unknownSpeaker,0.2)]}
+    controller.panel.apply(controller.panel.state);settle()
+    try check(controller.panel.overviewTextForChecks.contains("谁说得多") && !controller.panel.overviewTextForChecks.contains("进行中"),"finished_meeting_shows_talk_share_without_live_marker")
+    try snapshot("overview-after-meeting")
+    controller.panel.isLive=liveBefore;controller.panel.speakingShare=shareBefore
     controller.panel.chooseTab("助理");settle();try snapshot("bilingual-assistant")
     try app.translationService.setEnabled(false,apiKey:nil);try app.settleTranscriptForOfflineReview();settle()
     try check(!app.output.string.contains(translations[1]) && !app.transcriptExport().contains("中译："),"off_refreshes_native_view_and_export")
     try snapshot("translation-off")
     app.window.setContentSize(NSSize(width:640,height:720));app.layoutWorkspace();settle()
-    try check(!controller.expanded && app.meetingMoreButton?.isHiddenOrHasHiddenAncestor==false,"narrow_keeps_the_meeting_menu_and_collapses_assistant")
+    try check(!controller.expanded && app.translationSwitch?.isHiddenOrHasHiddenAncestor==false,"narrow_keeps_translation_and_collapses_assistant")
     try snapshot("narrow")
     controller.panel.onCommand=previousCommand
     var stopped=false;controller.shutdown{stopped=true};try wait{stopped}

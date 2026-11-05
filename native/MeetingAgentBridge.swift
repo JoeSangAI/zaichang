@@ -137,7 +137,7 @@ final class MeetingAgentController: NSObject {
     private let minimumPanelWidth: CGFloat = 300
     private let maximumPanelWidth: CGFloat = 560
     private let minimumTranscriptWidth: CGFloat = 300
-    private var manualVisible: Bool?
+    var manualVisible: Bool?
     private var draftReadOnly = false
     private var workspaces: [[String: Any]] = []
     var expanded = true
@@ -159,14 +159,44 @@ final class MeetingAgentController: NSObject {
         width = panel.widthAnchor.constraint(equalToConstant: 370)
         width.priority = NSLayoutConstraint.Priority(999)
         panel.onCommand = { [weak self] method, params in self?.command(method, params) }
-        panel.onExport = { [weak self] button in
-            guard let owner = self?.owner else { return }
-            let main = owner.workspaceOwner ?? owner
-            main.exportButton = button; main.showMeetingExportMenu()
+        panel.exportItems = { [weak self] in
+            guard let owner = self?.owner else { return [] }
+            return (owner.workspaceOwner ?? owner).meetingExportItems()
         }
         panel.speakerOfSegment = { [weak self] id in
             guard let owner = self?.owner, let turn = owner.readingTurns().first(where: { $0.id == id || $0.parts.contains { $0.0 == id } }) else { return nil }
             return owner.readingTurnLabel(turn)
+        }
+        func turn(_ owner: Delegate, _ id: String) -> ReadingTurn? { owner.readingTurns().first(where: { $0.id == id || $0.parts.contains { $0.0 == id } }) }
+        panel.timeOfSegment = { [weak self] id in
+            guard let owner = self?.owner, let found = turn(owner, id) else { return nil }
+            let start = TranscriptTimeline.start(found.parts.first { $0.0 == id }?.1 ?? found.item)
+            return owner.absoluteTime?.display(start) ?? TranscriptTimeline.timestamp(start)
+        }
+        panel.revealSegment = { [weak self] id in
+            guard let owner = self?.owner, let output = owner.output else { return }
+            let parts = [id] + (turn(owner, id)?.parts.map(\.0) ?? [])
+            guard let range = parts.lazy.compactMap({ owner.incrementalTranscript.range(forPart: $0) }).first else { return }
+            owner.cancelTranscriptReadingRestore(); output.scrollRangeToVisible(range); output.showFindIndicator(for: range)
+        }
+        panel.isLive = { [weak self] in
+            guard let owner = self?.owner, !owner.isHistoryReader else { return false }
+            return [.connecting, .recording, .paused].contains(owner.phase.phase)
+        }
+        panel.speakingShare = { [weak self] in
+            guard let owner = self?.owner else { return [] }
+            var seconds: [String: Double] = [:]
+            for turn in owner.readingTurns() {
+                let start = TranscriptTimeline.start(turn.item), end = (turn.item["end"] as? Double) ?? start
+                guard end.isFinite, end > start else { continue }
+                let label = owner.readingTurnLabel(turn)
+                let named = !turn.uncertain && !label.isEmpty && !["待确认", "多人重叠", "多人同时发言", "句内说话人变化"].contains(label)
+                seconds[named ? label : MeetingAgentPanel.unknownSpeaker, default: 0] += end - start
+            }
+            let total = seconds.values.reduce(0, +)
+            guard total > 0 else { return [] }
+            // Someone heard for a breath (under 1%) is not a share worth a colour.
+            return seconds.map { ($0.key, $0.value / total) }.filter { $0.1 >= 0.01 }.sorted { $0.0 == MeetingAgentPanel.unknownSpeaker ? false : $1.0 == MeetingAgentPanel.unknownSpeaker ? true : $0.1 > $1.1 }
         }
         panel.onResize = { [weak self] proposed, persist in self?.resizePanel(to: proposed, persist: persist) }
         service.observers[token] = { [weak self] id, snapshot in
@@ -201,6 +231,7 @@ final class MeetingAgentController: NSObject {
         if expanded { width.constant = clampedPanelWidth(preferredPanelWidth, available: available) }
         width.isActive = expanded; panel.isHidden = !expanded
         updateOverviewVisibility()
+        owner.refreshPanelHeader()
     }
     private var panelAvailableWidth: CGFloat {
         guard let owner else { return 0 }
@@ -217,7 +248,7 @@ final class MeetingAgentController: NSObject {
         width.constant = value
         if persist { (owner.workspaceOwner ?? owner).sidebarPreferences?.set(Double(value), forKey: widthPreferenceKey) }
         owner.window.contentView?.layoutSubtreeIfNeeded()
-        owner.resizeTranscript()
+        owner.resizeTranscript(); owner.refreshPanelHeader()
     }
     var requestedPanelWidth: CGFloat { width.constant }
     func openNotes() {manualVisible=true;layout();panel.chooseTab("笔记");owner?.window.contentView?.layoutSubtreeIfNeeded();owner?.resizeTranscript()}
@@ -355,6 +386,34 @@ extension Delegate {
         assistant.layout(); return body
     }
     @objc func toggleAssistantPanel() { agentController?.toggle() }
+    /// The title bar row over the right panel shows the panel of the meeting on screen, exactly as wide:
+    /// the toolbar puts 8pt of spacing and 8pt of edge after it, then the toggle.
+    func refreshPanelHeader() {
+        let owner = workspaceOwner ?? self
+        guard let item = owner.panelHeaderItem, let host = owner.panelHeaderHost else { return }
+        let shown = owner.historyReader ?? owner
+        guard let controller = shown.agentController, controller.expanded else { item.isHidden = true; return }
+        let bar = controller.panel.headerBar
+        if bar.superview !== host {
+            host.subviews.forEach { $0.removeFromSuperview() }
+            host.addSubview(bar)
+            NSLayoutConstraint.activate([bar.leadingAnchor.constraint(equalTo: host.leadingAnchor), bar.trailingAnchor.constraint(equalTo: host.trailingAnchor),
+                                         bar.centerYAnchor.constraint(equalTo: host.centerYAnchor)])
+        }
+        // What the toolbar keeps right of the row (spacing, the toggle, the edge) is read from where it actually put the row;
+        // until it has laid the row out once, assume the toggle plus 16pt, then measure again.
+        let toggle = owner.agentSidebarButton?.constraints.first { $0.identifier == "agent-pill-width" }?.constant ?? 30
+        let placed = host.window != nil && host.frame.width > 0
+        let rightGap = placed ? owner.window.frame.width - host.convert(host.bounds, to: nil).maxX : toggle + 16
+        let wanted = max(120, controller.requestedPanelWidth - rightGap)
+        if abs((owner.panelHeaderWidth?.constant ?? 0) - wanted) > 0.5 { owner.panelHeaderWidth?.constant = wanted }
+        item.isHidden = false
+        // Measure again once after a first placement or a toggle that changed width (the listening pill), never in a loop.
+        if owner.panelHeaderMeasuredToggle != toggle {
+            owner.panelHeaderMeasuredToggle = toggle
+            DispatchQueue.main.async { [weak owner] in owner?.window.contentView?.superview?.layoutSubtreeIfNeeded(); owner?.refreshPanelHeader() }
+        }
+    }
     @objc func toggleVisibleAssistant() {displayedDocument.agentController?.toggle()}
     /// The toolbar's right-panel button doubles as the listening indicator, so
     /// listening stays visible while the panel is closed.
@@ -387,6 +446,7 @@ extension Delegate {
             button.layer?.backgroundColor=nil;button.layer?.borderWidth=0;width.constant=30
         }
         button.superview?.needsLayout=true
+        refreshPanelHeader()
     }
     @objc func showAssistantMore(_ sender:NSButton) {
         let menu=NSMenu()

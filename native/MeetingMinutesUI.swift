@@ -5,14 +5,42 @@ import UniformTypeIdentifiers
 extension Delegate {
     func makeMeetingExportMenu() -> NSMenu {
         let menu = NSMenu(); menu.autoenablesItems = false
+        meetingExportItems().forEach { menu.addItem($0) }
+        return menu
+    }
+
+    /// Everything that takes the meeting on screen elsewhere: 纪要, 原文, 录音 (and 归档 where configured).
+    /// The right panel's 「···」 lists these first.
+    func meetingExportItems() -> [NSMenuItem] {
         let document = displayedDocument
-        let transcript = menu.addItem(withTitle: "导出原文…", action: #selector(exportVisibleDocument), keyEquivalent: "")
-        transcript.target = self
-        menu.addItem(.separator())
-        let minutes = menu.addItem(withTitle: "导出纪要…", action: #selector(beginMeetingMinutes), keyEquivalent: "")
+        let minutes = NSMenuItem(title: "导出纪要…", action: #selector(beginMeetingMinutes), keyEquivalent: "")
         minutes.target = document
         minutes.isEnabled = !document.readingTurns().isEmpty && !Credential.offline && !document.meetingMinutesBusy
-        return menu
+        let transcript = NSMenuItem(title: "导出原文…", action: #selector(exportVisibleDocument), keyEquivalent: "")
+        transcript.target = self
+        let audio = NSMenuItem(title: "导出录音…", action: #selector(exportDisplayedAudio), keyEquivalent: "")
+        audio.target = self
+        if let meeting = displayedRecording {
+            let management = (workspaceOwner ?? self).libraryManagementController
+            audio.isEnabled = management.enabled(.exportAudio, for: meeting)
+            if !audio.isEnabled { audio.toolTip = management.disabledReason(.exportAudio, for: meeting) }
+        } else { audio.isEnabled = false }
+        var items = [minutes, transcript, audio]
+        if RuntimeConfiguration.archiveEnabled {
+            let archive = NSMenuItem(title: "归档到项目…", action: #selector(openMeetingArchive), keyEquivalent: "")
+            archive.target = document; archive.isEnabled = document.meetingArchiveEligible; items.append(archive)
+        }
+        return items
+    }
+
+    private var displayedRecording: CachedMeeting? {
+        let owner = workspaceOwner ?? self, id = displayedDocument.currentCacheID
+        return owner.recoveries.first { $0.id == id } ?? owner.libraryVisible.first { $0.id == id }
+    }
+
+    @objc func exportDisplayedAudio() {
+        guard let meeting = displayedRecording else { return }
+        (workspaceOwner ?? self).libraryManagementController.perform(.exportAudio, item: meeting)
     }
 
     @objc func showMeetingExportMenu() {

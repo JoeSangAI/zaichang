@@ -78,7 +78,12 @@ enum Credential {
     }
 }
 
+/// One line of Settings: what it is, its state, and the one thing you can do about it.
+struct SettingsRow {let name:NSTextField;let value:NSTextField;let button:NSButton}
 final class FocusPanel:NSPanel {
+    /// Esc on a sheet whose only button is 完成 still closes it.
+    var onEscape:(()->Void)?
+    override func cancelOperation(_ sender:Any?) {if let onEscape {onEscape()} else {super.cancelOperation(sender)}}
     override func sendEvent(_ event:NSEvent) {
         if event.type == .keyDown,event.keyCode==48,let current=firstResponder as? NSControl {
             var next:NSView?=event.modifierFlags.contains(.shift) ? current.previousKeyView:current.nextKeyView
@@ -105,12 +110,12 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
     var librarySearch:NSSearchField!;var libraryTable:NSTableView!;var libraryStatus:NSTextField!;var libraryRetryButton:NSButton!;var libraryVisible:[CachedMeeting]=[];var librarySelectionChanging=false
     let libraryJob=CacheReadJob();let libraryOpenJob=CacheReadJob();let librarySearchJob=CacheReadJob();let librarySummaryJob=CacheReadJob();var librarySummaryPending:CachedMeeting?;var librarySummaryGeneration=0;var librarySummaryLoaded:Set<String>=[];var libraryFilterWork:DispatchWorkItem?;var pendingLibraryOpen:CachedMeeting?;var libraryReloadPending=false;var librarySelectRecentPending=false
     var liveReturn:NSButton!;var timelineToggle:NSButton!;var historyLiveButton:NSButton!;var showsSpeakerRanges=false
-    var speakerReviewButton:NSButton?;var meetingMoreButton:NSButton?;var speakerStrip:NSStackView?;var speakerStripSignature="";var speakerStripRefreshedAt=0.0;var speakerStripRefreshPending=false;var voiceCandidateButton:NSButton?;var speakerReviewWindow:NSWindow?;var libraryParticipants:[String:[String]]=[:]
+    var speakerReviewButton:NSButton?;var speakerStrip:NSStackView?;var speakerStripSignature="";var speakerStripRefreshedAt=0.0;var speakerStripRefreshPending=false;var voiceCandidateButton:NSButton?;var speakerReviewWindow:NSWindow?;var libraryParticipants:[String:[String]]=[:]
     let autoTitle=MeetingAutoTitle();var titleProvider:MeetingTitleProvider?;var titleTextAllowed=false;var titleTask:Task<Void,Never>?;var titleRevision=0;var titleProviderFactory:((String)->MeetingTitleProvider)?;var owedTitleTask:Task<Void,Never>?;var owedTitleLastPass=0.0;var owedTitlePassInterval=600.0
     var finalTitleTasks:[String:Task<Void,Never>]=[:]
     var isHistoryReader=false;weak var workspaceOwner:Delegate?;var historyReader:Delegate?;var historyReaderShell:NSWindow?
-    var recordingLiveDot:RecordingLiveDot?;var recordingCapsuleWidth:NSLayoutConstraint?;var firstRunGuide:FirstRunGuide?;var recordingModeChip:RecordingModeChip?;var readingAlignedRows:[NSStackView]=[];var settingsLayoutFrames:[(NSView,NSRect)]=[];var notesTransportStack:NSStackView?;var meetingEyebrow:NSTextField?;var emptyFilesButton:NSButton?;var emptyTranscribeButton:NSButton?;var window:NSWindow!;var sheet:NSPanel!;var key:NSSecureTextField!;var keyLabel:NSTextField!;var setupMessage:NSTextField!;var savedLabel:NSTextField!;var save:NSButton!;var change:NSButton!
-    var historyButton:NSButton?;var newButton:NSButton?;var archiveButton:NSButton?;var heading:NSTextField!;var source:NSTextField!;var meter:NSTextField!;var action:NSButton!;var output:NSTextView!;var scroll:NSScrollView!;var empty:NSTextField!;var latest:NSButton!;var footerDetails:NSButton!;var settingsCancel:NSButton!;var diagnostic:NSTextField!
+    var recordingLiveDot:RecordingLiveDot?;var recordingCapsuleWidth:NSLayoutConstraint?;var firstRunGuide:FirstRunGuide?;var recordingModeChip:RecordingModeChip?;var readingAlignedRows:[NSStackView]=[];var settingsLayoutFrames:[(NSView,NSRect)]=[];var settingsRows:[SettingsRow]=[];var settingsCodexState:NSTextField?;var settingsCodexButton:NSButton?;var notesTransportStack:NSStackView?;var meetingEyebrow:NSTextField?;var emptyFilesButton:NSButton?;var emptyTranscribeButton:NSButton?;var window:NSWindow!;var sheet:NSPanel!;var key:NSSecureTextField!;var keyLabel:NSTextField!;var setupMessage:NSTextField!;var savedLabel:NSTextField!;var save:NSButton!;var change:NSButton!
+    var historyButton:NSButton?;var panelHeaderItem:NSToolbarItem?;var panelHeaderMeasuredToggle:CGFloat?;var updatePillView:NSView?;var panelHeaderHost:NSView?;var panelHeaderWidth:NSLayoutConstraint?;var sidebarColumn:NSStackView?;var newButton:NSButton?;var archiveButton:NSButton?;var heading:NSTextField!;var source:NSTextField!;var meter:NSTextField!;var action:NSButton!;var output:NSTextView!;var scroll:NSScrollView!;var empty:NSTextField!;var latest:NSButton!;var footerDetails:NSButton!;var settingsCancel:NSButton!;var diagnostic:NSTextField!
     var phase=UIState();var child:Process?;var quitting=false;var mock=false;var timer:Timer?;var mockTick=0;let vault=MockVault()
     var terminationJobsPending=0;var terminationReplyPending=false;var terminationWriteBarrierStarted=false
     var terminationReplyOverride:(()->Void)?
@@ -222,12 +227,25 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
         if trialCandidate {if !mock && Bundle.main.object(forInfoDictionaryKey:"LocalRecordingAllowed") as? Bool != true && remainingSeconds()<=0 {newRecordingPending=true;diagnostic.stringValue="正在连接转写服务";updateUI()};return}
         if !mock && remainingSeconds()<=0 {phase.phase = .ended;updateUI()} else if !stored {showSettings()}
     }
-    func toolbarAllowedItemIdentifiers(_ toolbar:NSToolbar)->[NSToolbarItem.Identifier] {[NSToolbarItem.Identifier("history"),.flexibleSpace,NSToolbarItem.Identifier("search"),NSToolbarItem.Identifier("export"),NSToolbarItem.Identifier("details"),NSToolbarItem.Identifier("assistant"),NSToolbarItem.Identifier("more")]}
+    func toolbarAllowedItemIdentifiers(_ toolbar:NSToolbar)->[NSToolbarItem.Identifier] {[NSToolbarItem.Identifier("history"),NSToolbarItem.Identifier("update"),.flexibleSpace,NSToolbarItem.Identifier("panel"),NSToolbarItem.Identifier("search"),NSToolbarItem.Identifier("export"),NSToolbarItem.Identifier("details"),NSToolbarItem.Identifier("assistant"),NSToolbarItem.Identifier("more")]}
     func toolbarDefaultItemIdentifiers(_ toolbar:NSToolbar)->[NSToolbarItem.Identifier] {
-        // With the side panel, the meeting's own actions live beside its title and export under the overview.
-        assistantEnabled ? [NSToolbarItem.Identifier("history"),.flexibleSpace,NSToolbarItem.Identifier("assistant")] : [NSToolbarItem.Identifier("history"),.flexibleSpace,NSToolbarItem.Identifier("search"),NSToolbarItem.Identifier("export"),NSToolbarItem.Identifier("details")]
+        // With the side panel: renaming is the title, translation sits above the transcript, exports are in the panel's 「···」.
+        assistantEnabled ? [NSToolbarItem.Identifier("history"),.flexibleSpace,NSToolbarItem.Identifier("panel"),NSToolbarItem.Identifier("assistant")] : [NSToolbarItem.Identifier("history"),.flexibleSpace,NSToolbarItem.Identifier("search"),NSToolbarItem.Identifier("export"),NSToolbarItem.Identifier("details")]
     }
     func toolbar(_ toolbar:NSToolbar,itemForItemIdentifier id:NSToolbarItem.Identifier,willBeInsertedIntoToolbar flag:Bool)->NSToolbarItem? {
+        if id.rawValue=="update",let pill=updatePillView {
+            let item=NSToolbarItem(itemIdentifier:id);item.label="更新";item.autovalidates=false;item.view=pill;return item
+        }
+        if id.rawValue=="panel" {
+            // Holds the shown meeting's 概览 · 助理 · 笔记 ···, as wide as its panel (see refreshPanelHeader).
+            let item=NSToolbarItem(itemIdentifier:id);item.label="右栏";item.autovalidates=false
+            let host=NSView();host.translatesAutoresizingMaskIntoConstraints=false
+            let width=host.widthAnchor.constraint(equalToConstant:300);width.isActive=true
+            host.heightAnchor.constraint(equalToConstant:MeetingVisualStyle.chromeHeight-8).isActive=true
+            item.view=host;panelHeaderItem=item;panelHeaderHost=host;panelHeaderWidth=width
+            DispatchQueue.main.async{[weak self] in self?.refreshPanelHeader()}
+            return item
+        }
         let spec:(String,String,Selector)
         switch id.rawValue {
         case "history":spec=("会议列表","sidebar.left",#selector(toggleSidebar))
@@ -258,29 +276,43 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
         if let container=output.textContainer,abs(container.containerSize.width-textWidth)>0.5 {container.containerSize=NSSize(width:textWidth,height:CGFloat.greatestFiniteMagnitude)}
     }
     func buildSettings() {
-        // Recording-only vs transcribing is chosen where a recording starts; Settings holds only what lasts.
-        sheet=FocusPanel(contentRect:NSRect(x:0,y:0,width:520,height:236),styleMask:[.titled,.closable],backing:.buffered,defer:false);sheet.title="设置";sheet.delegate=self;sheet.autorecalculatesKeyViewLoop=false
+        // One row per lasting setting: its name, its state in a few words, and one button that says what it does.
+        // Recording-only vs transcribing is chosen where a recording starts, not here.
+        sheet=FocusPanel(contentRect:NSRect(x:0,y:0,width:520,height:200),styleMask:[.titled,.closable],backing:.buffered,defer:false);sheet.title="设置";sheet.delegate=self;sheet.autorecalculatesKeyViewLoop=false
+        (sheet as? FocusPanel)?.onEscape={[weak self] in self?.cancelSettingsEdit()}
+        // Back from the Terminal after connecting Codex, the assistant row says so without reopening Settings.
+        NotificationCenter.default.addObserver(forName:NSApplication.didBecomeActiveNotification,object:nil,queue:.main){[weak self] _ in
+            MainActor.assumeIsolated {if self?.sheet?.isVisible==true {self?.refreshCodexRow()}}
+        }
         let content=sheet.contentView!
-        func place(_ v:NSView,_ x:CGFloat,_ y:CGFloat,_ width:CGFloat,_ height:CGFloat){v.frame=NSRect(x:x,y:y,width:width,height:height);content.addSubview(v)}
-        savedLabel=label("密钥已保存在这台Mac",size:13);place(savedLabel,24,195,472,24)
-        keyLabel=label("百炼密钥",size:13,weight:.medium);place(keyLabel,24,195,472,24)
-        key=NSSecureTextField();key.delegate=self;key.placeholderString=mock ? "仅输入假密钥" : "粘贴API密钥";key.bezelStyle = .roundedBezel;place(key,24,157,472,30)
-        let privacy=label(mock ? "离线预览：请勿输入真实密钥。" : "云端识别由阿里云百炼提供，录音保存在本机。",size:12);privacy.identifier=NSUserInterfaceItemIdentifier("settings-privacy");privacy.textColor = .secondaryLabelColor;place(privacy,24,126,472,22)
-        // One 12pt line fits in 17pt. Keep its upper edge at 123 and leave
-        // 2pt below it before the more-settings buttons end at y=104.
-        setupMessage=label("",size:12);setupMessage.identifier=NSUserInterfaceItemIdentifier("settings-message");setupMessage.textColor = .secondaryLabelColor;place(setupMessage,24,106,472,17)
-        if mock || humanIdentityAuthorized || !trialCandidate {place(label("更多设置",size:12,weight:.medium),24,78,76,24)}
-        let peopleButton=ImmediateButton(title:"人物资料…",target:self,action:#selector(manageConsent));peopleButton.identifier=NSUserInterfaceItemIdentifier("settings-people");peopleButton.bezelStyle = .rounded;peopleButton.isHidden = !mock && !humanIdentityAuthorized;place(peopleButton,112,76,88,28)
-        let balanceButton=ImmediateButton(title:"余额…",target:self,action:#selector(configureBalance));balanceButton.identifier=NSUserInterfaceItemIdentifier("settings-balance");balanceButton.bezelStyle = .rounded;place(balanceButton,208,76,88,28);balanceButton.isHidden=trialCandidate
-        let codexButton=ImmediateButton(title:"Codex…",target:self,action:#selector(showCodexConnection));codexButton.identifier=NSUserInterfaceItemIdentifier("settings-codex");codexButton.bezelStyle = .rounded;place(codexButton,304,76,88,28)
-        let updateButton=ImmediateButton(title:"检查更新…",target:self,action:#selector(checkForUpdatesFromSettings));updateButton.identifier=NSUserInterfaceItemIdentifier("settings-update");updateButton.bezelStyle = .rounded;updateButton.isHidden = !AppUpdater.enabled;place(updateButton,400,76,96,28)
-        change=ImmediateButton(title:"更换密钥",target:self,action:#selector(changeKey));change.bezelStyle = .rounded;place(change,24,20,108,28)
-        let cancel=ImmediateButton(title:"取消",target:self,action:#selector(dismissSettings));settingsCancel=cancel;cancel.bezelStyle = .rounded;cancel.keyEquivalent="\u{1b}";place(cancel,296,20,84,28)
-        save=ImmediateButton(title:"保存密钥",target:self,action:#selector(saveKey));save.bezelStyle = .rounded;save.keyEquivalent="\r";place(save,388,20,108,28)
+        func name(_ text:String)->NSTextField {let field=label(text,size:13,weight:.medium);content.addSubview(field);return field}
+        func value(_ text:String,_ id:String)->NSTextField {
+            let field=label(text,size:13);field.textColor = .secondaryLabelColor;field.lineBreakMode = .byTruncatingTail;field.identifier=NSUserInterfaceItemIdentifier(id);content.addSubview(field);return field
+        }
+        func button(_ title:String,_ id:String,_ action:Selector)->NSButton {
+            let control=ImmediateButton(title:title,target:self,action:action);control.identifier=NSUserInterfaceItemIdentifier(id);control.bezelStyle = .rounded;content.addSubview(control);return control
+        }
+        keyLabel=name("百炼密钥")
+        savedLabel=value("已保存在这台 Mac","settings-key-state")
+        key=NSSecureTextField();key.delegate=self;key.placeholderString=mock ? "仅输入假密钥" : "粘贴 API 密钥";key.bezelStyle = .roundedBezel;content.addSubview(key)
+        change=button("更换密钥","settings-change",#selector(changeKey))
+        setupMessage=value("","settings-message");setupMessage.font = .systemFont(ofSize:12)
+        let assistantState=value("提问用百炼；连上 Codex 还能查资料、旁听","settings-codex-state");settingsCodexState=assistantState
+        let codex=button("连接 Codex","settings-codex",#selector(showCodexConnection));settingsCodexButton=codex
+        let version=value(AppUpdater.current,"settings-version")
+        let update=button("检查更新","settings-update",#selector(checkForUpdatesFromSettings));update.isHidden = !AppUpdater.enabled
+        var rows:[SettingsRow]=[SettingsRow(name:keyLabel,value:savedLabel,button:change),
+                                SettingsRow(name:name(AssistantProfile.name),value:assistantState,button:codex),
+                                SettingsRow(name:name("版本"),value:version,button:update)]
+        if mock || humanIdentityAuthorized {rows.append(SettingsRow(name:name("人物资料"),value:value("本机保存的声音档案","settings-people-state"),button:button("管理…","settings-people",#selector(manageConsent))))}
+        if !trialCandidate {rows.append(SettingsRow(name:name("账户余额"),value:value("用只读凭据查询百炼余额","settings-balance-state"),button:button("设置…","settings-balance",#selector(configureBalance))))}
+        settingsRows=rows
+        let cancel=button("取消","settings-cancel",#selector(cancelSettingsEdit));settingsCancel=cancel;cancel.keyEquivalent="\u{1b}"
+        save=button("保存密钥","settings-save",#selector(saveKey));save.keyEquivalent="\r"
         fixture=FocusPopup();fixture.addItems(withTitles:["4字符","16字符","32字符","64字符","128字符","首尾空白","特殊字符","内部换行"])
         key.nextKeyView=cancel;cancel.nextKeyView=save;save.nextKeyView=key
-        settingsLayoutFrames=content.subviews.map{($0,$0.frame)}
     }
+    var settingsHint:String {mock ? "离线预览：请勿输入真实密钥。" : "云端识别由阿里云百炼提供，录音保存在本机。"}
     // New recordings always use both capture lanes. Historical sessions keep their
     // original scope while being reviewed or resumed; reset only when starting anew.
     func prepareAutomaticCapture() {
@@ -296,24 +328,54 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
     }
     @objc func showSettings() {
         guard (child==nil || modelsPrepared),[.idle,.stopped,.failed,.ended].contains(phase.phase),window.attachedSheet==nil else {return}
-        editing = !stored;replacing=false;key.stringValue="";refreshSettings();window.beginSheet(sheet);sheet.makeFirstResponder(editing ? key : save)
+        editing = !stored;replacing=false;key.stringValue="";setupMessage.stringValue="";refreshSettings();refreshCodexRow();window.beginSheet(sheet);sheet.makeFirstResponder(editing ? key : save)
     }
+    /// Lays the rows out top-down. While a key is being entered, its row holds the field and a hint line,
+    /// and the footer offers 取消／保存密钥; otherwise the only footer button is 完成.
     func refreshSettings() {
         let enteringKey=editing || !stored
-        savedLabel.isHidden=enteringKey;keyLabel.isHidden = !enteringKey;key.isHidden = !enteringKey;change.isHidden = !stored || enteringKey
-        // Collapse the absent input row and shorten the sheet. Always derive
-        // frames from the editing layout, so repeated replacements never drift.
-        let reduction:CGFloat=enteringKey ? 0:60
-        sheet.setContentSize(NSSize(width:520,height:236-reduction))
-        for (view,baseline) in settingsLayoutFrames {
-            var frame=baseline
-            if baseline.minY>=157 {frame.origin.y-=reduction}
-            else if baseline.minY>=76 {frame.origin.y-=enteringKey ? 0:22}
-            view.frame=frame
-        }
-        savedLabel.needsDisplay=true;keyLabel.needsDisplay=true;sheet.contentView?.needsDisplay=true
+        savedLabel.isHidden=enteringKey;key.isHidden = !enteringKey;change.isHidden=enteringKey
+        setupMessage.isHidden = !enteringKey;settingsCancel?.isHidden = !enteringKey
+        if enteringKey && setupMessage.stringValue.isEmpty {setupMessage.stringValue=settingsHint}
         save.title=editing ? "保存密钥" : "完成";save.isEnabled = !editing || CredentialInput(raw:key.stringValue).issue==nil
-        setupMessage.stringValue=editing ? "" : "已保存";sheet.layoutIfNeeded()
+        guard !settingsRows.isEmpty else{return}
+        let width:CGFloat=520,inset:CGFloat=24,nameWidth:CGFloat=76,valueX=inset+nameWidth+12,buttonWidth:CGFloat=108,buttonX=width-inset-buttonWidth
+        let rowHeight:CGFloat=30,rowGap:CGFloat=10,hintHeight:CGFloat=17
+        let rows=settingsRows.filter{!$0.name.isHidden}
+        let height=20+CGFloat(rows.count)*rowHeight+CGFloat(rows.count-1)*rowGap+(enteringKey ? hintHeight+4:0)+24+28+20
+        sheet.setContentSize(NSSize(width:width,height:height))
+        var top=height-20
+        for row in rows {
+            let y=top-rowHeight
+            row.name.frame=NSRect(x:inset,y:y+5,width:nameWidth,height:20)
+            if row.name===keyLabel && enteringKey {
+                key.frame=NSRect(x:valueX,y:y,width:width-inset-valueX,height:rowHeight)
+                setupMessage.frame=NSRect(x:valueX,y:y-4-hintHeight,width:width-inset-valueX,height:hintHeight)
+                top=y-4-hintHeight-rowGap
+            } else {
+                row.value.frame=NSRect(x:valueX,y:y+5,width:buttonX-8-valueX,height:20)
+                row.button.frame=NSRect(x:buttonX,y:y+1,width:buttonWidth,height:28)
+                top=y-rowGap
+            }
+        }
+        save.frame=NSRect(x:width-inset-108,y:20,width:108,height:28)
+        settingsCancel?.frame=NSRect(x:width-inset-108-8-84,y:20,width:84,height:28)
+        settingsLayoutFrames=sheet.contentView!.subviews.map{($0,$0.frame)}
+        sheet.contentView?.needsDisplay=true;sheet.layoutIfNeeded()
+    }
+    /// The assistant row says whether Codex is there; checking runs `codex login status`, so it stays off the main thread.
+    func refreshCodexRow() {
+        guard !mock,!offlineQA,let state=settingsCodexState,let button=settingsCodexButton else{return}
+        DispatchQueue.global(qos:.userInitiated).async {
+            let status=FirstRunCodexProbe.status()
+            DispatchQueue.main.async {
+                switch status {
+                case .ready:state.stringValue="已连接 Codex，可查资料、旁听";button.isHidden=true
+                case .needsLogin:state.stringValue="Codex 已安装，还没登录";button.title="登录 Codex";button.isHidden=false
+                default:state.stringValue="提问用百炼；连上 Codex 还能查资料、旁听";button.title="连接 Codex";button.isHidden=false
+                }
+            }
+        }
     }
     func control(_ control:NSControl,textView:NSTextView,doCommandBy selector:Selector)->Bool {
         if control===key && selector==#selector(NSResponder.insertTab(_:)) {sheet.makeFirstResponder(settingsCancel);return true}
@@ -324,17 +386,22 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
         if handleWorkspaceTextChange(note) {return}
         let value=CredentialInput(raw:key.stringValue)
         save.isEnabled=value.issue==nil
-        setupMessage.stringValue=value.raw.isEmpty ? "" : value.issue ?? (value.trimmed ? "将移除首尾空白，\(value.count)个字符" : "已输入\(value.count)个字符")
+        setupMessage.stringValue=value.raw.isEmpty ? settingsHint : value.issue ?? (value.trimmed ? "将移除首尾空白，\(value.count)个字符" : "已输入\(value.count)个字符")
     }
-    @objc func changeKey() {editing=true;replacing=true;key.stringValue="";refreshSettings();sheet.makeFirstResponder(key)}
+    @objc func changeKey() {editing=true;replacing=true;key.stringValue="";setupMessage.stringValue="";refreshSettings();sheet.makeFirstResponder(key)}
     @objc func saveKey() {
         if !editing {dismissSettings();return}
         let value=CredentialInput(raw:key.stringValue);guard value.issue==nil else {setupMessage.stringValue=value.issue!;return}
         do {
             if mock {try vault.save(value.normalized);precondition(vault.bytes==Data(value.normalized.utf8))}
             else {guard authorized else {return};try Credential.save(value.normalized)}
-            key.stringValue="";editing=false;replacing=false;refreshSettings();clearMissingCredentialHint();setupMessage.stringValue="已保存";sheet.makeFirstResponder(save)
+            key.stringValue="";setupMessage.stringValue="";editing=false;replacing=false;refreshSettings();clearMissingCredentialHint();sheet.makeFirstResponder(save)
         } catch {setupMessage.stringValue=stored ? "没能更换密钥，原密钥仍可用。请重试。" : "没能保存密钥，请重试。"}
+    }
+    /// 取消 while replacing a saved key goes back to the saved row; with no key yet it closes the sheet.
+    @objc func cancelSettingsEdit() {
+        guard stored,editing else {dismissSettings();return}
+        editing=false;replacing=false;key.stringValue="";setupMessage.stringValue="";refreshSettings();sheet.makeFirstResponder(save)
     }
     @objc func dismissSettings() {key.stringValue="";window.endSheet(sheet);sheet.orderOut(nil)}
     @objc func selectFixture() {fixtureBoard.clearContents();fixtureBoard.setString(fixtures[fixture.indexOfSelectedItem],forType:.string);sheet.makeFirstResponder(key)}

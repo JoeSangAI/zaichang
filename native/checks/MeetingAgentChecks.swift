@@ -110,7 +110,7 @@ import SQLite3
         let data = overview["data"] as? [String: Any] ?? [:]
         try check(!((data["current_topic"] as? [String: Any])?["text"] as? String ?? "").isEmpty, "overview_has_current_topic")
         // Which group a point lands in is the model's call: these sentences read as decisions.
-        try check(["discussion_points", "decisions", "actions", "open_questions"].contains {
+        try check(["agenda", "decisions", "actions", "open_questions"].contains {
             !(data[$0] as? [[String: Any]] ?? []).isEmpty }, "overview_has_structured_points")
         try check((controller.state["messages"] as? [[String: Any]] ?? []).isEmpty, "overview_not_in_chat")
         try JSONSerialization.data(withJSONObject: controller.state, options: [.prettyPrinted, .sortedKeys]).write(to: directory.appendingPathComponent("overview-state.json"))

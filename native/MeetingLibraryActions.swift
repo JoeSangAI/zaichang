@@ -44,19 +44,16 @@ extension Delegate:NSMenuDelegate {
         let menu=NSMenu();menu.autoenablesItems=false;populateLibraryActions(menu)
         menu.popUp(positioning:nil,at:NSPoint(x:0,y:sender.bounds.maxY+4),in:sender)
     }
+    /// Right-clicking a meeting only deletes it (undo comes in the toast). Renaming is the title itself,
+    /// exports sit in the right panel's 「···」, and a recording without text offers 转写 on its page.
     func populateLibraryActions(_ menu:NSMenu) {
         menu.removeAllItems()
-        if let item=libraryMenuTarget {
-            let controller=libraryManagementController
-            for operation in MeetingLibraryOperation.visibleOperations {
-                if operation == .transcribe || operation == .meetingFiles || operation == .delete {menu.addItem(.separator())}
-                let entry=menu.addItem(withTitle:controller.title(operation)+(operation == .rename || operation == .renameAudio || operation == .delete ? "…":""),action:#selector(performLibraryManagementMenu(_:)),keyEquivalent:"");entry.target=self
-                entry.representedObject=["id":item.id,"operation":operation.rawValue]
-                entry.isEnabled=controller.enabled(operation,for:item)
-                entry.toolTip = !entry.isEnabled ? controller.disabledReason(operation,for:item):operation == .meetingFiles ? "一处打开本场可播放录音、转写原文和会议说明":operation == .transcribe ? "保留已有原文，只转写剩余录音；不会开始录音":nil
-            }
-            if controller.loadedID != item.id {let loading=menu.addItem(withTitle:"正在读取记录…",action:nil,keyEquivalent:"");loading.isEnabled=false}
-        }
+        guard let item=libraryMenuTarget else{return}
+        let controller=libraryManagementController
+        let entry=menu.addItem(withTitle:"删除",action:#selector(performLibraryManagementMenu(_:)),keyEquivalent:"");entry.target=self
+        entry.representedObject=["id":item.id,"operation":MeetingLibraryOperation.delete.rawValue]
+        entry.isEnabled=controller.enabled(.delete,for:item)
+        entry.toolTip = entry.isEnabled ? nil:controller.disabledReason(.delete,for:item)
     }
     func menuNeedsUpdate(_ menu:NSMenu) {
         guard menu===libraryTable?.menu else{return}

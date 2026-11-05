@@ -54,7 +54,7 @@
    codex login status
    ```
 
-   没装 CLI 时按 [官方安装文档](https://developers.openai.com/codex/cli/) 安装。未登录时，请用户**自己在终端运行 `codex login`** 并完成登录。agent 不代登、不索要密码或令牌。用户选择暂不使用 Codex 时，录音、转写、概览、导出和向助理提问都可以用（提问由百炼依据本场发言回答），明确标注旁听和查资料尚未就绪；以后可在设置里点「Codex…」连接。
+   没装 CLI 时按 [官方安装文档](https://developers.openai.com/codex/cli/) 安装。未登录时，请用户**自己在终端运行 `codex login`** 并完成登录。agent 不代登、不索要密码或令牌。用户选择暂不使用 Codex 时，录音、转写、概览、导出和向助理提问都可以用（提问由百炼依据本场发言回答），明确标注旁听和查资料尚未就绪；以后可在设置里点「连接 Codex」。
 
 6. 登录后验证本机连接：
 

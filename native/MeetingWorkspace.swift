@@ -98,7 +98,9 @@ extension Delegate {
     // its visible document still follows the real workspace interaction mode.
     var documentIsPreview:Bool {(workspaceOwner ?? self).previewRenderOnly}
     func buildWorkspace() {
-        window=NSWindow(contentRect:NSRect(x:0,y:0,width:1280,height:820),styleMask:[.titled,.closable,.miniaturizable,.resizable],backing:.buffered,defer:false)
+        window=NSWindow(contentRect:NSRect(x:0,y:0,width:1280,height:820),styleMask:[.titled,.closable,.miniaturizable,.resizable,.fullSizeContentView],backing:.buffered,defer:false)
+        // The side columns run up under a thin, transparent title bar row (like Notes or Mail): the toggles sit on them, not on an empty band.
+        window.titlebarSeparatorStyle = .none
         window.isReleasedWhenClosed=false;window.title="在场";window.minSize=NSSize(width:640,height:480);window.backgroundColor = MeetingVisualStyle.surface;window.titleVisibility = .hidden;window.titlebarAppearsTransparent=true;window.delegate=self
         let root=window.contentView!
         sidebar=NSView();sidebar.translatesAutoresizingMaskIntoConstraints=false;root.addSubview(sidebar)
@@ -106,13 +108,13 @@ extension Delegate {
         documentHost=MeetingDocumentView();documentHost.translatesAutoresizingMaskIntoConstraints=false;root.addSubview(documentHost)
         NSLayoutConstraint.activate([sidebar.leadingAnchor.constraint(equalTo:root.leadingAnchor),sidebar.topAnchor.constraint(equalTo:root.topAnchor),sidebar.bottomAnchor.constraint(equalTo:root.bottomAnchor),sidebarWidth,documentHost.leadingAnchor.constraint(equalTo:sidebar.trailingAnchor),documentHost.trailingAnchor.constraint(equalTo:root.trailingAnchor),documentHost.topAnchor.constraint(equalTo:root.topAnchor),documentHost.bottomAnchor.constraint(equalTo:root.bottomAnchor)])
         let background=MeetingSidebarSurface();background.translatesAutoresizingMaskIntoConstraints=false;sidebar.addSubview(background);pin(background,to:sidebar)
-        let column=stack(.vertical,spacing:10);column.alignment = .leading;column.distribution = .fill;column.translatesAutoresizingMaskIntoConstraints=false;sidebar.addSubview(column)
-        NSLayoutConstraint.activate([column.leadingAnchor.constraint(equalTo:sidebar.leadingAnchor,constant:14),column.trailingAnchor.constraint(equalTo:sidebar.trailingAnchor,constant:-14),column.topAnchor.constraint(equalTo:sidebar.topAnchor,constant:14),column.bottomAnchor.constraint(equalTo:sidebar.bottomAnchor,constant:-14)])
+        let column=stack(.vertical,spacing:10);sidebarColumn=column;column.alignment = .leading;column.distribution = .fill;column.translatesAutoresizingMaskIntoConstraints=false;sidebar.addSubview(column)
+        NSLayoutConstraint.activate([column.leadingAnchor.constraint(equalTo:sidebar.leadingAnchor,constant:14),column.trailingAnchor.constraint(equalTo:sidebar.trailingAnchor,constant:-14),column.topAnchor.constraint(equalTo:sidebar.topAnchor,constant:MeetingVisualStyle.chromeHeight+8),column.bottomAnchor.constraint(equalTo:sidebar.bottomAnchor,constant:-14)])
         let new=ImmediateButton(title:"新会议",target:self,action:#selector(beginNewMeeting));new.bezelStyle = .rounded;new.controlSize = .regular;new.font = .systemFont(ofSize:12,weight:.medium);new.image=NSImage(systemSymbolName:"plus",accessibilityDescription:nil)?.withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize:13,weight:.medium));new.imagePosition = .imageLeading;new.heightAnchor.constraint(equalToConstant:32).isActive=true;new.setAccessibilityLabel("新会议，Command N");new.alignment = .left
         let shortcut=label("⌘N",size:12);shortcut.textColor=MeetingVisualStyle.muted;shortcut.translatesAutoresizingMaskIntoConstraints=false;new.addSubview(shortcut)
         NSLayoutConstraint.activate([shortcut.trailingAnchor.constraint(equalTo:new.trailingAnchor,constant:-10),shortcut.centerYAnchor.constraint(equalTo:new.centerYAnchor)])
         newButton=new;column.addArrangedSubview(new)
-        librarySearch=NSSearchField();librarySearch.placeholderString="搜索会议";librarySearch.delegate=self;librarySearch.controlSize = .regular;librarySearch.focusRingType = .default;librarySearch.setAccessibilityLabel("搜索会议标题和原文");librarySearch.isHidden=true;column.addArrangedSubview(librarySearch)
+        librarySearch=NSSearchField();librarySearch.placeholderString="搜索会议和原文";librarySearch.delegate=self;librarySearch.controlSize = .regular;librarySearch.focusRingType = .default;librarySearch.setAccessibilityLabel("搜索会议标题和原文");librarySearch.isHidden=true;column.addArrangedSubview(librarySearch)
         liveReturn=ImmediateButton(title:"返回当前记录",target:self,action:#selector(returnToCurrent));liveReturn.bezelStyle = .inline;column.addArrangedSubview(liveReturn)
         libraryStatus=label("会议记录",size:11,weight:.semibold);libraryStatus.textColor = MeetingVisualStyle.muted;libraryStatus.lineBreakMode = .byTruncatingTail
         libraryRetryButton=ImmediateButton(title:"重试",target:self,action:#selector(retryLibraryLoad));libraryRetryButton.bezelStyle = .inline;libraryRetryButton.controlSize = .small;libraryRetryButton.isHidden=true
@@ -126,27 +128,24 @@ extension Delegate {
         divider.widthProvider={ [weak self] in self?.sidebarWidth.constant ?? MeetingSidebarSizing.defaultWidth }
         divider.changeWidth={ [weak self] width,persist in self?.resizeSidebar(to:width,persist:persist) }
         NSLayoutConstraint.activate([divider.centerXAnchor.constraint(equalTo:sidebar.trailingAnchor),divider.widthAnchor.constraint(equalToConstant:8),divider.topAnchor.constraint(equalTo:root.topAnchor),divider.bottomAnchor.constraint(equalTo:root.bottomAnchor)])
-        let toolbar=NSToolbar(identifier:"meeting-workspace");toolbar.delegate=self;toolbar.displayMode = .iconOnly;window.toolbarStyle = .unified;window.toolbar=toolbar
+        let toolbar=NSToolbar(identifier:"meeting-workspace");toolbar.delegate=self;toolbar.displayMode = .iconOnly;window.toolbarStyle = .unifiedCompact;window.toolbar=toolbar
         updateWorkspacePresentation()
     }
     func pin(_ child:NSView,to parent:NSView) {child.translatesAutoresizingMaskIntoConstraints=false;NSLayoutConstraint.activate([child.leadingAnchor.constraint(equalTo:parent.leadingAnchor),child.trailingAnchor.constraint(equalTo:parent.trailingAnchor),child.topAnchor.constraint(equalTo:parent.topAnchor),child.bottomAnchor.constraint(equalTo:parent.bottomAnchor)])}
     func makeDocumentView()->NSView {
         let view=MeetingDocumentView();view.translatesAutoresizingMaskIntoConstraints=false
         let main=stack(.vertical,spacing:12);main.alignment = .leading;main.distribution = .fill;main.translatesAutoresizingMaskIntoConstraints=false;view.addSubview(main)
-        NSLayoutConstraint.activate([main.leadingAnchor.constraint(equalTo:view.leadingAnchor,constant:26),main.trailingAnchor.constraint(equalTo:view.trailingAnchor,constant:-26),main.topAnchor.constraint(equalTo:view.topAnchor,constant:22),main.bottomAnchor.constraint(equalTo:view.bottomAnchor,constant:-12)])
+        NSLayoutConstraint.activate([main.leadingAnchor.constraint(equalTo:view.leadingAnchor,constant:26),main.trailingAnchor.constraint(equalTo:view.trailingAnchor,constant:-26),main.topAnchor.constraint(equalTo:view.topAnchor,constant:MeetingVisualStyle.chromeHeight+14),main.bottomAnchor.constraint(equalTo:view.bottomAnchor,constant:-12)])
         let header=stack(.horizontal,spacing:16);header.alignment = .centerY;header.distribution = .fill
         let words=stack(.vertical,spacing:7);words.alignment = .leading;words.distribution = .fill;words.setContentHuggingPriority(.defaultLow,for:.horizontal)
         let eyebrow=label("新会议 · 实时转写",size:13);eyebrow.textColor=MeetingVisualStyle.muted;meetingEyebrow=eyebrow;words.addArrangedSubview(eyebrow)
         meetingTitleField=FittingTitleField();meetingTitleField.isBordered=false;meetingTitleField.drawsBackground=false;meetingTitleField.focusRingType = .none;meetingTitleField.font = MeetingVisualStyle.titleFont();meetingTitleField.textColor=MeetingVisualStyle.ink;meetingTitleField.stringValue=meetingTitle;meetingTitleField.placeholderString="会议名称";meetingTitleField.delegate=self;meetingTitleField.lineBreakMode = .byTruncatingTail;meetingTitleField.setAccessibilityLabel("会议名称")
-        let more=ImmediateButton(title:"",target:self,action:#selector(showMeetingMore(_:)));more.bezelStyle = .inline;more.isBordered=false
-        more.image=NSImage(systemSymbolName:"ellipsis",accessibilityDescription:"这场会议的操作");more.contentTintColor=MeetingVisualStyle.muted;more.setAccessibilityLabel("这场会议的操作")
-        more.symbolConfiguration=NSImage.SymbolConfiguration(pointSize:16,weight:.semibold)
-        more.setContentHuggingPriority(.required,for:.horizontal);more.setContentCompressionResistancePriority(.required,for:.horizontal);meetingMoreButton=more
-        // The title takes its own width, so "…" sits right after it; a long title truncates before pushing it out.
+        // Renaming is clicking the title; it shades under the pointer so it reads as editable.
+        meetingTitleField.toolTip="点一下改名"
         meetingTitleField.setContentHuggingPriority(.defaultHigh,for:.horizontal);meetingTitleField.setContentCompressionResistancePriority(.defaultLow,for:.horizontal)
         let titleEnd=NSView();titleEnd.setContentHuggingPriority(.defaultLow,for:.horizontal)
         let titleRow=stack(.horizontal,spacing:4);titleRow.alignment = .centerY;titleRow.distribution = .fill
-        for view in [meetingTitleField!,more,titleEnd] {titleRow.addArrangedSubview(view)}
+        for view in [meetingTitleField!,titleEnd] {titleRow.addArrangedSubview(view)}
         words.addArrangedSubview(titleRow);titleRow.widthAnchor.constraint(equalTo:words.widthAnchor).isActive=true
         heading=label("准备就绪",size:12);heading.textColor = MeetingVisualStyle.muted;heading.lineBreakMode = .byTruncatingTail;heading.setContentCompressionResistancePriority(.defaultLow,for:.horizontal);header.addArrangedSubview(words)
         action=RecordingPrimaryButton(title:"开始录音",target:self,action:#selector(primaryWorkspaceAction));action.bezelStyle = .rounded;action.controlSize = .large;action.isBordered=false;action.wantsLayer=true;action.layer?.cornerRadius=12;action.widthAnchor.constraint(equalToConstant:34).isActive=true;action.heightAnchor.constraint(equalToConstant:34).isActive=true;action.font = .systemFont(ofSize:14,weight:.semibold);action.setAccessibilityLabel("开始录音或继续录音");(action as? RecordingPrimaryButton)?.circularTransport=true
@@ -155,8 +154,7 @@ extension Delegate {
         let tools=stack(.horizontal,spacing:10);tools.distribution = .fill;tools.alignment = .centerY
         let strip=stack(.horizontal,spacing:2);strip.alignment = .centerY;strip.isHidden=true;strip.setContentCompressionResistancePriority(.defaultLow,for:.horizontal);speakerStrip=strip;tools.addArrangedSubview(strip)
         let statusSpacer=NSView();statusSpacer.setContentHuggingPriority(.defaultLow,for:.horizontal);tools.addArrangedSubview(statusSpacer)
-        // The switch keeps the translation state; it is turned on and off from the title's menu.
-        let translation=makeTranslationControl();translation.isHidden=true;tools.addArrangedSubview(translation)
+        tools.addArrangedSubview(makeTranslationControl())
         timelineToggle=ImmediateButton(checkboxWithTitle:"人物时间线",target:self,action:#selector(toggleSpeakerRanges));timelineToggle.controlSize = .small;timelineToggle.isHidden=true
         let peopleButton=ImmediateButton(title:"发言人",target:self,action:#selector(showSpeakerReview));speakerReviewButton=peopleButton;peopleButton.bezelStyle = .inline;peopleButton.font = .systemFont(ofSize:12);peopleButton.controlSize = .small;peopleButton.contentTintColor=MeetingVisualStyle.ink;peopleButton.image=NSImage(systemSymbolName:"person.2",accessibilityDescription:"按发言人查看与修改");peopleButton.imagePosition = .imageLeading;peopleButton.setAccessibilityLabel("按发言人查看与修改")
         let voice=ImmediateButton(title:"",target:self,action:#selector(showQuickVoiceConfirmation));voice.bezelStyle = .inline;voice.controlSize = .small;voice.contentTintColor=MeetingVisualStyle.muted;voice.isHidden=true;voice.lineBreakMode = .byTruncatingTail;voice.widthAnchor.constraint(lessThanOrEqualToConstant:180).isActive=true;voiceCandidateButton=voice;tools.addArrangedSubview(voice)
@@ -201,10 +199,9 @@ extension Delegate {
     }
     func updateWorkspacePresentation() {
         guard documentHost != nil else{return}
-        refreshMeetingNotes();agentController?.layout()
+        refreshMeetingNotes();agentController?.layout();(workspaceOwner ?? self).refreshPanelHeader()
         if meetingTitleField.currentEditor()==nil {meetingTitleField.stringValue=meetingTitle}
         meetingTitleField.isEditable = !(workspaceOwner ?? self).meetingDeletionBusy && (currentCacheID != nil || !sequence.isEmpty)
-        meetingMoreButton?.isHidden=currentCacheID==nil
         let owner=isHistoryReader ? (workspaceOwner ?? self):self
         let state=owner.phase.phase
         switch state {
@@ -357,6 +354,20 @@ extension Delegate {
     }
     @objc func showLibrarySearch(){sidebarManualVisible=true;librarySearch.isHidden=false;layoutWorkspace();window.makeFirstResponder(librarySearch)}
     @objc func showDocumentSearch(){let document=displayedDocument;document.cancelTranscriptReadingRestore();document.window.makeFirstResponder(document.output);let command=NSMenuItem();command.tag=Int(NSFindPanelAction.showFindPanel.rawValue);document.output.performFindPanelAction(command)}
+    /// The update pill, when there is one, in the title bar row right after the sidebar toggle.
+    func placeUpdatePill(_ pill:NSView)->NSToolbarItem? {
+        guard let toolbar=window.toolbar else{return nil}
+        updatePillView=pill
+        toolbar.insertItem(withItemIdentifier:NSToolbarItem.Identifier("update"),at:min(1,toolbar.items.count))
+        return toolbar.items.first{$0.itemIdentifier.rawValue=="update"}
+    }
+    /// A meeting opened from a sidebar search lands on its first match, with the find bar holding the same words.
+    func revealLibraryQuery(){
+        let query=librarySearch.stringValue.trimmingCharacters(in:.whitespacesAndNewlines);guard !query.isEmpty else{return}
+        let board=NSPasteboard(name:.find);board.clearContents();board.setString(query,forType:.string)
+        showDocumentSearch()
+        let next=NSMenuItem();next.tag=Int(NSFindPanelAction.next.rawValue);displayedDocument.output.performFindPanelAction(next)
+    }
     @objc func nameVisibleSegment(){displayedDocument.nameSegment()}
     @objc func undoVisibleName(){displayedDocument.undoName()}
     @objc func exportVisibleDocument(){displayedDocument.exportTranscript()}
@@ -548,6 +559,7 @@ extension Delegate {
             reader.meetingTitle=item.displayTitle;reader.updateUI();let ownWindow=reader.window;reader.window=self.window
             self.historyReader?.agentController?.suspend();self.historyReader?.confirmationController?.cancelQuickInteraction();self.historyReader?.savedVoiceRecognitionJob.cancel();self.historyReader?.detachSavedCoarseRefinement();self.historyReader?.currentDocument.removeFromSuperview();self.historyReader=reader;self.historyReaderShell=ownWindow;self.currentDocument.isHidden=true
             reader.currentDocument.removeFromSuperview();self.documentHost.addSubview(reader.currentDocument);self.pin(reader.currentDocument,to:self.documentHost);self.documentHost.layoutSubtreeIfNeeded();reader.resizeTranscript();reader.renderText();reader.agentController?.layout();self.updateWorkspacePresentation();self.renderLibraryList();self.installMenus()
+            DispatchQueue.main.async{[weak self] in self?.revealLibraryQuery()}
         }catch{self.libraryStatus.stringValue="无法打开会议，请重试"}}
         }
     }
@@ -654,42 +666,19 @@ enum MeetingLibraryDate {
     }
 }
 
-extension Delegate {
-    /// Everything about this one meeting, in one place beside its title. Archiving appears only where it is configured.
-    @objc func showMeetingMore(_ sender:NSButton) {
-        let document=displayedDocument,menu=NSMenu();menu.autoenablesItems=false
-        func add(_ title:String,_ action:Selector,_ target:AnyObject,enabled:Bool=true)->NSMenuItem {
-            let item=menu.addItem(withTitle:title,action:action,keyEquivalent:"");item.target=target;item.isEnabled=enabled;return item
-        }
-        _=add("搜索原文",#selector(showDocumentSearch),self)
-        add("中文翻译",#selector(toggleTranslationFromMenu),self,enabled:translationSwitch?.isEnabled==true).state=translationService.enabled ? .on:.off
-        _=add("会议详情",#selector(showWorkspaceDetails),self)
-        _=add("重命名…",#selector(beginMeetingRename),self,enabled:meetingTitleField.isEditable)
-        if RuntimeConfiguration.archiveEnabled {_=add("归档到项目…",#selector(openMeetingArchive),document,enabled:document.meetingArchiveEligible)}
-        menu.addItem(.separator())
-        _=add("删除",#selector(deleteDisplayedMeeting),self,enabled:displayedMeetingItem != nil)
-        menu.popUp(positioning:nil,at:NSPoint(x:0,y:sender.bounds.height+4),in:sender)
-    }
-    @objc func toggleTranslationFromMenu() {
-        guard let toggle=translationSwitch else{return}
-        toggle.state=toggle.state == .on ? .off:.on;toggleTranslation()
-    }
-    @objc func beginMeetingRename() {
-        guard meetingTitleField.isEditable,window.makeFirstResponder(meetingTitleField) else{return}
-        meetingTitleField.currentEditor()?.selectAll(nil)
-    }
-    var displayedMeetingItem:CachedMeeting? {
-        let owner=workspaceOwner ?? self,id=displayedDocument.currentCacheID
-        return owner.libraryVisible.first{$0.id==id} ?? owner.selectedLibraryManagementItem.flatMap{$0.id==id ? $0:nil}
-    }
-    @objc func deleteDisplayedMeeting() {
-        guard let item=displayedMeetingItem else{return}
-        (workspaceOwner ?? self).requestDeleteMeeting(item)
-    }
-}
-
-/// An editable title that is only as wide as its words, so the "…" after it stays beside it.
+/// An editable title that is only as wide as its words, so its hover shade hugs the words.
 final class FittingTitleField:NSTextField {
+    private var hovering=false {didSet {needsDisplay=true}}
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas();trackingAreas.forEach{removeTrackingArea($0)}
+        addTrackingArea(NSTrackingArea(rect:.zero,options:[.mouseEnteredAndExited,.activeInKeyWindow,.inVisibleRect],owner:self))
+    }
+    override func mouseEntered(with event:NSEvent) {hovering=isEditable}
+    override func mouseExited(with event:NSEvent) {hovering=false}
+    override func draw(_ dirtyRect:NSRect) {
+        if hovering && currentEditor()==nil {MeetingVisualStyle.quietFill.setFill();NSBezierPath(roundedRect:bounds,xRadius:6,yRadius:6).fill()}
+        super.draw(dirtyRect)
+    }
     override var intrinsicContentSize:NSSize {
         let words=currentEditor()?.string ?? stringValue,shown=words.isEmpty ? (placeholderString ?? ""):words
         return NSSize(width:ceil(shown.size(withAttributes:[.font:font ?? NSFont.systemFont(ofSize:24)]).width)+8,height:super.intrinsicContentSize.height)
