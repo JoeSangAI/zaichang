@@ -548,6 +548,38 @@ class ListenerTests(ListenerHarness):
         result = json.loads((await asyncio.wait_for(waiting, .5))['contentItems'][0]['text'])
         self.assertEqual(result['speech'], ['1:05 主持人：嗯对。' + self.WORDS])
 
+    async def test_called_by_name_answers_before_the_batch(self):
+        self.service.wait_batch_seconds = 5
+        with mock.patch('assistant_runtime.assistant_name', return_value='小满'):
+            await self.listen(); current = self.service.revisions['w']
+            waiting = asyncio.create_task(self.tool('meeting_wait', {'after_revision': current, 'max_wait_seconds': 5}))
+            await asyncio.sleep(.005); await self.speak('小满，把刚才那个创意做成海报')
+            result = json.loads((await asyncio.wait_for(waiting, .5))['contentItems'][0]['text'])
+        self.assertEqual(result['speech'], ['1:05 主持人：小满，把刚才那个创意做成海报'])
+        wake = (await self.service._snapshot('w', announce=False))['wake']
+        self.assertEqual((wake['segment_id'], wake['spelling']), ('next', '小满'))
+
+    async def test_bare_name_waits_briefly_for_the_request(self):
+        self.service.wait_batch_seconds = 5
+        with mock.patch('assistant_runtime.assistant_name', return_value='小满'), \
+                mock.patch('assistant_runtime.WAKE_FOLLOW_SECONDS', .3):
+            await self.listen(); current = self.service.revisions['w']
+            waiting = asyncio.create_task(self.tool('meeting_wait', {'after_revision': current, 'max_wait_seconds': 5}))
+            await asyncio.sleep(.005); await self.speak('小满？')
+            await asyncio.sleep(.1); self.assertFalse(waiting.done())
+            result = json.loads((await asyncio.wait_for(waiting, .6))['contentItems'][0]['text'])
+        self.assertEqual(result['speech'], ['1:05 主持人：小满？'])
+
+    def test_name_spellings_include_registered_mishearings(self):
+        import assistant_runtime
+        owners = [{'rows': [{'term': '小满', 'aliases': [], 'misheard': ['小曼', '晓满']}]}]
+        with mock.patch('assistant_runtime.assistant_name', return_value='小满'), \
+                mock.patch('shared_terms.compiled_owners', return_value=owners):
+            spellings = assistant_runtime._assistant_spellings()
+        self.assertEqual(set(spellings), {'小满', '小曼', '晓满'})
+        self.assertEqual(assistant_runtime._called('那个小曼，查一下', spellings), ('小曼', 4))
+        self.assertIsNone(assistant_runtime._called('我们先确认本周要验证的三件事', spellings))
+
     async def test_background_rides_along_only_when_changed(self):
         await self.start_work()
         listener = self.row()['id']

@@ -83,6 +83,35 @@ TURN_STALL_SECONDS = 20 * 60
 LISTEN_BATCH_SECONDS = 60.0
 LISTEN_MIN_BATCH_CHARS = 60
 LISTEN_MAX_BATCH_SECONDS = 180.0
+# Called by name, the listener answers at once instead of waiting out the batch;
+# a bare "小满" waits this long for the request that follows it.
+WAKE_FOLLOW_SECONDS = 4.0
+WAKE_MIN_REQUEST_CHARS = 4
+
+
+def _assistant_spellings() -> list[str]:
+    """The assistant's name and the ways the term tables say it is misheard."""
+    name = assistant_name()
+    spellings = {name}
+    try:
+        import shared_terms
+        for owner in shared_terms.compiled_owners():
+            for row in owner.get("rows", []):
+                if name.casefold() in (w.casefold() for w in [row["term"], *row.get("aliases", [])]):
+                    spellings.update(w for w in [*row.get("aliases", []), *row.get("misheard", [])] if w)
+    except Exception:
+        pass
+    return sorted(spellings, key=len, reverse=True)
+
+
+def _called(text: str, spellings: list[str]) -> tuple[str, int] | None:
+    """The spelling of the assistant's name in this text and where its request begins."""
+    folded = text.casefold()
+    for spelling in spellings:
+        at = folded.find(spelling.casefold())
+        if at >= 0:
+            return text[at:at + len(spelling)], at + len(spelling)
+    return None
 
 
 def _clock_text(seconds) -> str:
@@ -413,6 +442,9 @@ class AssistantRuntime:
         self.server_calls: dict[str, int] = {}
         self.wait_batch_seconds = LISTEN_BATCH_SECONDS
         self.background_seen: dict[str, str] = {}
+        # The latest time the listener heard its name, for the panel to show.
+        self.wakes: dict[str, dict] = {}
+        self.wake_serial = 0
         self._closed = False
         self._recover_persisted_work()
 
@@ -503,6 +535,11 @@ class AssistantRuntime:
                  "requests": [r["display"] for r in self.pending_requests.values() if r["workspace_id"] == workspace_id],
                  "listening": bool(conversation and self.turn_modes.get(conversation["id"]) == "listen"
                                    and conversation["status"] == "running"),
+                 "wake": self.wakes.get(workspace_id),
+                 # The latest background task to end, so the panel can say it is done.
+                 "finished": next(({"id": r["id"], "title": r["title"], "status": r["status"]}
+                                   for r in reversed(self.store.tasks(workspace_id))
+                                   if r["kind"] == "work" and r["lane"] != "request" and r["status"] in TERMINAL_STATUSES), None),
                  "work": [{"id": r["id"], "title": r["title"], "status": r["status"], "origin": r["origin"],
                            "activity": self.activities.get(r["id"], "")}
                           for r in self.store.tasks(workspace_id)
@@ -1342,6 +1379,8 @@ class AssistantRuntime:
     def _listener_prompt():
         name = assistant_name()
         return (f"你是用户的助理，名字叫「{name}」，在在场中负责【旁听】。会上有人叫「{name}」或“助理”，就是在对你说话。"
+                "被叫到时 meeting_wait 会马上返回：先判断是不是在叫你；是的话立刻用 say 回一句「收到：」加你要做的事（十来个字），"
+                "要动手的用 start_task 交给后台，结果会显示在用户的侧栏；只是提到你、不是在叫你，就不出声。"
                 "旁听是用户主动打开的：他在开会，希望你像坐在旁边、懂他和他项目的同事一样，在有用的时候主动开口。"
                 "旁听时用 meeting_* 工具听会，可以读资料、查证，但不改文件、不对外发消息、不做外部动作。"
                 "say 是你对用户开口的唯一方式，内容直接显示在他开会时看的侧栏里；你的思考和工具调用他看不到，不 say 他就什么也收不到。"
@@ -1756,7 +1795,7 @@ class AssistantRuntime:
                 tool("meeting_search", "在当前定稿中查找原文。", {"query": {"type": "string"}})]
         if work:
             return read
-        return [tool("meeting_wait", "等待新定稿；新发言约攒一分钟（内容太少会多等）或暂停/结束后返回，后台任务完成时也会返回。revision为更新游标，初始0。speech每行为“时间 说话人：原文”；background仅在后台任务有变化时出现。", {"after_revision": {"type": "integer", "minimum": 0}, "max_wait_seconds": {"type": "number", "minimum": 0}}),
+        return [tool("meeting_wait", "等待新定稿；新发言约攒一分钟（内容太少会多等）或暂停/结束后返回，有人提到你的名字时马上返回，后台任务完成时也会返回。revision为更新游标，初始0。speech每行为“时间 说话人：原文”；background仅在后台任务有变化时出现。", {"after_revision": {"type": "integer", "minimum": 0}, "max_wait_seconds": {"type": "number", "minimum": 0}}),
                 *read,
                 tool("say", "对用户说话，内容直接显示在用户开会时看的助理侧栏。", {"text": {"type": "string"}}),
                 tool("start_task", "把需要动手的事交给后台单独完成，不占用旁听。title是给用户看的短标题；goal写清要做什么、为什么、交付什么，以及需要的会议背景。完成后结果自动显示在用户的助理窗口。", {"title": {"type": "string"}, "goal": {"type": "string"}})]
@@ -1978,6 +2017,22 @@ class AssistantRuntime:
     def _meeting_delta(self, workspace_id, after):
         return {**self._meeting_data(workspace_id), "speech": [_speech_line(s) for s in self._unseen_segments(workspace_id, after)]}
 
+    def _wake(self, workspace_id, after, spellings):
+        """Record the first new mention of the assistant's name; True once its request is heard."""
+        for segment in self._unseen_segments(workspace_id, after):
+            text = str(segment.get("text") or "")
+            found = _called(text, spellings)
+            if found is None or (self.wakes.get(workspace_id) or {}).get("segment_id") == str(segment.get("id")):
+                continue
+            spelling, end = found
+            self.wake_serial += 1
+            self.wakes[workspace_id] = {"segment_id": str(segment.get("id")), "spelling": spelling, "serial": self.wake_serial}
+            rest = "".join(c for c in text[end:] if c.isalnum())
+            later = any(str(s.get("text") or "").strip() for s in self._unseen_segments(workspace_id, after)
+                        if float(s.get("start") or 0) > float(segment.get("start") or 0))
+            return len(rest) >= WAKE_MIN_REQUEST_CHARS or later
+        return None
+
     def _batch_too_small(self, workspace_id, after, first_new_at, now):
         """A few words rarely change the judgement; keep the batch open, bounded."""
         chars = sum(len(str(s.get("text") or "")) for s in self._unseen_segments(workspace_id, after))
@@ -2014,12 +2069,19 @@ class AssistantRuntime:
         loop = asyncio.get_running_loop(); deadline = loop.time() + maximum; batch_end = None; first_new = None
         event = self.context_events.setdefault(workspace_id, asyncio.Event())
         work_revision = self.work_revisions.get(workspace_id, 0)
+        spellings = _assistant_spellings(); wake_end = None
         while True:
             event.clear()
             data = self._meeting_data(workspace_id)
             if data["revision"] > after and batch_end is None:
                 first_new = loop.time(); batch_end = first_new + self.wait_batch_seconds
-            if batch_end is not None and loop.time() >= batch_end and loop.time() < deadline \
+            if wake_end is None and data["revision"] > after:
+                wake = self._wake(workspace_id, after, spellings)
+                if wake is not None:
+                    wake_end = loop.time() + (0 if wake else WAKE_FOLLOW_SECONDS)
+                    batch_end = min(batch_end, wake_end)
+                    await self._snapshot(workspace_id)
+            if wake_end is None and batch_end is not None and loop.time() >= batch_end and loop.time() < deadline \
                     and self._batch_too_small(workspace_id, after, first_new, loop.time()):
                 batch_end = loop.time() + self.wait_batch_seconds
             if (data["paused"] or not data["listening"] or self.store.task(task_id)["status"] != "running"

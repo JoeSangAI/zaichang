@@ -498,6 +498,20 @@ def _matched_terms(unit: dict, rows: list[dict]) -> list[dict]:
                   key=lambda r: r["term"])
 
 
+def _substituted(original: str, proposed: str, terms: list[dict]) -> bool:
+    """Whether letters or digits were replaced or added, after registered spellings
+    (aliases and known mishearings) are mapped to their standard form on both sides."""
+    def normalize(text):
+        for row in terms:
+            for spelling in sorted([*row.get("aliases", []), *row.get("misheard", [])], key=len, reverse=True):
+                if spelling:
+                    text = re.sub(re.escape(spelling), lambda _: row["term"], text, flags=re.IGNORECASE)
+        return "".join(c for c in text if c.isalnum()).casefold()
+    before, after = normalize(original), normalize(proposed)
+    return any(tag in ("replace", "insert") for tag, *_ in
+               difflib.SequenceMatcher(None, before, after, autojunk=False).get_opcodes())
+
+
 def _safe_text(unit: dict, proposed: str, terms: list[dict]) -> str:
     """Fail closed on obvious fact changes; this is not a semantic proof."""
     original = unit["text"]
@@ -550,7 +564,9 @@ def _safe_text(unit: dict, proposed: str, terms: list[dict]) -> str:
             return original
         if difflib.SequenceMatcher(None, compact(expanded).casefold(), after.casefold(), autojunk=False).ratio() < 0.45:
             return original
-        return proposed
+        # Raw words over a guess: beyond registered spellings, a long
+        # sentence may only lose fillers and repeats; no word is swapped or added.
+        return original if _substituted(original, proposed, terms) else proposed
     if before == after:
         return proposed
     # Short phrases accept exact registered mistakes only, never phonetic guesses

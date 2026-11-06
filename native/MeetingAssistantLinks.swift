@@ -217,9 +217,9 @@ final class MeetingAssistantFileRow: NSStackView {
                     preview.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
                     preview.setContentCompressionResistancePriority(.defaultLow, for: .vertical)
                     preview.setContentHuggingPriority(.defaultLow, for: .vertical)
-                    preview.setAccessibilityLabel("图片预览：\(label)，点击打开原图")
+                    preview.setAccessibilityLabel("图片预览：\(label)，点击全屏查看")
                     preview.menu = self.referenceMenu()
-                    preview.addGestureRecognizer(NSClickGestureRecognizer(target: self, action: #selector(self.openReference)))
+                    preview.addGestureRecognizer(NSClickGestureRecognizer(target: self, action: #selector(self.presentReference)))
                     self.insertArrangedSubview(preview, at: 1)
                     preview.widthAnchor.constraint(lessThanOrEqualTo: self.widthAnchor).isActive = true
                     let fill = preview.widthAnchor.constraint(equalTo: self.widthAnchor)
@@ -274,8 +274,41 @@ final class MeetingAssistantFileRow: NSStackView {
             self?.onOpened?(error)
         }
     }
+    /// Full screen on the window's own display, ready to show the room; any click or key closes it.
+    @objc private func presentReference() {
+        guard let image = NSImage(contentsOf: referenceURL) else { openReference(); return }
+        MeetingImagePresenter.show(image, on: window?.screen)
+    }
     @objc private func revealReference() {
         guard FileManager.default.fileExists(atPath: referenceURL.path) else { openReference(); return }
         NSWorkspace.shared.activateFileViewerSelecting([referenceURL])
+    }
+}
+
+
+/// A borderless black window over one display with a single image, scaled to fit.
+final class MeetingImagePresenter: NSWindow {
+    private static var current: MeetingImagePresenter?
+    static func show(_ image: NSImage, on screen: NSScreen?) {
+        current?.dismiss()
+        guard let screen = screen ?? NSScreen.main else { return }
+        let presenter = MeetingImagePresenter(contentRect: screen.frame, styleMask: .borderless, backing: .buffered, defer: false)
+        presenter.level = .screenSaver; presenter.backgroundColor = .black; presenter.isReleasedWhenClosed = false
+        presenter.collectionBehavior = [.fullScreenAuxiliary, .canJoinAllSpaces]
+        let view = NSImageView(frame: NSRect(origin: .zero, size: screen.frame.size))
+        view.image = image; view.imageScaling = .scaleProportionallyUpOrDown; view.autoresizingMask = [.width, .height]
+        view.setAccessibilityLabel("全屏图片，点击或按任意键关闭")
+        presenter.contentView = view; presenter.alphaValue = 0
+        current = presenter
+        presenter.makeKeyAndOrderFront(nil)
+        NSAnimationContext.runAnimationGroup { $0.duration = 0.25; presenter.animator().alphaValue = 1 }
+    }
+    override var canBecomeKey: Bool { true }
+    override func mouseDown(with event: NSEvent) { dismiss() }
+    override func keyDown(with event: NSEvent) { dismiss() }
+    func dismiss() {
+        guard MeetingImagePresenter.current === self else { return }
+        MeetingImagePresenter.current = nil
+        NSAnimationContext.runAnimationGroup({ $0.duration = 0.2; animator().alphaValue = 0 }) { [weak self] in self?.orderOut(nil) }
     }
 }

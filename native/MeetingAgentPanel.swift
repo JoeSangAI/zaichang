@@ -52,6 +52,10 @@ final class MeetingAgentPanel: NSView {
     private let proactiveSwitch = MeetingTintedSwitch()
     private let proactiveLabel = NSTextField(labelWithString: "旁听已关闭")
     private let presenceCard = MeetingListeningCard()
+    /// What the presence card last saw, so a new name or a newly finished task shows once.
+    private var presenceWake: Int?, presenceFinished: String?
+    private var heardAt: Date?, finishedAt: Date?, finishedTitle = ""
+    private var presenceRefresh: DispatchWorkItem?
     private var workCards: [String: MeetingWorkCard] = [:]
     private let resizeHandle = MeetingAgentResizeHandle()
     private let composer = MeetingComposerTextView()
@@ -100,14 +104,54 @@ final class MeetingAgentPanel: NSView {
         proactiveSwitch.state = enabled ? .on : .off
         proactiveSwitch.needsDisplay = true
         suppressSwitchAction = false
-        let working = (snapshot["work"] as? [[String: Any]] ?? []).count
         let name = AssistantProfile.name
         composerPlaceholder.stringValue = "问\(name)，或直接在会上交办"
         let tools = snapshot["engine"] as? String != "bailian"
         presenceCard.isHidden = !tools
         listBelowPresence.isActive = tools; listCloseToStatus.isActive = !tools
-        presenceCard.show(on: enabled, title: enabled ? "\(name)正在旁听" : "旁听已关闭",
-                          detail: enabled ? "会上交办的事会自动接手" + (working > 0 ? " · 正在做 \(working) 件" : "") : "开启后，会上交办的事会自动开始")
+        renderPresence(snapshot, enabled: enabled, name: name)
+    }
+
+    private func refreshPresence(after seconds: TimeInterval) {
+        presenceRefresh?.cancel()
+        let item = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.renderPresence(self.state, enabled: self.state["proactive"] as? Bool ?? false, name: AssistantProfile.name)
+        }
+        presenceRefresh = item; DispatchQueue.main.asyncAfter(deadline: .now() + max(0.1, seconds), execute: item)
+    }
+
+    /// The listening card follows one call through: heard → on it → done.
+    private func renderPresence(_ snapshot: [String: Any], enabled: Bool, name: String) {
+        let now = Date()
+        let wake = (snapshot["wake"] as? [String: Any])?["serial"] as? Int ?? 0
+        if wake != presenceWake { if presenceWake != nil && wake > 0 { heardAt = now; finishedAt = nil }; presenceWake = wake }
+        let finished = snapshot["finished"] as? [String: Any]
+        let finishedID = finished?["id"] as? String ?? ""
+        if finishedID != presenceFinished {
+            if presenceFinished != nil, finished?["status"] as? String == "completed" {
+                finishedAt = now; finishedTitle = finished?["title"] as? String ?? ""
+            }
+            presenceFinished = finishedID
+        }
+        let work = snapshot["work"] as? [[String: Any]] ?? []
+        let heard = heardAt.map { now.timeIntervalSince($0) < 8 } ?? false
+        let done = finishedAt.map { now.timeIntervalSince($0) < 20 } ?? false
+        if !enabled {
+            presenceCard.show(on: false, title: "旁听已关闭", detail: "开启后，会上叫「\(name)」就能交办")
+        } else if let latest = work.last {
+            let activity = (latest["activity"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            presenceCard.show(on: true, title: "收到：" + (latest["title"] as? String ?? ""),
+                              detail: (activity.isEmpty ? "正在做" : activity) + (work.count > 1 ? " · 共 \(work.count) 件" : ""), busy: true)
+        } else if heard {
+            presenceCard.show(on: true, title: "听到了", detail: "\(name)在想怎么帮你", busy: true)
+            refreshPresence(after: 8.1 - now.timeIntervalSince(heardAt ?? now))
+        } else if done {
+            presenceCard.show(on: true, title: "做好了：" + finishedTitle, detail: "结果在下面", busy: false)
+            refreshPresence(after: 20.1 - now.timeIntervalSince(finishedAt ?? now))
+        } else {
+            presenceCard.show(on: true, title: "\(name)正在旁听", detail: "会上叫「\(name)」就能交办")
+        }
     }
 
     /// Test seam: submits text through the same composer/send path as the UI.
@@ -987,16 +1031,31 @@ private final class MeetingListeningCard: NSView {
             toggle.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14), toggle.centerYAnchor.constraint(equalTo: centerYAnchor),
             toggle.widthAnchor.constraint(equalToConstant: 38), toggle.heightAnchor.constraint(equalToConstant: 22)])
     }
-    func show(on: Bool, title: String, detail text: String) {
+    func show(on: Bool, title: String, detail text: String, busy: Bool = false) {
         if titleField?.stringValue != title { titleField?.stringValue = title }
         detail.stringValue = text; detail.textColor = on ? MeetingVisualStyle.accentText : MeetingVisualStyle.muted
         if self.on != on { self.on = on; needsDisplay = true; mark.live = on }
+        mark.busy = busy
         setAccessibilityLabel(title + "，" + text)
     }
 }
 
 private final class MeetingListeningMark: NSView {
     var live = false { didSet { needsDisplay = true } }
+    /// Breathes while the assistant has heard its name or is working on what it was asked.
+    var busy = false {
+        didSet {
+            guard busy != oldValue else { return }
+            wantsLayer = true
+            if busy {
+                let breathe = CABasicAnimation(keyPath: "opacity")
+                breathe.fromValue = 1; breathe.toValue = 0.45; breathe.duration = 0.8
+                breathe.autoreverses = true; breathe.repeatCount = .infinity
+                breathe.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                layer?.add(breathe, forKey: "busy")
+            } else { layer?.removeAnimation(forKey: "busy") }
+        }
+    }
     override func draw(_ dirtyRect: NSRect) {
         MeetingVisualStyle.charcoal.setFill(); NSBezierPath(roundedRect: bounds, xRadius: 9, yRadius: 9).fill()
         MeetingVoiceGlyph.draw(in: bounds.insetBy(dx: 7, dy: 8), color: live ? MeetingVisualStyle.capsuleLive : MeetingVisualStyle.capsuleIdleDot)

@@ -477,8 +477,8 @@ class CoarseAudioTests(unittest.TestCase):
     def test_structured_speaker_keys_round_trip_and_locked_speaker_is_preserved(self):
         key_a = {"session": "session-a", "source": "mic", "epoch": 1, "identity": "voice-a"}
         key_b = {"session": "session-a", "source": "desktop", "epoch": 1, "identity": "voice-b"}
-        request = self.request(units=[{"unit_id": "u1", "source_id": "mic", "text": "这是可以校订的完整原句。",
-                                       "original_text_sha256": coarse._text_hash("这是可以校订的完整原句。"),
+        request = self.request(units=[{"unit_id": "u1", "source_id": "mic", "text": "这是，呃，已经校正的完整原句",
+                                       "original_text_sha256": coarse._text_hash("这是，呃，已经校正的完整原句"),
                                        "start": 0, "end": 1, "speaker_key": key_a,
                                        "speaker_locked": True, "manual": False}], budget=1.0)
         request["request"]["roster"] = [{"key": key_a, "name": "甲"}, {"key": key_b, "name": "乙"}]
@@ -810,7 +810,7 @@ class CoarseAudioTests(unittest.TestCase):
         self.assertEqual(semantic_calls, [["null"]])
 
     def test_semantic_malformed_response_preserves_audio_results_and_does_not_loop(self):
-        request = self.request(units=[{"unit_id": "residual", "source_id": "mic", "text": "这是一句可以听清的完整原文。",
+        request = self.request(units=[{"unit_id": "residual", "source_id": "mic", "text": "这是一句，呃，已经校正的完整原文",
                                        "start": 0, "end": .5}])
         calls = []
 
@@ -925,8 +925,8 @@ class CoarseAudioTests(unittest.TestCase):
         self.assertEqual(result[1]["speaker_key"], "p1")
 
     def test_fragment_text_is_preserved_even_when_model_or_cache_rewrites_it(self):
-        originals = ["只能", "块，就相当于", "我", "知道呀。", "一", "10万块钱", "完整但时间并未对齐的原始句子。", "这句较完整的原文允许明确纠错。"]
-        proposals = ["只能最大。", "块，如或者", "我。", "知道呀！", "点。", "一百万块钱", "模型凭邻句补出的内容。", "这句较完整的原文允许清晰纠错。"]
+        originals = ["只能", "块，就相当于", "我", "知道呀。", "一", "10万块钱", "完整但时间并未对齐的原始句子。", "这句较完整的原文，呃，允许明确纠错"]
+        proposals = ["只能最大。", "块，如或者", "我。", "知道呀！", "点。", "一百万块钱", "模型凭邻句补出的内容。", "这句较完整的原文允许明确纠错。"]
         units = [{"id": f"u{i}", "source_id": "mic", "text": text, "start": i / 10,
                   "end": (i + 1) / 10, "approximate_window": i == 6} for i, text in enumerate(originals)]
         def answer(_key, _audio, prompt, _tokens, **_kwargs):
@@ -981,6 +981,23 @@ class CoarseAudioTests(unittest.TestCase):
         self.assertEqual(coarse._safe_text(unit, "我们先确认方案，然后再讨论时间。", []),
                          "我们先确认方案，然后再讨论时间。")
 
+    def test_long_cleanup_keeps_raw_words_unless_registered(self):
+        terms = [{"term": "Qoder", "aliases": [], "misheard": ["coder"]}]
+        cases = [
+            # An unregistered name is never guessed from sound, even if it may be right.
+            ("哎，张总，那抱歉，我上午一直在投屏。", "哎，桑总，那抱歉，我上午一直在投屏。", None),
+            ("一年一个多亿，对于一个两优的品牌来说。", "一年一个多亿，对于一个粮油的品牌来说。", None),
+            # Words heard from the neighbouring turn are not added.
+            ("那我选一个楼的话，它即使不在这个top里面也行。", "那我选一个楼的话，你一个列表，它即使不在这个top里面也行。", None),
+            # Registered mishearings, fillers, repeats and punctuation still clean up.
+            ("我们接下来也会跟coder这边有一些合作。", "我们接下来也会跟Qoder这边有一些合作。", "proposed"),
+            ("呃，我我觉得这个方案，就是，还可以再看看", "我觉得这个方案，还可以再看看。", "proposed"),
+        ]
+        for original, proposed, expected in cases:
+            with self.subTest(original=original):
+                unit = {"text": original, "manual": False, "approximate_window": False}
+                self.assertEqual(coarse._safe_text(unit, proposed, terms), proposed if expected else original)
+
     def test_legacy_cleanup_reuses_history_and_only_revisits_known_wrong_name(self):
         terms = [{"term": "小张", "aliases": [], "misheard": ["小小章"]}]
         units = [{"id": "name", "source_id": "mic", "text": "小小章", "start": 0, "end": .5, "speaker_locked": True},
@@ -1014,7 +1031,7 @@ class CoarseAudioTests(unittest.TestCase):
         self.assertEqual(call.call_count, 1)
 
     def test_complete_sentence_correction_preserves_numeric_tokens(self):
-        originals = ["你不是可以从17号开始吗？", "这次计划用10万元投放这个区城。", "这次计划用10万元投放这个区城。"]
+        originals = ["你不是可以从17号开始吗？", "这次计划用10万元投放这个区域。", "呃，这次计划用10万元投放这个区域"]
         proposals = ["你不是可以从十七号开始吗？", "这次计划用100万元投放这个区域。", "这次计划用10万元投放这个区域。"]
         units = [{"id": f"u{i}", "source_id": "mic", "text": text, "start": i / 10,
                   "end": (i + 1) / 10} for i, text in enumerate(originals)]

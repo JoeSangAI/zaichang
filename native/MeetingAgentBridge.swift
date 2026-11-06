@@ -120,6 +120,8 @@ final class MeetingAgentController: NSObject {
     private let token = UUID()
     private var timer: Timer?
     private var profileObserver: NSObjectProtocol?
+    /// The last time the listener heard its name; the name flashes once per new one.
+    private var wakeSerial: Int?
     private var binding = false
     private var bindingSucceeded = false
     private var bindGeneration = 0
@@ -202,7 +204,7 @@ final class MeetingAgentController: NSObject {
         service.observers[token] = { [weak self] id, snapshot in
             guard let self, id == self.workspaceID || id.isEmpty else { return }
             if id.isEmpty { self.state["runtime_status"] = snapshot["runtime_status"]; self.state["runtime_message"] = snapshot["runtime_message"] }
-            else { self.state = snapshot }
+            else { self.state = snapshot; self.flashCalledName(snapshot["wake"] as? [String: Any]) }
             self.state["workspaces"] = self.owner?.currentCacheID == nil ? self.workspaces : []
             self.panel.apply(self.state)
             self.owner?.showAgentListening(self.state["listening"] as? Bool == true)
@@ -241,6 +243,24 @@ final class MeetingAgentController: NSObject {
         let maximum = min(maximumPanelWidth, available - minimumTranscriptWidth)
         return min(maximum, max(minimumPanelWidth, proposed))
     }
+    /// The spoken name lights up where it stands in the transcript, without scrolling the reader away.
+    private func flashCalledName(_ wake: [String: Any]?) {
+        // The first state seen sets the baseline: a name heard before this window opened does not flash.
+        guard let wake, let serial = wake["serial"] as? Int, serial != wakeSerial else { if wakeSerial == nil { wakeSerial = 0 }; return }
+        let seen = wakeSerial != nil; wakeSerial = serial
+        guard seen, let id = wake["segment_id"] as? String, let spelling = wake["spelling"] as? String,
+              let owner, let output = owner.output else { return }
+        let turnParts = owner.readingTurns().first(where: { $0.id == id || $0.parts.contains { $0.0 == id } })?.parts.map(\.0) ?? []
+        guard let range = ([id] + turnParts).lazy.compactMap({ owner.incrementalTranscript.range(forPart: $0) }).first,
+              NSMaxRange(range) <= (output.string as NSString).length else { return }
+        let found = (output.string as NSString).range(of: spelling, options: .caseInsensitive, range: range)
+        guard found.location != NSNotFound, let layout = output.layoutManager, let container = output.textContainer else { return }
+        var rect = layout.boundingRect(forGlyphRange: layout.glyphRange(forCharacterRange: found, actualCharacterRange: nil), in: container)
+        rect = rect.offsetBy(dx: output.textContainerOrigin.x, dy: output.textContainerOrigin.y)
+        guard output.visibleRect.intersects(rect) else { return }
+        output.showFindIndicator(for: found)
+    }
+
     func resizePanel(to proposed: CGFloat, persist: Bool = true) {
         guard expanded, let owner else { return }
         let value = clampedPanelWidth(proposed.isFinite ? proposed : preferredPanelWidth, available: panelAvailableWidth)
