@@ -21,7 +21,7 @@ final class MeetingAgentBridge {
     init(root: String, store: URL, offline: Bool) {
         self.offline = offline
         let child = Process(), stdin = Pipe(), stdout = Pipe()
-        child.executableURL = URL(fileURLWithPath: "/usr/local/bin/python3")
+        child.executableURL = URL(fileURLWithPath:RuntimeConfiguration.python)
         child.arguments = ["-u", root + "/assistant_runtime.py", "--store", store.path, "--cwd", NSHomeDirectory()] + (offline ? ["--offline"] : [])
         var env = RuntimeConfiguration.childEnvironment()
         // Codex and everything it runs inherit this environment; a key never travels through it.

@@ -1243,7 +1243,7 @@ private final class MinimalSpeakerReviewController:NSObject,NSWindowDelegate,NST
         defer {if checkBridge {owner.contextPublisher=originalPublisher;owner.contextSession=originalContextSession}}
         func readBridge(_ view:Delegate,current:Bool=false)throws->[String:Any] {
             owner.contextPublisher?.flushForChecks()
-            let proc=Process(),pipe=Pipe();proc.executableURL=URL(fileURLWithPath:"/usr/local/bin/python3")
+            let proc=Process(),pipe=Pipe();proc.executableURL=URL(fileURLWithPath:RuntimeConfiguration.python)
             proc.arguments=[owner.root+"/meeting_context.py","--database",bridgeDirectory.appendingPathComponent("context.sqlite").path]+(current ? ["current"]:["read","--session",view.activeSession!])
             proc.standardOutput=pipe;proc.standardError=FileHandle.nullDevice
             try proc.run();let data=pipe.fileHandleForReading.readDataToEndOfFile();proc.waitUntilExit()

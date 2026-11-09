@@ -11,19 +11,12 @@
    ```sh
    uname -m
    sw_vers -productVersion
-   /usr/local/bin/python3 --version
+   python3 --version
    ```
 
-   必须是 Apple Silicon（`arm64`）、macOS 15+。应用工作进程使用 `/usr/local/bin/python3`，须确认它是可用的 Python 3.12；安装方法见 [INSTALL](INSTALL.md)。修复缺项后重查，不继续带病安装。
+   必须是 Apple Silicon（`arm64`）、macOS 15+。Python 3 任意版本、任意安装方式都行（python.org、Homebrew、uv、pyenv、conda、Xcode 命令行工具），不要求用户换版本或换安装方式；一个都没有时，按 [INSTALL](INSTALL.md) 装一个。修复缺项后重查，不继续带病安装。
 
-2. 安装 Python 依赖：
-
-   ```sh
-   /usr/local/bin/python3 -m pip install -r requirements.txt
-   /usr/local/bin/python3 -c "import certifi, numpy; print('certifi', certifi.__version__, 'numpy', numpy.__version__)"
-   ```
-
-   第二条退出 0、能打印两个版本即可继续。只检查在场需要的这两个包；用户环境里其他工具之间的版本冲突与在场无关，不要用全局 `pip check` 判断，也不要为此改动用户的其他包。不用 `sudo pip`。pip 自身检查更新时打印的证书警告可以忽略；只有依赖安装失败、或上面的导入命令报错时，若错误是访问 PyPI 的证书校验失败（`CERTIFICATE_VERIFY_FAILED`），请用户运行 Python 安装目录里的 `Install Certificates.command`（例如 `open "/Applications/Python 3.12/Install Certificates.command"`）后重试。
+2. Python 依赖由下一步的安装脚本处理：它按固定顺序找到本机的 Python，先用已经装好 certifi 和 numpy 的那个；都没有时，用 `pip install --user` 给第一个找到的 Python 装这两个包（Homebrew、uv 的 Python 会再加 `--break-system-packages`，只写用户目录），并打印选中的路径。应用运行时按同样顺序找到同一个。不要用全局 `pip check` 判断，也不要为此改动用户的其他包，不用 `sudo pip`。若装包报访问 PyPI 的证书校验失败（`CERTIFICATE_VERIFY_FAILED`），python.org 的 Python 请用户运行安装目录里的 `Install Certificates.command`（例如 `open "/Applications/Python 3.14/Install Certificates.command"`，按实际版本号换）后重跑。
 
 3. 下载并安装正式版（应用约 40 MB，语音模型约 210 MB；首次需要能访问 GitHub）：
 

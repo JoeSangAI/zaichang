@@ -29,7 +29,7 @@ import SQLite3
         let stderr=try FileHandle(forWritingTo:stderrURL);defer{try? stderr.close()}
         let beforeState=try object("SELECT value FROM state WHERE key='current'")
         let beforeMetadata=try object("SELECT metadata FROM meetings WHERE session='context-meeting'")
-        let task=Process(),pipe=Pipe();task.executableURL=URL(fileURLWithPath:"/usr/local/bin/python3")
+        let task=Process(),pipe=Pipe();task.executableURL=URL(fileURLWithPath:RuntimeConfiguration.python)
         task.arguments=[view.root+"/meeting_context.py","--database",file.path]+args
         task.standardOutput=pipe;task.standardError=stderr
         let start=ProcessInfo.processInfo.systemUptime;try task.run()

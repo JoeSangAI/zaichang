@@ -1279,6 +1279,12 @@ class AssistantRuntime:
         await self._snapshot(workspace_id)
         return {"cancelled": len(rows)}
 
+    def _stopped(self, **completed):
+        """A stop the user asked for completes; one caused by quitting is interrupted, so the restart says so."""
+        if self._closed:
+            return {"status": "interrupted", "turn_id": None, "error": "shutdown_no_replay"}
+        return {"status": "completed", "turn_id": None, **completed}
+
     async def _interrupt_conversation(self, task_id):
         row = self.store.task(task_id)
         if task_id not in self.task_workers:
@@ -1452,7 +1458,7 @@ class AssistantRuntime:
                 self.runtime_threads.add(thread_id)
                 self._set_task(task_id, thread_id=thread_id)
             if self.store.task(task_id)["status"] == "cancelling":
-                self._set_task(task_id, status="completed", turn_id=None)
+                self._set_task(task_id, **self._stopped())
                 return
             # The conversation thread only listens; user requests run on their own threads.
             if not self._listening_enabled(workspace_id):
@@ -1526,7 +1532,7 @@ class AssistantRuntime:
             self._message(f"bailian:{task_id}", task_id, "assistant", reply["text"].strip(), "completed", "user")
             self._set_task(task_id, status="completed", turn_id=None, error=None)
         except asyncio.CancelledError:
-            stopped = self.store.task(task_id)["status"] == "cancelling"
+            stopped = self.store.task(task_id)["status"] == "cancelling" and not self._closed
             self._set_task(task_id, status="completed" if stopped else "interrupted", turn_id=None,
                            error="cancelled" if stopped else "shutdown_no_replay")
             if not stopped:
@@ -1597,7 +1603,7 @@ class AssistantRuntime:
             self.runtime_threads.add(thread_id)
             self._set_task(task_id, thread_id=thread_id)
             if self.store.task(task_id)["status"] == "cancelling":
-                self._set_task(task_id, status="completed", turn_id=None, error="cancelled")
+                self._set_task(task_id, **self._stopped(error="cancelled"))
                 return
             if request:
                 # Requests in flight elsewhere are named so a follow-up neither
@@ -1736,9 +1742,11 @@ class AssistantRuntime:
                                           heading + text, "completed", row["origin"])
                     await self._link_changed(down=False)
                     self._set_task(task_id, status="completed", turn_id=None, error=None)
-                elif status in ("interrupted", "cancelled") or row["status"] == "cancelling":
+                elif row["status"] == "cancelling":
                     # Deliberate handoff (steer fallback/off) may process queued input next.
-                    self._set_task(task_id, status="completed" if row["status"] == "cancelling" else "interrupted", turn_id=None, error=None if row["status"] == "cancelling" else status)
+                    self._set_task(task_id, **self._stopped(error=None))
+                elif status in ("interrupted", "cancelled"):
+                    self._set_task(task_id, status="interrupted", turn_id=None, error=status)
                 else:
                     raise RuntimeErrorCode(str(params.get("turn", {}).get("error") or status))
                 return

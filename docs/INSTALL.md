@@ -1,16 +1,17 @@
 # 在 macOS 上安装
 
-需要一台 Apple Silicon Mac、macOS 15 或更新版本和 Python 3.12。Codex 助理还需要安装并登录 Codex CLI。
+需要一台 Apple Silicon Mac、macOS 15 或更新版本和 Python 3（任意版本，已在 3.9 到 3.14 上验证）。Codex 助理还需要安装并登录 Codex CLI。
 
 ## 安装正式版
 
-1. 从 [Python for macOS](https://www.python.org/downloads/macos/) 下载 Python 3.12 的 universal2 安装器并安装，确认 `/usr/local/bin/python3 --version` 显示 3.12。
+1. 准备任意版本的 Python 3，用哪种方式装的都行（python.org、Homebrew、uv、pyenv、conda，或 Xcode 命令行工具自带的）。还没有的话，从 [Python for macOS](https://www.python.org/downloads/macos/) 下载安装器，或运行 `brew install python`。
 2. 克隆本仓库，在仓库目录运行：
 
    ```sh
-   /usr/local/bin/python3 -m pip install -r requirements.txt
    bash install.sh
    ```
+
+   脚本会自己找到这台 Mac 上的 Python；缺 certifi 和 numpy 时，会装到你自己的用户目录，不动 Python 本身。最后会打印它选中的是哪一个。
 
 脚本从 GitHub 下载签好名的安装包，校验哈希和签名后装到 `~/Applications/在场.app`。以后的新版本在场会自己下载，退出时换上，系统权限不用重来。在场没有做 Apple 公证，所以要用脚本安装；直接下载的 app 会被系统拦下。
 
@@ -20,7 +21,7 @@
 
 只在你要改代码时才需要。还需要 Xcode Command Line Tools 和 Swift 6。
 
-1. 安装 Python 3.12。若本机没有合适版本，可从 [Python for macOS](https://www.python.org/downloads/macos/) 下载 Python 3.12 的 universal2 安装器。
+1. 准备 Python 3，任意版本都行。若本机没有，可从 [Python for macOS](https://www.python.org/downloads/macos/) 下载 universal2 安装器。
 2. 安装 Xcode Command Line Tools。若尚未安装，在终端运行 `xcode-select --install` 并按 macOS 提示完成。
 3. 安装并登录 [Codex CLI](https://developers.openai.com/codex/cli/)。终端可运行官方安装命令，之后运行 `codex` 并选择登录方式：
 
@@ -40,7 +41,7 @@
    python3 scripts/install_standalone.py
    ```
 
-   确认 `python3 --version` 显示 3.12，`swift --version` 显示 Swift 6。首次下载的模型和 SDK 会保存在仓库的忽略目录中；再次运行时会复用哈希匹配的文件。构建与自检不启动录音，也不调用转写服务。
+   确认 `python3 --version` 能显示版本号，`swift --version` 显示 Swift 6。首次下载的模型和 SDK 会保存在仓库的忽略目录中；再次运行时会复用哈希匹配的文件。构建与自检不启动录音，也不调用转写服务。
 
 应用安装到 `~/Applications/在场.app`，会议数据保存在 `~/Library/Application Support/ZaichangStandalone`。这份安装使用独立数据目录和应用设置，不会替换其他版本的在场。首次启动时，macOS 会在你启用相应声音来源时请求权限；只有按下应用里的“开始录音”后才会开始录音。
 
@@ -65,7 +66,7 @@ python3 scripts/install_standalone.py
 
 ## 依赖下载失败
 
-安装 Python 依赖时若出现 `CERTIFICATE_VERIFY_FAILED`，运行 Python 安装目录里的 `Install Certificates.command`（例如 `open "/Applications/Python 3.12/Install Certificates.command"`）后重试。
+安装 Python 依赖时若出现 `CERTIFICATE_VERIFY_FAILED`，运行 Python 安装目录里的 `Install Certificates.command`（例如 `open "/Applications/Python 3.14/Install Certificates.command"`，按你装的版本号换）后重试。
 
 下载脚本会自动重试网络错误，已校验的文件再次运行时复用，直接重跑即可。若始终在 huggingface.co 失败而其他站点正常，通常是本机代理无法访问 Hugging Face：能直连时可去掉代理环境变量重跑，例如 `env -u HTTPS_PROXY -u HTTP_PROXY python3 scripts/bootstrap_dependencies.py`。
 

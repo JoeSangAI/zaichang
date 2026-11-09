@@ -75,7 +75,7 @@ final class SharedPersonIdentityService {
     private let lock=NSLock()
     private var generation=UUID()
     private var active:Process?
-    init(root:String,pythonExecutable:String="/usr/local/bin/python3") {
+    init(root:String,pythonExecutable:String=RuntimeConfiguration.python) {
         self.root=root;self.pythonExecutable=pythonExecutable
     }
     func cancel() {

@@ -6,6 +6,46 @@ import CoreFoundation
 enum RuntimeConfiguration {
     /// Where tools the user installed live; a GUI app does not inherit their shell's PATH.
     static var toolSearchPaths:[String] {["/usr/local/bin","/opt/homebrew/bin",NSHomeDirectory()+"/.local/bin",NSHomeDirectory()+"/.codex/bin","/usr/bin","/bin"]}
+    /// Whatever Python 3 the user installed runs the workers, any version from any installer (python.org, Homebrew, uv,
+    /// pyenv, conda, Apple's developer tools): the first that already has certifi and numpy, found once per launch.
+    /// The shell's PATH never reaches a GUI app, so the usual homes are tried in turn; /usr/bin/python3 is skipped
+    /// because without developer tools it opens an install prompt instead of running.
+    static let python:String=findPython()
+    static func pythonCandidates(home:String=NSHomeDirectory(),fileManager:FileManager = .default)->[String] {
+        var directories=["/usr/local/bin","/opt/homebrew/bin",home+"/.local/bin",home+"/.pyenv/shims"]
+        for base in ["miniconda3","anaconda3","miniforge3","mambaforge"] {directories+=[home+"/"+base+"/bin","/opt/"+base+"/bin","/opt/homebrew/Caskroom/"+base.replacingOccurrences(of:"3",with:"")+"/base/bin"]}
+        let framework="/Library/Frameworks/Python.framework/Versions"
+        directories+=((try? fileManager.contentsOfDirectory(atPath:framework)) ?? []).filter{$0.hasPrefix("3.")}
+            .sorted{$0.compare($1,options:.numeric) == .orderedDescending}.map{framework+"/"+$0+"/bin"}
+        directories+=["/Library/Developer/CommandLineTools/usr/bin","/Applications/Xcode.app/Contents/Developer/usr/bin"]
+        var found:[String]=[]
+        for directory in directories {
+            // python3 first, then versioned names newest first (Homebrew's python@3.x only installs those).
+            let versioned=((try? fileManager.contentsOfDirectory(atPath:directory)) ?? []).filter{name in
+                name.hasPrefix("python3.") && name.dropFirst(8).allSatisfy(\.isNumber) && !name.dropFirst(8).isEmpty}
+                .sorted{$0.compare($1,options:.numeric) == .orderedDescending}
+            for name in ["python3"]+versioned {
+                let path=directory+"/"+name
+                if !found.contains(path),fileManager.isExecutableFile(atPath:path) {found.append(path)}
+            }
+        }
+        return found
+    }
+    static func findPython(candidates:[String]=pythonCandidates())->String {
+        for path in candidates where pythonIsReady(path) {return path}
+        return candidates.first ?? "/usr/local/bin/python3"
+    }
+    static func pythonIsReady(_ path:String,timeout:TimeInterval=15)->Bool {
+        let process=Process();process.executableURL=URL(fileURLWithPath:path);process.arguments=["-c","import certifi, numpy"]
+        var environment=ProcessInfo.processInfo.environment
+        for key in ["PYTHONPATH","PYTHONHOME","PYTHONSTARTUP"] {environment.removeValue(forKey:key)}
+        environment["PYTHONDONTWRITEBYTECODE"]="1";process.environment=environment
+        process.standardInput=FileHandle.nullDevice;process.standardOutput=FileHandle.nullDevice;process.standardError=FileHandle.nullDevice
+        let done=DispatchSemaphore(value:0);process.terminationHandler={_ in done.signal()}
+        guard (try? process.run()) != nil else{return false}
+        if done.wait(timeout:.now()+timeout) == .timedOut {process.terminate();return false}
+        return process.terminationStatus==0
+    }
     static let bailianService="com.joesang.zaichang.standalone.bailian"
     static let identityService="com.zaichang.app.identity-v2"
     static func dataRoot(info:[String:Any]=Bundle.main.infoDictionary ?? [:],environment:[String:String]=ProcessInfo.processInfo.environment)->URL {

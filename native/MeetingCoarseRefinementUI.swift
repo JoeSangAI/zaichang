@@ -290,7 +290,7 @@ extension Delegate {
                         }
                     }
                     if let injected {injected(request,token,completed)}
-                    else {job.startProcess(request:["key":key,"request":request],executable:URL(fileURLWithPath:"/usr/local/bin/python3"),arguments:["-u",self.root+"/coarse_audio.py"],maximumInput:4*1024*1024,reservedToken:token,done:completed)}
+                    else {job.startProcess(request:["key":key,"request":request],executable:URL(fileURLWithPath:RuntimeConfiguration.python),arguments:["-u",self.root+"/coarse_audio.py"],maximumInput:4*1024*1024,reservedToken:token,done:completed)}
                 } catch {DispatchQueue.main.async{
                     self.failSpeakerRefinement(token:token,cacheID:cacheID,session:session,generation:generation,revision:revision,error:error,job:job)
                     self.showCoarseFailureIfCurrent(cacheID:cacheID,session:session,error:error)

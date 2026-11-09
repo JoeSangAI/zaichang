@@ -237,8 +237,6 @@ def sign(stage: Path, identity: str) -> None:
 def build_stage(identity: str = "-") -> dict:
     if platform.system() != "Darwin" or platform.machine() != "arm64":
         raise SystemExit("在场公开版需要安装在 macOS 15+ 的 Apple Silicon 电脑上。")
-    if sys.version_info < (3, 12):
-        raise SystemExit("安装构建工具需要 Python 3.12 或更新版本。")
     process_guard()
     missing = [path for path in [ROOT / "native/local-speaker-install/sdk/Package.swift",
                                  ROOT / "native/local-speaker-install/sdk/LocalDependencies/NemoTextProcessing.xcframework/Info.plist",

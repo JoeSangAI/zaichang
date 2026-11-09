@@ -84,7 +84,7 @@ private struct GroundedTermTitleProvider:MeetingTitleProvider {
     }
     func bridgeTitle(_ session:String)throws->String? {
         view.contextPublisher?.flushForChecks()
-        let proc=Process(),pipe=Pipe();proc.executableURL=URL(fileURLWithPath:"/usr/local/bin/python3");proc.arguments=[view.root+"/meeting_context.py","--database",bridge.appendingPathComponent("context.sqlite").path,"read","--session",session];proc.standardOutput=pipe;proc.standardError=FileHandle.nullDevice
+        let proc=Process(),pipe=Pipe();proc.executableURL=URL(fileURLWithPath:RuntimeConfiguration.python);proc.arguments=[view.root+"/meeting_context.py","--database",bridge.appendingPathComponent("context.sqlite").path,"read","--session",session];proc.standardOutput=pipe;proc.standardError=FileHandle.nullDevice
         try proc.run();let data=pipe.fileHandleForReading.readDataToEndOfFile();proc.waitUntilExit();guard proc.terminationStatus==0 else{throw Failure(code:"title_bridge_read_failed")}
         let value=try JSONSerialization.jsonObject(with:data) as! [String:Any]
         return (value["meeting"] as? [String:Any])?["title"] as? String

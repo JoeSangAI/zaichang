@@ -151,7 +151,7 @@ func meetingCoarseRefinementUIChecks(directory:URL)throws->[String] {
     var contextReaderFailures:[String]=[]
     func readPublished(_ publisher:MeetingContextPublisher,directory:URL,_ arguments:[String])throws->[String:Any] {
         publisher.flushForChecks()
-        let task=Process(),pipe=Pipe(),errorPipe=Pipe();task.executableURL=URL(fileURLWithPath:"/usr/local/bin/python3")
+        let task=Process(),pipe=Pipe(),errorPipe=Pipe();task.executableURL=URL(fileURLWithPath:RuntimeConfiguration.python)
         task.arguments=[view.root+"/meeting_context.py","--database",directory.appendingPathComponent("context.sqlite").path]+arguments
         task.standardOutput=pipe;task.standardError=errorPipe
         do {try task.run()} catch {contextReaderFailures.append(String(describing:error));throw error}

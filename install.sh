@@ -13,8 +13,34 @@ stop() { printf '没有装好：%s\n' "$1" >&2; exit 1; }
 [ "$(uname -m)" = "arm64" ] || stop "目前只支持 Apple 芯片的 Mac（M1 及以后）。"
 major="$(sw_vers -productVersion | cut -d. -f1)"
 [ "$major" -ge 15 ] || stop "需要 macOS 15 或更新，这台是 $(sw_vers -productVersion)。"
-/usr/local/bin/python3 -c 'import certifi, numpy' 2>/dev/null \
-  || stop "在场的后台工作要用 /usr/local/bin/python3（3.12）和 certifi、numpy。按 docs/INSTALL.md 装好 Python，再运行 /usr/local/bin/python3 -m pip install certifi numpy，然后重试。"
+# Any Python 3 works, from any installer. The app looks in the same places, in the same order
+# (RuntimeConfiguration.pythonCandidates); /usr/bin/python3 is left out since without developer tools it only prompts.
+pythons() {
+  for dir in /usr/local/bin /opt/homebrew/bin "$HOME/.local/bin" "$HOME/.pyenv/shims" \
+      "$HOME"/miniconda3/bin "$HOME"/anaconda3/bin "$HOME"/miniforge3/bin "$HOME"/mambaforge/bin \
+      /opt/miniconda3/bin /opt/anaconda3/bin /opt/miniforge3/bin /opt/mambaforge/bin \
+      /opt/homebrew/Caskroom/miniconda/base/bin /opt/homebrew/Caskroom/anaconda/base/bin \
+      /opt/homebrew/Caskroom/miniforge/base/bin /opt/homebrew/Caskroom/mambaforge/base/bin \
+      $(ls -d /Library/Frameworks/Python.framework/Versions/3.*/bin 2>/dev/null | sort -rV) \
+      /Library/Developer/CommandLineTools/usr/bin /Applications/Xcode.app/Contents/Developer/usr/bin; do
+    [ -x "$dir/python3" ] && echo "$dir/python3"
+    ls "$dir" 2>/dev/null | grep -E '^python3\.[0-9]+$' | sort -t. -k2 -rn | sed "s|^|$dir/|"
+  done
+}
+ready() { "$1" -c 'import certifi, numpy' </dev/null >/dev/null 2>&1; }
+PYTHON=""
+for candidate in $(pythons); do ready "$candidate" && { PYTHON="$candidate"; break; }; done
+if [ -z "$PYTHON" ]; then
+  PYTHON="$(pythons | head -n 1)"
+  [ -n "$PYTHON" ] || stop "这台 Mac 还没有 Python 3。任意版本都行：从 https://www.python.org/downloads/macos/ 下载安装，或运行 brew install python，然后重试。"
+  say "给 $PYTHON 装在场要用的 certifi 和 numpy（只装到你自己的用户目录）…"
+  # Homebrew's and uv's Pythons refuse plain pip installs (PEP 668); a user-directory install leaves theirs untouched.
+  "$PYTHON" -m pip install -q --user --no-warn-script-location certifi numpy </dev/null 2>/dev/null \
+    || "$PYTHON" -m pip install -q --user --no-warn-script-location --break-system-packages certifi numpy </dev/null \
+    || stop "没能给 $PYTHON 装上 certifi 和 numpy。可以手动运行 $PYTHON -m pip install --user certifi numpy 看看报错，然后重试。"
+  ready "$PYTHON" || stop "$PYTHON 装好了 certifi 和 numpy 却仍导入不了，请把这条信息发给维护者。"
+fi
+say "后台工作用 $PYTHON（$("$PYTHON" -V 2>&1)）。"
 
 # Update the copy the user already has instead of leaving a stale one behind.
 DEST="${ZAICHANG_INSTALL_DIR:-$HOME/Applications}"

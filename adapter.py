@@ -1,4 +1,5 @@
 """Offline meeting state adapter. No audio, network, accounts or background jobs."""
+from __future__ import annotations
 import argparse
 import json
 import math

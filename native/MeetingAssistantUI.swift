@@ -864,7 +864,7 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
         adoptTitleProvider(key:overrideRequest?["key"] as? String ?? secret)
         if Credential.offline && previewRenderOnly,let fixture=startupWorkerFixture,let request=overrideRequest {fixture(request);return}
         guard !Credential.offline else{phase.phase = .failed;phase.error="离线入口禁止启动生产工作进程";updateUI();return}
-        let proc=Process();let stdin=Pipe();let stdout=Pipe();proc.executableURL=URL(fileURLWithPath:"/usr/local/bin/python3");proc.arguments=["-u",root+"/gui_worker.py"]
+        let proc=Process();let stdin=Pipe();let stdout=Pipe();proc.executableURL=URL(fileURLWithPath:RuntimeConfiguration.python);proc.arguments=["-u",root+"/gui_worker.py"]
         if Bundle.main.object(forInfoDictionaryKey:"CandidateRevision") as? String=="repair" {proc.arguments!.append("--candidate-repair")}
         if Bundle.main.object(forInfoDictionaryKey:"CandidateRevision") as? String=="nightly" {proc.arguments!.append("--candidate-nightly")}
         var env=RuntimeConfiguration.childEnvironment();for name in ["DASHSCOPE_API_KEY","ALIYUN_API_KEY","BAILIAN_API_KEY"] {env.removeValue(forKey:name)};env["PYTHONDONTWRITEBYTECODE"]="1";env["MEETING_GUI"]="1";proc.environment=env
@@ -1984,7 +1984,7 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
             guard let data=try? JSONSerialization.data(withJSONObject:command) else{identityBusy=false;return}
             do {try handle.write(contentsOf:data+Data([10]))} catch {identityBusy=false;diagnostic.stringValue="人物连接已关闭，未保存"};return
         }
-        let proc=Process();let input=Pipe();let outputPipe=Pipe();proc.executableURL=URL(fileURLWithPath:"/usr/local/bin/python3");proc.arguments=["-u",root+"/identity_control.py"];proc.standardInput=input;proc.standardOutput=outputPipe;proc.standardError=FileHandle.nullDevice
+        let proc=Process();let input=Pipe();let outputPipe=Pipe();proc.executableURL=URL(fileURLWithPath:RuntimeConfiguration.python);proc.arguments=["-u",root+"/identity_control.py"];proc.standardInput=input;proc.standardOutput=outputPipe;proc.standardError=FileHandle.nullDevice
         var request:[String:Any]=["session":session,"synthetic_only":mock,"human_use_authorized":humanIdentityAuthorized,"command":command];if let state=identitySnapshot {request["state"]=state}
         var env=RuntimeConfiguration.childEnvironment();for key in ["DASHSCOPE_API_KEY","ALIYUN_API_KEY","BAILIAN_API_KEY"] {env.removeValue(forKey:key)};env["PYTHONDONTWRITEBYTECODE"]="1";proc.environment=env
         DispatchQueue.global().async {
@@ -2777,7 +2777,7 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
         if CommandLine.arguments.count==2,["--authorized-public-asr-test","--authorized-public-asr-test-no-prompt"].contains(CommandLine.arguments[1]) {
             guard Bundle.main.object(forInfoDictionaryKey:"CandidateRevision") as? String=="nightly",Bundle.main.object(forInfoDictionaryKey:"KeychainAuthorized") as? Bool==true,!Credential.offline,let root=Bundle.main.object(forInfoDictionaryKey:"AdapterRoot") as? String else{print("public-asr-scope-denied");exit(1)}
             do {guard let key=try Credential.load(allowInteraction:CommandLine.arguments[1] != "--authorized-public-asr-test-no-prompt"),!key.isEmpty else{print("public-asr-key-unavailable");exit(1)}
-                let child=Process();let input=Pipe();child.executableURL=URL(fileURLWithPath:"/usr/local/bin/python3");child.arguments=[root+"/public_audio_trial.py"];child.standardInput=input;try child.run();try input.fileHandleForWriting.write(contentsOf:JSONSerialization.data(withJSONObject:["key":key])+Data([10]));try input.fileHandleForWriting.close();child.waitUntilExit();exit(child.terminationStatus)
+                let child=Process();let input=Pipe();child.executableURL=URL(fileURLWithPath:RuntimeConfiguration.python);child.arguments=[root+"/public_audio_trial.py"];child.standardInput=input;try child.run();try input.fileHandleForWriting.write(contentsOf:JSONSerialization.data(withJSONObject:["key":key])+Data([10]));try input.fileHandleForWriting.close();child.waitUntilExit();exit(child.terminationStatus)
             }catch{print("public-asr-keychain-or-launch-failed");exit(1)}
         }
         if CommandLine.arguments.contains("--ui-self-test") {modelSelfTest();exit(0)}
