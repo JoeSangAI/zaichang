@@ -74,3 +74,18 @@ class TermContractTests(unittest.TestCase):
             rows.return_value=[dict(term='Accio',aliases=[],misheard=['X5'],layer='project')]
             self.assertEqual(terms.term_guide(Path('/a')),terms.term_guide(project_dirs=[Path('/a')]))
 if __name__=='__main__':unittest.main()
+
+
+class TitleContextTests(unittest.TestCase):
+    def test_title_context_lists_heard_terms_projects_and_own_workspaces(self):
+        row=lambda term,aliases=(),misheard=():dict(term=term,aliases=list(aliases),misheard=list(misheard))
+        owners=[dict(path='/w/工作/通用.md',layer='general',error=None,rows=[row('我司',('工作',)),row('闲鱼'),row('Agent')]),
+                dict(path='/w/工作/客户/闲鱼/实体与术语.md',layer='project',error=None,rows=[row('闲鱼',(),('咸鱼',)),row('九界',(),('九届',)),row('菜鸟驿站')])]
+        with tempfile.TemporaryDirectory() as folder, \
+             patch('shared_terms.meeting_text',return_value='咸鱼这边九届说咸鱼要投九界，咸鱼'), \
+             patch('shared_terms.connectors',return_value={'project_roots':['/w/工作']}):
+            value=terms.title_context(Path(folder),owners)
+        self.assertEqual(value['projects'],['工作/客户/闲鱼'])
+        self.assertEqual(value['domains'],['工作','我司'])
+        self.assertEqual(value['terms'],['闲鱼；常被误识为咸鱼','九界；常被误识为九届'])
+        self.assertEqual(value['unheard'],['菜鸟驿站','Agent'])

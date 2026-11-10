@@ -245,9 +245,9 @@ private struct GroundedTermTitleProvider:MeetingTitleProvider {
     let emptyFailed=try saved("owed-failed",sidecar:["title":"","provenance":"automatic","state":"failed","attempts":2])
     let provisional=try saved("owed-provisional",sidecar:["title":"开场｜寒暄","provenance":"automatic","state":"ready","attempts":1,"provisional":true])
     let missing=try saved("owed-missing",sidecar:nil)
-    let settled=try saved("owed-settled",sidecar:["title":"旧会议｜人工看过的标题","provenance":"automatic","state":"ready","attempts":1])
+    let settled=try saved("owed-settled",sidecar:["title":"旧会议｜人工看过的标题","provenance":"automatic","state":"ready","attempts":1,"generator":MeetingAutoTitle.generator])
     let manual=try saved("owed-manual",sidecar:["title":"本人写的标题","provenance":"manual","state":"ready","attempts":0])
-    let exhausted=try saved("owed-exhausted",sidecar:["title":"","provenance":"automatic","state":"failed","attempts":3])
+    let exhausted=try saved("owed-exhausted",sidecar:["title":"","provenance":"automatic","state":"failed","attempts":3,"generator":MeetingAutoTitle.generator])
     let localOnly=try saved("owed-local",sidecar:nil,local:true)
     let items=try cachedMeetings(in:owedRoot,recoverInterrupted:false)
     func owes(_ folder:URL)->Bool {items.first{$0.id==folder.lastPathComponent}?.owesTitle==true}
@@ -522,4 +522,54 @@ func meetingAutoTitleFixture() async throws {
     guard await failingProvider.calls==3,try MeetingDisplayInfoStore.load(in:failureFolder)?.state == .failed else{
         throw Failure(code:"title_failure_retries_are_bounded_per_snapshot")
     }
+}
+
+// Titles from the older naming method are owed once more; manual ones never.
+// A registered standard spelling grounds a subject the ASR misheard.
+func meetingTitleGeneratorChecks() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("meeting-title-generator-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: root) }
+    let id = UUID().uuidString, folder = root.appendingPathComponent(id), session = "generator-session"
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    try JSONSerialization.data(withJSONObject: ["session": session, "cache_id": id]).write(to: folder.appendingPathComponent("meeting.json"))
+    let events: [[String: Any]] = [["segment_id": "a", "start": 0.0, "final": true,
+                                    "text": "咸鱼这边双十一想先在智能屏上测一下，五十万的预算怎么分城市还要再算。"]]
+    guard let input = MeetingTitleInput(events: events) else { throw Failure(code: "title_generator_input") }
+    try JSONSerialization.data(withJSONObject: ["schema": 2, "title": "咸鱼｜投放方案验证", "provenance": "automatic", "state": "ready",
+        "session": session, "cache_id": id, "source_digest": input.digest, "attempts": 1, "attempted_at": 1.0],
+        options: [.sortedKeys]).write(to: folder.appendingPathComponent("display-info.json"))
+    guard MeetingDisplayInfoStore.owesTitle(in: folder) else { throw Failure(code: "title_old_generator_not_owed") }
+    let counter = FixtureTitleCallCounter()
+    let provider = FixtureTitleProvider(titleText: "闲鱼｜双十一智能屏测试", delayNanoseconds: 0, counter: counter)
+    let service = MeetingAutoTitle()
+    // FixtureTitleProvider requires its marker word; give it one.
+    let marked = events.map { var e = $0; e["text"] = (e["text"] as! String) + "品牌营销"; return e }
+    let markedDigest = MeetingTitleInput(events: marked)!.digest
+    var value = try JSONSerialization.jsonObject(with: Data(contentsOf: folder.appendingPathComponent("display-info.json"))) as! [String: Any]
+    value["source_digest"] = markedDigest
+    try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys]).write(to: folder.appendingPathComponent("display-info.json"))
+    let retitled = await service.generate(cacheID: id, session: session, directory: folder, events: marked,
+                                          provider: provider, cloudTextAllowed: true, finalized: true)
+    guard case .saved("闲鱼｜双十一智能屏测试") = retitled, await counter.count() == 1,
+          let saved = try MeetingDisplayInfoStore.load(in: folder), saved.generator == MeetingAutoTitle.generator,
+          !MeetingDisplayInfoStore.owesTitle(in: folder) else { throw Failure(code: "title_old_generator_not_retitled") }
+    let again = await service.generate(cacheID: id, session: session, directory: folder, events: marked,
+                                       provider: provider, cloudTextAllowed: true, finalized: true)
+    guard case .unchanged = again, await counter.count() == 1 else { throw Failure(code: "title_current_generator_repeated") }
+    try MeetingDisplayInfoStore.saveManual("我起的名字", in: folder)
+    guard !MeetingDisplayInfoStore.owesTitle(in: folder) else { throw Failure(code: "title_manual_owed") }
+
+    let reply = #"{"title":"闲鱼｜双十一智能屏测试"}"#
+    let context = MeetingTitleContext(domains: ["我的公司"], projects: ["工作/客户/闲鱼"], terms: ["闲鱼；常被误识为咸鱼"])
+    guard (try? DashScopeMeetingTitleProvider.groundedTitle(reply, transcript: input.transcript)) == nil,
+          try DashScopeMeetingTitleProvider.groundedTitle(reply, transcript: input.transcript, context: context) == "闲鱼｜双十一智能屏测试",
+          (try? DashScopeMeetingTitleProvider.groundedTitle(#"{"title":"淘宝｜双十一智能屏测试"}"#, transcript: input.transcript)) == nil,
+          (try? DashScopeMeetingTitleProvider.groundedTitle(#"{"title":"淘宝｜双十一智能屏测试"}"#, transcript: input.transcript,
+                context: MeetingTitleContext(terms: ["闲鱼"], unheard: ["淘宝"]))) == nil,
+          (try? DashScopeMeetingTitleProvider.groundedTitle(#"{"title":"Taobao｜双十一智能屏测试"}"#, transcript: input.transcript, context: context)) == nil,
+          try DashScopeMeetingTitleProvider.groundedTitle(#"{"title":"投放测试｜双十一智能屏预算"}"#, transcript: input.transcript, context: context) == "投放测试｜双十一智能屏预算"
+    else { throw Failure(code: "title_context_grounding") }
+    let prompt = context.prompt(transcript: input.transcript)
+    guard prompt.contains("我的公司"), prompt.contains("工作/客户/闲鱼"), prompt.hasSuffix(input.transcript),
+          MeetingTitleContext.empty.prompt(transcript: "原文") == "逐字稿：\n原文" else { throw Failure(code: "title_context_prompt") }
 }

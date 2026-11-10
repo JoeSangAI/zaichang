@@ -24,7 +24,7 @@ extension Delegate {
         guard let factory=titleProviderMaker,injected || authorized else{return}
         let candidates=items.filter{finalTitleTasks[$0.id]==nil}
         owedTitleLastPass=now
-        let generator=autoTitle
+        let generator=autoTitle,root=self.root
         owedTitleTask=Task.detached { [weak self] in
             let owed=Array(candidates.filter{$0.owesTitle}.prefix(5))
             let secret:String?=owed.isEmpty ? nil:injected ? "synthetic":(try? Credential.load(allowInteraction:false))
@@ -36,7 +36,8 @@ extension Delegate {
             pass: for item in owed {
                 guard !Task.isCancelled else{break}
                 guard let session=(try? item.metadata())?["session"] as? String,let events=try? item.events() else{continue}
-                let result=await generator.generate(cacheID:item.id,session:session,directory:item.directory,events:events,provider:provider,cloudTextAllowed:true,finalized:true)
+                let context=injected ? MeetingTitleContext.empty:MeetingTitleContext.load(directory:item.directory,root:root)
+                let result=await generator.generate(cacheID:item.id,session:session,directory:item.directory,events:events,provider:provider,cloudTextAllowed:true,finalized:true,context:context)
                 switch result {
                 case .saved(let title):await MainActor.run {self?.adoptOwedTitle(title,item:item,session:session)}
                 case .unreachable:break pass
@@ -60,7 +61,7 @@ extension Delegate {
         guard !quitting,!previewRenderOnly,!isHistoryReader,let id=currentCacheID,let session=activeSession else{return}
         let directory=recoveryBase().appendingPathComponent(id),generator=autoTitle
         let provider=titleProvider,allowed=titleTextAllowed && !sessionLocalOnly
-        let publisher=documentContextPublisher
+        let publisher=documentContextPublisher,root=self.root,localContext=titleProviderFactory==nil
         guard allowed,provider != nil else{return}
         let recordingUpdate = !finalized && phase.phase == .recording
         if recordingUpdate {
@@ -97,10 +98,11 @@ extension Delegate {
                 }
                 return
             }
-            var result=await generator.generate(cacheID:id,session:session,directory:directory,events:events,provider:provider,cloudTextAllowed:allowed,finalized:finalized,refresh:refresh,finalOnly:recordingUpdate,requestRevision:revision)
+            let context=localContext ? MeetingTitleContext.load(directory:directory,root:root):.empty
+            var result=await generator.generate(cacheID:id,session:session,directory:directory,events:events,provider:provider,cloudTextAllowed:allowed,finalized:finalized,refresh:refresh,finalOnly:recordingUpdate,requestRevision:revision,context:context)
             // One bounded final retry; no polling or unbounded provider loop.
             if finalized,case .failed=result,!Task.isCancelled {
-                result=await generator.generate(cacheID:id,session:session,directory:directory,events:events,provider:provider,cloudTextAllowed:allowed,finalized:true,requestRevision:revision)
+                result=await generator.generate(cacheID:id,session:session,directory:directory,events:events,provider:provider,cloudTextAllowed:allowed,finalized:true,requestRevision:revision,context:context)
             }
             guard !Task.isCancelled else{return}
             await MainActor.run { [weak self] in

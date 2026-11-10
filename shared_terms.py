@@ -245,3 +245,63 @@ def term_guide(project_dir=None,limit=TERM_LIMIT,*,project_dirs=None):
     for word in sorted(conflicts):
         lines.append('待核：'+word+' 存在词表冲突，保留原写法，不自动纠正。')
     return lines
+
+TITLE_TERM_LIMIT=80
+
+def _root_names():
+    names=[]
+    for root in connectors().get('project_roots') or []:
+        name=Path(root).name
+        if name and name not in names:names.append(name)
+    return names
+
+def title_context(cache_dir,owners=None):
+    """Local background for naming a meeting: the user's own workspaces, the
+    projects this meeting's words point to, and the standard spelling of
+    every registered term actually heard. Nothing is written."""
+    text=meeting_text(cache_dir)
+    owners=owners if owners is not None else compiled_owners()
+    roots=_root_names()
+    # Ownership must come from the words alone: the old title is what is being replaced.
+    projects=[]
+    for score,path in project_scores(text,owners):
+        if score<PROJECT_MIN_SCORE:continue
+        folder=Path(path).parent
+        label=next((str(Path(r.name)/folder.relative_to(r)) for r in (Path(x) for x in connectors().get('project_roots') or [])
+                    if folder.is_relative_to(r)),folder.name)
+        if label not in projects:projects.append(label)
+    folded=text.casefold();seen=set();terms=[];domains=list(roots);unheard=[]
+    root_keys={name.casefold() for name in roots}
+    order={'project':0,'people':1,'general':2}
+    for owner in sorted(owners,key=lambda o:order.get(o.get('layer'),3)):
+        if owner.get('error'):continue
+        for row in owner['rows']:
+            words=[row['term'],*row['aliases']]
+            own=bool(root_keys & {w.casefold() for w in words})
+            if own:domains.append('、'.join(w for w in words if w.casefold() not in root_keys))
+            key=row['term'].casefold()
+            if key in seen:continue
+            if not any(_searchable(w) and w.casefold() in folded for w in [*words,*row['misheard']]):
+                # Registered names never said here: a title naming one is wrong.
+                if not own:unheard.extend(w for w in words if _searchable(w) and len(w)<=40 and w not in unheard)
+                continue
+            seen.add(key)
+            line=row['term']
+            if row['aliases']:line+='（也称'+'、'.join(row['aliases'])+'）'
+            if row['misheard']:line+='；常被误识为'+'、'.join(row['misheard'])
+            terms.append(line[:160])
+    heard={w.casefold() for line in terms for w in [line]}
+    unheard=[w for w in unheard if not any(w.casefold() in h for h in heard)]
+    return dict(schema=1,domains=[d for d in domains if d][:12],projects=projects[:4],terms=terms[:TITLE_TERM_LIMIT],unheard=unheard[:2000])
+
+if __name__=='__main__':
+    import argparse
+    parser=argparse.ArgumentParser(description='Local meeting naming background.')
+    parser.add_argument('--title-context',required=True,help='meeting cache directory')
+    folder=Path(parser.parse_args().title_context)
+    try:
+        if folder.is_symlink() or not (folder/'meeting.json').is_file():raise ValueError('scope')
+        print(json.dumps(title_context(folder),ensure_ascii=False))
+    except Exception:
+        print(json.dumps(dict(schema=1,domains=[],projects=[],terms=[],unheard=[])))
+        raise SystemExit(1)
