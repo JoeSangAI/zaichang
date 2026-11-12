@@ -15,6 +15,11 @@ enum MeetingVoiceCheck {
     static let windowSeconds=3.0
     static let neighbourGap=1.0
     static let anchorWindowLimit=40
+    // A long line is judged from a few evenly spread windows, not all of
+    // them: a 3-hour meeting then takes a minute or two, not five.
+    static let lineWindowLimit=4
+    // Helper processes are bounded by SpeakerRefinementJob's own ceiling.
+    static let helperTimeout:TimeInterval=1800
 
     struct Span:Equatable {let id:String;let parent:String;let source:String;let start:Double;let end:Double}
     struct Verdict:Equatable {let name:String;let score:Double;let margin:Double;let between:Bool}
@@ -61,6 +66,12 @@ enum MeetingVoiceCheck {
     }
 
     // MARK: decision (pure, tested offline with synthetic vectors)
+
+    static func lineWindows(_ start:Double,_ end:Double)->[(Double,Double)] {
+        let all=windows(start,end)
+        guard all.count>lineWindowLimit else{return all}
+        return (0..<lineWindowLimit).map{all[Int((Double($0)*Double(all.count-1)/Double(lineWindowLimit-1)).rounded())]}
+    }
 
     static func windows(_ start:Double,_ end:Double)->[(Double,Double)] {
         let length=end-start
@@ -169,7 +180,7 @@ enum MeetingVoiceCheck {
         }
         var checked=0
         for span in spans where pinned[span.id]==nil && pinned[span.parent]==nil && span.end-span.start>=longSeconds {
-            let rows=windows(span.start,span.end).compactMap{vector(span.source,$0.0,$0.1)}
+            let rows=lineWindows(span.start,span.end).compactMap{vector(span.source,$0.0,$0.1)}
             if !rows.isEmpty {vectors[span.id]=rows;checked+=1}
         }
         let verdicts=decide(spans:spans,pinned:pinned,vectors:vectors)

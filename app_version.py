@@ -1,9 +1,9 @@
 """The one version both editions ship. Bump it here and nowhere else."""
-VERSION = '0.4.23'
-BUILD = '2026111203'
+VERSION = '0.4.24'
+BUILD = '2026111204'
 # Set to VERSION only after checking native/FirstRunGuide.swift still fits this release:
 # new services, permissions, setup steps or wording. Installing and publishing refuse otherwise.
-FIRST_RUN_REVIEWED_FOR = '0.4.23'
+FIRST_RUN_REVIEWED_FOR = '0.4.24'
 
 
 def first_run_review_problem():

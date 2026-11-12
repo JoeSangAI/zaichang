@@ -112,10 +112,30 @@ class CoarseAudioTests(unittest.TestCase):
         self.assertFalse(body["stream"])
         self.assertEqual(body["messages"][0]["role"], "system")
         audio = body["messages"][1]["content"][1]["input_audio"]
-        self.assertTrue(audio["data"].startswith("data:audio/wav;base64,"))
-        self.assertTrue(wave.open(io.BytesIO(base64.b64decode(audio["data"].split(",", 1)[1]))).getnchannels() == 1)
-        self.assertEqual(timeout, coarse.REQUEST_TIMEOUT_SECONDS)
+        sent = base64.b64decode(audio["data"].split(",", 1)[1])
+        if coarse.AUDIO_ENCODER.is_file():
+            # Compressed for slow uplinks: AAC (ADTS) and smaller than the WAV.
+            self.assertEqual(audio["format"], "aac")
+            self.assertTrue(audio["data"].startswith("data:audio/aac;base64,"))
+            self.assertLess(len(sent), len(pcm_wav))
+            self.assertEqual(sent[0], 0xFF)
+        else:
+            self.assertEqual(audio["format"], "wav")
+            self.assertTrue(wave.open(io.BytesIO(sent)).getnchannels() == 1)
+        self.assertGreaterEqual(timeout, coarse.REQUEST_TIMEOUT_SECONDS)
         self.assertEqual(result["units"][0]["unit_id"], "u1")
+
+    def test_http_falls_back_to_wav_and_scales_timeout_with_upload_size(self):
+        payload = json.dumps({"choices": [{"message": {"content": json.dumps(self.result()[0])}}]}).encode()
+        opener = FakeOpener(payload)
+        pcm_wav = coarse._wav_bytes(b"\x00\x01" * 16000 * 150)
+        with patch.object(coarse, "AUDIO_ENCODER", coarse.Path("/nonexistent/afconvert")):
+            coarse._http_call("synthetic-key", pcm_wav, "prompt", 2048, opener=opener)
+        request, timeout = opener.calls[0]
+        audio = json.loads(request.data)["messages"][1]["content"][1]["input_audio"]
+        self.assertEqual(audio["format"], "wav")
+        # A 4.8 MB window at 20 KB/s needs minutes, not the 90-second floor.
+        self.assertGreater(timeout, 300)
 
     def test_http_text_only_request_omits_audio(self):
         payload = json.dumps({"choices": [{"message": {"content": json.dumps({"units": []})}}]}).encode()

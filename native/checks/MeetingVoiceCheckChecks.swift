@@ -37,6 +37,13 @@ func meetingVoiceCheckChecks() throws {
     let thin=MeetingVoiceCheck.decide(spans:spans,pinned:["a1":"林晓","b1":"周岚"],vectors:["a1":[lin],"b1":[zhou],"u1":[lin]])
     guard thin.isEmpty else{throw fail("voice_check_needs_two_samples")}
     guard MeetingVoiceCheck.windows(0,1.4).isEmpty,MeetingVoiceCheck.windows(0,2).count==1,MeetingVoiceCheck.windows(0,9.5).count==3 else{throw fail("voice_check_windows")}
+    // A long meeting must finish inside the helper's time limit: each long
+    // line is judged from a few spread windows, and the limit is the same
+    // 30 minutes every other meeting helper gets (0.4.23 gave it 5).
+    let spread=MeetingVoiceCheck.lineWindows(0,600)
+    guard spread.count==MeetingVoiceCheck.lineWindowLimit,spread.first!.0==0,spread.last!.1==600,
+          MeetingVoiceCheck.lineWindows(0,9.5).count==3,
+          MeetingVoiceCheck.helperTimeout>=1800 else{throw fail("voice_check_long_meeting_budget")}
 
     // Only names the user set for a line count; a voice's inherited name does not.
     let key:[String:Any]=["session":"s","source":"app","epoch":"e","identity":"slot:1"]

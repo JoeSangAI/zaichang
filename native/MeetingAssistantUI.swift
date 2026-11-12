@@ -157,7 +157,7 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
     var quickVoiceUndoScope:(session:String,cache:String,generation:Int,revision:Int)?;var quickVoiceUndoPending=false
     var voiceprintService:VoiceprintRecommendationService?;var voiceprintCandidates:[SessionSpeakerKey:VoiceprintRecommendation]=[:];var voiceprintSuggestionArchive:VoiceprintArchive?;var voiceprintGeneration=0;var voiceprintStatus=""
     let savedVoiceRecognitionJob=SpeakerRefinementJob(timeout:120)
-    let voiceCheckJob=SpeakerRefinementJob(timeout:300);var voiceCheckPending:DispatchWorkItem?
+    let voiceCheckJob=SpeakerRefinementJob(timeout:MeetingVoiceCheck.helperTimeout);var voiceCheckPending:DispatchWorkItem?;var voiceCheckRunning:String?
     var savedVoiceRecognitionExecutorOverride:((SavedVoiceRecognitionRequest,UUID,@escaping(UUID,Result<Data,Error>)->Void)->Void)?
     var workerInput:FileHandle?;var activeSession:String?;var identitySnapshot:[String:Any]?;var humanIdentityAuthorized=false;var identityBusy=false;var profileStore:ProfileArchiveStore?;var balanceState=BalanceSnapshotState();var balanceCredentials:BalanceCredentials?;var balancePermission=false;var lastWorkerManual:[String:String]=[:]
     var pausedTailStates:[String:String]=[:];var pausedTailRevision:Int?;var lastRecordingControlRevision = -1

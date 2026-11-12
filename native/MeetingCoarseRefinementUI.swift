@@ -248,6 +248,7 @@ extension Delegate {
                     let key=try injected != nil ? "synthetic":Credential.load(allowInteraction:false)
                     guard let key,!key.isEmpty else{throw Failure(code:"coarse_key_unavailable")}
                     guard job.isCurrent(token) else{return}
+                    let windowsBefore=Self.coarseCompletedWindows(folder)
                     let completed:(UUID,Result<Data,Error>)->Void = { returned,result in
                         self.cacheWriteQueue.async {
                             guard job.isCurrent(returned) else{return}
@@ -282,10 +283,22 @@ extension Delegate {
                                     self.continuePendingCoarseBatch(cacheID:cacheID,session:session)
 
                                 }
-                            } catch {DispatchQueue.main.async{
+                            } catch {
+                                // A long meeting on a slow line can outlast one worker's
+                                // time limit. Finished windows are kept, so continue from
+                                // there, but only while each run still makes progress.
+                                let resume=(error as? SpeakerRefinementJobError) == .timeout && !isSavedScope &&
+                                    (Self.coarseCompletedWindows(folder) ?? 0)>(windowsBefore ?? 0)
+                                DispatchQueue.main.async{
                                 self.failSpeakerRefinement(token:returned,cacheID:cacheID,session:session,generation:generation,revision:revision,error:error,job:job)
                                 self.showCoarseFailureIfCurrent(cacheID:cacheID,session:session,error:error)
                                 self.continuePendingCoarseBatch(cacheID:cacheID,session:session)
+                                if resume,self.currentCacheID==cacheID,self.activeSession==session {
+                                    DispatchQueue.main.asyncAfter(deadline:.now()+3){[weak self] in
+                                        guard let self,self.currentCacheID==cacheID,self.activeSession==session else{return}
+                                        self.retrySpeakerRefinement()
+                                    }
+                                }
                             }}
                         }
                     }
@@ -299,6 +312,12 @@ extension Delegate {
             }
         }
         }
+    }
+    /// Windows already finished in this meeting's tidy-up ledger.
+    static func coarseCompletedWindows(_ folder:URL)->Int? {
+        guard let object=try? SpeakerRefinement.object(folder.appendingPathComponent("coarse-audio-progress.json"),limit:32*1024*1024),
+              let status=object["status"] as? [String:Any] else{return nil}
+        return status["completed"] as? Int
     }
     func continuePendingCoarseBatch(cacheID:String,session:String) {
         guard !quitting,!meetingDeletionBusy,
