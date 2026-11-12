@@ -160,7 +160,9 @@ import AppKit
     try check(whole.naming.voiceConfirmations.allSatisfy{record in record.segmentIDs.allSatisfy{whole.naming.key(segment:$0)==slot0}},"a_followed_slot_is_never_a_training_label")
     try check(!whole.naming.voiceConfirmations.contains{$0.segmentIDs.contains("w-9")},"turns_after_naming_wait_for_the_end_of_capture")
     try check(whole.naming.extendSpeakerConfirmations(session:wholeSession) && whole.naming.voiceConfirmations.contains{$0.segmentIDs.contains("w-9")} && !whole.naming.extendSpeakerConfirmations(session:wholeSession),"end_of_capture_covers_turns_said_since_naming_once")
-    try check(whole.textView(whole.output,clickedOnLink:speakerLinkPrefix+"w-0",at:0) && whole.confirmationController!.field.stringValue=="合成甲","reopening_a_named_person_prefills_the_name")
+    // A line of someone already named asks about that line; the voice keeps its name.
+    try check(whole.textView(whole.output,clickedOnLink:speakerLinkPrefix+"w-0",at:0) && whole.confirmationController!.field.stringValue.isEmpty && whole.confirmationController!.lineScopeForChecks==0,"a_named_line_opens_on_this_line_only")
+    try check(whole.confirmationController!.wholeForChecks() && whole.confirmationController!.field.stringValue=="合成甲","choosing_the_whole_meeting_prefills_the_name")
     whole.confirmationController!.field.stringValue="合成乙";whole.confirmationController!.commit()
     try check(whole.naming.name(segment:"w-2")=="合成乙","correcting_the_name_reaches_every_turn")
     try wholePump{whole.naming.displayName(speaker:slot1)?.value=="合成乙"}
@@ -178,12 +180,22 @@ import AppKit
     // A live turn can open with someone else's words; the name clicked still decides.
     _=whole.textView(whole.output,clickedOnLink:speakerLinkPrefix+"w-0",at:0)
     let mixedTurn=whole.confirmationController!
-    mixedTurn.startTurnWithForChecks("w-6");mixedTurn.field.stringValue="合成丁";mixedTurn.controlTextDidChange(Notification(name:NSControl.textDidChangeNotification,object:mixedTurn.field));mixedTurn.commit()
+    _=mixedTurn.wholeForChecks();mixedTurn.startTurnWithForChecks("w-6");mixedTurn.field.stringValue="合成丁";mixedTurn.controlTextDidChange(Notification(name:NSControl.textDidChangeNotification,object:mixedTurn.field));mixedTurn.commit()
     try wholePump{whole.naming.name(speaker:slot0)=="合成丁" && whole.naming.name(speaker:slot2)==nil && whole.confirmationController?.speakerSaveInFlight != true}
     try check(whole.textView(whole.output,clickedOnLink:speakerLinkPrefix+"w-6",at:0),"another_person_opens_too")
     let narrowed=whole.confirmationController!
     narrowed.onlyThisForChecks();narrowed.field.stringValue="只这一段";narrowed.controlTextDidChange(Notification(name:NSControl.textDidChangeNotification,object:narrowed.field));narrowed.commit()
     try check(whole.naming.name(segment:"w-6")=="只这一段" && whole.naming.name(segment:"w-7")==nil && whole.naming.name(speaker:slot2)==nil,"only_this_turn_stays_available")
+    // The case that matters: a second person landed in a named voice. Correcting the
+    // line by typing or picking a name changes that line and nothing else.
+    try check(whole.textView(whole.output,clickedOnLink:speakerLinkPrefix+"w-0",at:0),"a_named_line_reopens")
+    let misplaced=whole.confirmationController!
+    misplaced.field.stringValue="合成戊";misplaced.controlTextDidChange(Notification(name:NSControl.textDidChangeNotification,object:misplaced.field));misplaced.commit()
+    try wholePump{whole.naming.name(segment:"w-0")=="合成戊" && whole.confirmationController?.speakerSaveInFlight != true}
+    let lineTurn=whole.readingTurns().first{$0.parts.contains{$0.0=="w-0"}}?.parts.map(\.0) ?? []
+    try check(whole.naming.name(speaker:slot0)=="合成丁" && lineTurn.allSatisfy{whole.naming.name(segment:$0)=="合成戊"} && whole.naming.name(segment:"w-9")=="合成丁","correcting_one_line_leaves_the_named_voice_alone")
+    whole.receive(spoken(10,slot:0,vector:voice(1)));try whole.settleTranscriptForOfflineReview()
+    try check(whole.naming.name(segment:"w-10")=="合成丁","later_lines_of_the_voice_keep_its_name_after_a_line_fix")
     whole.window.close()
     // The link is deliberately narrow; these are the shapes real meetings produced.
     func linkMatcher(_ rows:[(SessionSpeakerKey,Int,[Double])])->VoiceprintMatcher {

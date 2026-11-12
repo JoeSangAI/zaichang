@@ -27,11 +27,12 @@ struct SpeakerTimelineSearchWork {
 }
 
 // Shared with capture and offline native UI. Source namespaces never imply a person.
-// Adjacent 10 ms evidence is run-length encoded and retained for the two-hour
-// session budget. `frames` remains an expanded compatibility view for offline use.
+// Adjacent 10 ms evidence is run-length encoded and kept for the whole meeting,
+// however long it runs: a long meeting is a few megabytes of runs, and a meeting
+// must not stop naming speakers part way. `frames` remains an expanded
+// compatibility view for offline use.
 struct SpeakerTimeline {
     static let frameDuration=0.01
-    static let maximumHistorySeconds=7200.0
     private static let timeTolerance=1e-7
     private static let intersectionTolerance=1e-8
 
@@ -45,7 +46,6 @@ struct SpeakerTimeline {
     private var activeSoloStart:Double?
     private var activeSoloEnd:Double?
     private(set) var historyOrigin:Double?
-    private(set) var historyLimitReached=false
     var revision=0
 
     var frames:[SpeakerFrame] {
@@ -71,7 +71,6 @@ struct SpeakerTimeline {
     var compressedRunCount:Int {evidenceRuns.count}
     var firstFrameStart:Double? {evidenceRuns.first?.start}
     var lastFrameEnd:Double? {prefixMaximumEnds.last}
-    var historyEndLimit:Double? {historyOrigin.map{$0+Self.maximumHistorySeconds}}
 
     mutating func setHistoryOriginIfNeeded(_ origin:Double) {
         guard historyOrigin==nil,origin.isFinite else{return}
@@ -92,7 +91,7 @@ struct SpeakerTimeline {
 
     mutating func replace(_ incoming:[SpeakerFrame],revision next:Int) {
         guard next>revision else{return}
-        evidenceRuns=[];prefixMaximumEnds=[];storedFrameCount=0;historyLimitReached=false
+        evidenceRuns=[];prefixMaximumEnds=[];storedFrameCount=0
         maturedSpeakerSlots=[];slotSoloSeconds=[:];slotLongestSoloSeconds=[:];activeSoloSlot=nil;activeSoloStart=nil;activeSoloEnd=nil
         if historyOrigin==nil,let first=incoming.map(\.start).filter({$0.isFinite}).min(){historyOrigin=first}
         for frame in incoming where frame.start.isFinite && frame.end.isFinite && frame.end>frame.start {
@@ -102,7 +101,7 @@ struct SpeakerTimeline {
     }
 
     mutating func clear() {
-        evidenceRuns=[];prefixMaximumEnds=[];storedFrameCount=0;historyOrigin=nil;historyLimitReached=false;revision=0
+        evidenceRuns=[];prefixMaximumEnds=[];storedFrameCount=0;historyOrigin=nil;revision=0
         maturedSpeakerSlots=[];slotSoloSeconds=[:];slotLongestSoloSeconds=[:];activeSoloSlot=nil;activeSoloStart=nil;activeSoloEnd=nil
     }
 
@@ -138,13 +137,8 @@ struct SpeakerTimeline {
     }
 
     @discardableResult private mutating func appendBounded(_ original:SpeakerFrame)->Bool {
-        var frame=SpeakerFrame(sourceID:original.sourceID,epoch:original.epoch,revision:original.revision,
+        let frame=SpeakerFrame(sourceID:original.sourceID,epoch:original.epoch,revision:original.revision,
                                start:original.start,end:original.end,activeSlots:original.activeSlots.sorted())
-        if let limit=historyEndLimit {
-            if frame.end>limit+Self.timeTolerance {historyLimitReached=true}
-            if frame.start>=limit-Self.timeTolerance {return false}
-            if frame.end>limit {frame=SpeakerFrame(sourceID:frame.sourceID,epoch:frame.epoch,revision:frame.revision,start:frame.start,end:limit,activeSlots:frame.activeSlots)}
-        }
         guard frame.end>frame.start else{return false}
 
         // Avoid binding the final run to a local value: SpeakerEvidenceRun owns
@@ -250,7 +244,6 @@ struct SpeakerTimeline {
         guard item["source_id"] as? String==source,item["epoch"] as? String==epoch else{return ["basis":"unknown","reason":"source_or_epoch_mismatch"]}
         guard item["end_time_known"] as? Bool==true,let lo=item["start"] as? Double,let hi=item["end"] as? Double,lo.isFinite,hi.isFinite,hi>lo else{return ["basis":"unknown","reason":"no_reliable_span"]}
         if !Decoder.speakerEvidenceAllowed(item) {return ["basis":"unknown","reason":"asr_quality"]}
-        if let limit=historyEndLimit,hi>limit+Self.timeTolerance {return ["basis":"unknown","reason":"speaker_history_limit"]}
         let candidateRange=overlappingRunRange(start:lo,end:hi).range
         var cursor=lo;var voicedSeconds=0.0
         var slotSeconds:[Int:Double]=[:];var longestSlotRun:[Int:Double]=[:];var slotRunStart:[Int:Double]=[:]
@@ -893,12 +886,12 @@ actor SpeakerPipeline {
     func timingSnapshot()->[String:Any] {["backend_calls":backendCalls,"backend_seconds":backendSeconds,"backend_max_seconds":backendMaxSeconds,"embedding_calls":embeddingCalls,"embedding_seconds":embeddingSeconds,"embedding_max_seconds":embeddingMaxSeconds]}
     func diagnosticSnapshot()->[String:Any] {
         var result:[String:Any]=["speaker_input_gain":Double(inputLeveler.gain),"speaker_feature_tiles":featureIndex.rows.count,"speaker_embedding_calls":embeddingCalls,"speaker_frames_total":totalSpeakerFrames,"speaker_single_frames":singleSpeakerFrames,"speaker_overlap_frames":overlapSpeakerFrames,"speaker_unvoiced_frames":unvoicedSpeakerFrames,"speaker_annotation_known_count":annotationCounts["anonymous_cluster"] ?? 0,"speaker_annotation_unknown_count":annotationCounts["unknown"] ?? 0,"speaker_annotation_multiple_count":annotationCounts["multiple"] ?? 0]
-        for reason in ["coverage_gap","speaker_history_limit","no_speaker_evidence","slot_not_matured","insufficient_voiced_evidence","asr_quality","no_reliable_span","source_or_epoch_mismatch"] {result["speaker_unknown_"+reason]=unknownReasonCounts[reason] ?? 0};return result
+        for reason in ["coverage_gap","no_speaker_evidence","slot_not_matured","insufficient_voiced_evidence","asr_quality","no_reliable_span","source_or_epoch_mismatch"] {result["speaker_unknown_"+reason]=unknownReasonCounts[reason] ?? 0};return result
     }
     func offlineFrames()->[SpeakerFrame] {timeline.frames}
     func finishOfflineFrames() async throws->[SpeakerFrame] {
         guard !closed,let backend=backend else{throw SpeakerBackendError.closed}
         add(try await backend.finish(threshold:0.5));return timeline.frames
     }
-    func status()->[String:Any] {["closed":closed,"loaded":loaded,"retained_frames":timeline.retainedFrameCount,"retained_frame_runs":timeline.compressedRunCount,"speaker_history_limit_reached":timeline.historyLimitReached,"speaker_history_limit_seconds":SpeakerTimeline.maximumHistorySeconds,"retained_segments":segments.count,"retained_revision_keys":deliveryRevisions.count,"pending_maturity_segments":Set(pendingMaturity.values.flatMap{$0}).count,"pcm_samples":cursor,"retained_pcm_samples":pcmWindow.count,"retained_feature_tiles":featureIndex.rows.count,"feature_worker_in_flight":featureTask != nil,"embedding_loaded":embedding != nil,"source_id":source,"epoch":epoch]}
+    func status()->[String:Any] {["closed":closed,"loaded":loaded,"retained_frames":timeline.retainedFrameCount,"retained_frame_runs":timeline.compressedRunCount,"retained_segments":segments.count,"retained_revision_keys":deliveryRevisions.count,"pending_maturity_segments":Set(pendingMaturity.values.flatMap{$0}).count,"pcm_samples":cursor,"retained_pcm_samples":pcmWindow.count,"retained_feature_tiles":featureIndex.rows.count,"feature_worker_in_flight":featureTask != nil,"embedding_loaded":embedding != nil,"source_id":source,"epoch":epoch]}
 }

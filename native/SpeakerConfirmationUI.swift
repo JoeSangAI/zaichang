@@ -45,7 +45,11 @@ final class SpeakerConfirmationController:NSObject,NSTextFieldDelegate,NSPopover
     // What was clicked. A live turn can start with someone else's or nobody's
     // words, so the turn's first part says nothing about this person.
     private var openedSegment=""
-    private let onlyThis=NSButton(title:"只改这一段",target:nil,action:nil)
+    // Opened from a line in the transcript rather than from the avatar row.
+    private var fromLine=false
+    // The voice behind the line, kept while the box is narrowed to the line.
+    private var wholeKey:SessionSpeakerKey?
+    private let scopeSwitch=NSSegmentedControl()
     private let voiceChips=NSStackView()
     private var voiceSpellings:[(spelling:String,name:String)]=[]
     private var openedViewportY:CGFloat=0
@@ -65,8 +69,9 @@ final class SpeakerConfirmationController:NSObject,NSTextFieldDelegate,NSPopover
         let identity=key.map{[$0.session,$0.source,$0.epoch,$0.identity].joined(separator:"|")} ?? "unknown"
         return [revision,body,identity].joined(separator:"|")
     }
-    func present(segment:String,anchor:NSView?=nil,showPopover:Bool=true,wholeSpeaker:Bool=false) {
+    func present(segment:String,anchor:NSView?=nil,showPopover:Bool=true,wholeSpeaker:Bool=false,fromLine:Bool=false) {
         guard let owner,let item=owner.namingItem(segment),let current=owner.activeSession else{return}
+        self.fromLine=fromLine && wholeSpeaker
         session=current;openedCache=owner.currentCacheID;draftKey=current+"|"+segment;openedSegment=segment
         readingPosition=owner.captureTranscriptReadingPosition()
         readingRevision=owner.transcriptReadingRestoreRevision;documentGeneration=owner.meetingDocumentGeneration;openedSelection=owner.output.selectedRange();openedViewportY=owner.scroll?.contentView.bounds.origin.y ?? 0
@@ -169,16 +174,32 @@ final class SpeakerConfirmationController:NSObject,NSTextFieldDelegate,NSPopover
                 context.append(chips)
             }
             voiceChips.orientation = .horizontal;voiceChips.spacing=6;voiceChips.isHidden=true
+            let personBox=speakerKey != nil
             if speakerKey != nil {
-                // One small box: hear a line, type or pick a name, Enter. The name
-                // covers this voice for the whole meeting; picking someone merges.
+                // One small box: hear a line, type or pick a name, Enter. From the
+                // avatar row the name covers this voice for the whole meeting and
+                // picking someone merges. From a line in the transcript the box is
+                // about that line: it quotes and plays it, and a person already
+                // named here keeps their name unless "本场全部" is chosen, because
+                // the voice model sometimes puts a second person into a named voice.
                 scope.isHidden=true;learn.isHidden=true;status.isHidden=true;buttons.isHidden=true
-                onlyThis.target=self;onlyThis.action=#selector(narrowToThisTurn);onlyThis.bezelStyle = .inline
-                buttons.insertArrangedSubview(onlyThis,at:0)
                 more.title="更多…"
-                previewID=groupIDs.compactMap{id in owner.namingItem(id).map{(id,$0)}}.filter{$0.1["final"] as? Bool==true}
-                    .max{let a=($0.1["end"] as? Double ?? 0)-($0.1["start"] as? Double ?? 0),b=($1.1["end"] as? Double ?? 0)-($1.1["start"] as? Double ?? 0);return a<b}?.0 ?? segment
-                if !spoken.isEmpty,let quote=context.first,let item=owner.namingItem(previewID),let line=item["text"] as? String,!line.isEmpty {
+                func longest(_ ids:[String])->String? {
+                    ids.compactMap{id in owner.namingItem(id).map{(id,$0)}}.filter{$0.1["final"] as? Bool==true}
+                        .max{let a=($0.1["end"] as? Double ?? 0)-($0.1["start"] as? Double ?? 0),b=($1.1["end"] as? Double ?? 0)-($1.1["start"] as? Double ?? 0);return a<b}?.0
+                }
+                previewID=(fromLine ? longest(segmentIDs):nil) ?? longest(groupIDs) ?? segment
+                if fromLine {
+                    let turns=owner.readingTurns().filter{turn in turn.parts.contains{owner.naming.key(segment:$0.0)==speakerKey}}.count
+                    scopeSwitch.segmentCount=2;scopeSwitch.setLabel("只改这一段",forSegment:0);scopeSwitch.setLabel("本场全部 \(turns) 轮",forSegment:1)
+                    scopeSwitch.trackingMode = .selectOne;scopeSwitch.controlSize = .small;scopeSwitch.target=self;scopeSwitch.action=#selector(scopeChanged)
+                    scopeSwitch.setAccessibilityLabel("修改范围")
+                    context.insert(scopeSwitch,at:spoken.isEmpty ? 0:1)
+                    wholeKey=speakerKey
+                    if owner.naming.name(speaker:speakerKey!) != nil {speakerKey=nil}
+                    scopeSwitch.selectedSegment=speakerKey==nil ? 0:1
+                }
+                if !fromLine,!spoken.isEmpty,let quote=context.first,let item=owner.namingItem(previewID),let line=item["text"] as? String,!line.isEmpty {
                     ((quote.subviews.first as? NSTextField))?.stringValue="“"+line.trimmingCharacters(in:.whitespacesAndNewlines)+"”"
                 }
                 listen.target=self;listen.action=#selector(listenQuickVoice);listen.isBordered=false;listen.title=""
@@ -190,14 +211,14 @@ final class SpeakerConfirmationController:NSObject,NSTextFieldDelegate,NSPopover
                     (quote.subviews.first as? NSTextField)?.preferredMaxLayoutWidth=232
                     let row=NSStackView(views:[listen,quote]);row.spacing=8;row.alignment = .centerY;context[0]=row
                 }
-                field.placeholderString=owner.naming.displayName(speaker:speakerKey!) == nil ? "这是谁？":"改名"
                 title.isHidden=true
+                applyScope()
             }
             // The whole-speaker box reads top-down: the line, the name, then people to pick.
-            let lead=speakerKey != nil && !spoken.isEmpty ? 1:0
+            let lead=personBox && !spoken.isEmpty ? 1:0
             let tail:[NSView]=[voiceChips,candidates,scope,learn,status,buttons]
             var ordered:[NSView]=[title]
-            if speakerKey != nil {ordered+=Array(context.prefix(lead));ordered.append(field);ordered+=Array(context.dropFirst(lead))}
+            if personBox {ordered+=Array(context.prefix(lead));ordered.append(field);ordered+=Array(context.dropFirst(lead))}
             else {ordered+=context;ordered.append(field)}
             fields=ordered+tail
         }
@@ -215,7 +236,7 @@ final class SpeakerConfirmationController:NSObject,NSTextFieldDelegate,NSPopover
                 popover.contentViewController?.view.window?.makeFirstResponder(field)
             }
             if quickCandidate==nil {service=SharedPersonIdentityService(root:owner.root);search()}
-            if speakerKey != nil && quickCandidate==nil {listenQuickVoice()}
+            if (speakerKey != nil || fromLine) && quickCandidate==nil {listenQuickVoice()}
         }
         refreshValidity()
         if quickCandidate==nil {
@@ -241,13 +262,32 @@ final class SpeakerConfirmationController:NSObject,NSTextFieldDelegate,NSPopover
     }
     @objc private func pickVoiceName(_ sender:NSButton) {
         field.stringValue=sender.title;selectedPerson=nil;refreshValidity();refreshVoiceChips()
-        if speakerKey != nil {commit()} else {popover.contentViewController?.view.window?.makeFirstResponder(field)}
+        if speakerKey != nil || fromLine {commit()} else {popover.contentViewController?.view.window?.makeFirstResponder(field)}
     }
     func onlyThisForChecks() {narrowToThisTurn()}
+    var lineScopeForChecks:Int {scopeSwitch.selectedSegment}
+    func wholeForChecks()->Bool {guard wholeKey != nil else{return false};scopeSwitch.selectedSegment=1;scopeChanged();return speakerKey != nil}
     func startTurnWithForChecks(_ id:String) {segmentIDs.insert(id,at:0)}
     @objc private func narrowToThisTurn() {
-        speakerKey=nil;onlyThis.isHidden=true
-        status.stringValue="只改这一段，确认后保存在本机。";resizePopover()
+        if wholeKey==nil {wholeKey=speakerKey}
+        speakerKey=nil;scopeSwitch.selectedSegment=0;applyScope()
+    }
+    @objc private func scopeChanged() {
+        speakerKey=scopeSwitch.selectedSegment==1 ? wholeKey:nil;applyScope()
+        popover.contentViewController?.view.window?.makeFirstResponder(field)
+    }
+    // A line keeps an empty field (who said it?); the whole voice starts from its name.
+    private func applyScope() {
+        guard let owner,let key=wholeKey ?? speakerKey else{return}
+        let current=owner.naming.displayName(speaker:key)?.value
+        if speakerKey==nil {
+            field.placeholderString="这段是谁说的？"
+            if field.stringValue==current {field.stringValue=""}
+        }else {
+            field.placeholderString=current==nil ? "这是谁？":"改名"
+            if field.stringValue.isEmpty,let current {field.stringValue=current}
+        }
+        refreshValidity();resizePopover()
     }
     private func historySelectionEligible(_ ids:[String])->Bool {
         guard let owner else{return false}
@@ -441,7 +481,7 @@ final class SpeakerConfirmationController:NSObject,NSTextFieldDelegate,NSPopover
                 self?.committed=true;owner.confirmationDrafts.removeValue(forKey:savedDraftKey)
                 if let key=self?.quickKey {owner.voiceprintCandidates.removeValue(forKey:key)}
                 if self?.quickCandidate != nil,let cache=savedCache,owner.naming.correctionRevision==revision {owner.quickVoiceUndoScope=(savedSession,cache,savedGeneration,revision)}
-                let confirmation=self?.speakerKey != nil ? "已改为「"+name+"」：本场 \(turnCount) 轮，后面的发言也会用这个名字":self?.quickCandidate==nil ? "姓名已保存":name+" · 已确认"
+                let confirmation=self?.speakerKey != nil ? "已改为「"+name+"」：本场 \(turnCount) 轮，后面的发言也会用这个名字":self?.fromLine==true ? "这段已改为「"+name+"」，其他发言不变":self?.quickCandidate==nil ? "姓名已保存":name+" · 已确认"
                 self?.popover.close();owner.showTransientFeedback(confirmation,nameUndo:true);owner.refreshOpenSpeakerReview();owner.reloadLibraryAfterVoiceprintNameWrite()
             case .failure:
                 if owner.naming.correctionRevision==revision {owner.naming=previous;owner.markAllTranscriptParentsDirty()}
@@ -454,7 +494,7 @@ final class SpeakerConfirmationController:NSObject,NSTextFieldDelegate,NSPopover
     @objc private func undo() {owner?.undoName();popover.close()}
     @objc private func pickMeetingName(_ sender:NSButton) {
         field.stringValue=sender.title;selectedPerson=nil;refreshValidity()
-        if speakerKey != nil {commit();return}
+        if speakerKey != nil || fromLine {commit();return}
         popover.contentViewController?.view.window?.makeFirstResponder(field)
     }
     @objc private func openDetails() {popover.close();owner?.openSpeakerReview(for:owner?.naming.key(segment:openedSegment))}
@@ -526,9 +566,9 @@ extension Delegate {
         confirmationController?.popover.close()
         let controller=SpeakerConfirmationController(owner:self);confirmationController=controller;controller.present(segment:id,anchor:anchor)
     }
-    func showSpeakerConfirmation(_ segment:String,wholeSpeaker:Bool=false,anchor:NSView?=nil) {
+    func showSpeakerConfirmation(_ segment:String,wholeSpeaker:Bool=false,anchor:NSView?=nil,fromLine:Bool=false) {
         guard !(workspaceOwner ?? self).meetingDeletionBusy else{return}
         confirmationController?.popover.close()
-        let controller=SpeakerConfirmationController(owner:self);confirmationController=controller;controller.present(segment:segment,anchor:anchor,wholeSpeaker:wholeSpeaker)
+        let controller=SpeakerConfirmationController(owner:self);confirmationController=controller;controller.present(segment:segment,anchor:anchor,wholeSpeaker:wholeSpeaker,fromLine:fromLine)
     }
 }

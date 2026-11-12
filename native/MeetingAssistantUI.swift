@@ -1583,7 +1583,7 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
         text.append(NSAttributedString(string:"  "+speaker,attributes:base.merging([.font:MeetingVisualStyle.nameFont,.foregroundColor:unresolved ? MeetingVisualStyle.muted:MeetingVisualStyle.ink]){$1}))
         // Clicking a name renames that person, including what they say next.
         if !unresolved,let known=turn.parts.first(where:{readingIdentity($0.0,$0.1) != nil})?.0 ?? turn.parts.first?.0 {
-            text.addAttributes([.link:speakerLinkPrefix+known,.toolTip:"点名字改名，这个人本场的发言一起改 · "+tooltip],range:NSRange(location:text.length-speaker.utf16.count,length:speaker.utf16.count))
+            text.addAttributes([.link:speakerLinkPrefix+known,.toolTip:"点名字：改这一段是谁说的，或改这个人本场全部发言 · "+tooltip],range:NSRange(location:text.length-speaker.utf16.count,length:speaker.utf16.count))
         }
         if originalLabel=="待确认",let id=turn.parts.first?.0 {
             let who=(text.string as NSString).range(of:"是谁？",options:.backwards)
@@ -1807,7 +1807,7 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
     func textView(_ textView:NSTextView,clickedOnLink link:Any,at charIndex:Int)->Bool {
         guard let value=link as? String else{return false}
         let wholeSpeaker=value.hasPrefix(speakerLinkPrefix),id=wholeSpeaker ? String(value.dropFirst(speakerLinkPrefix.count)):value
-        guard let item=namingItem(id) else{return false};naming.register(segment:id,item:item);showSpeakerConfirmation(id,wholeSpeaker:wholeSpeaker);return true
+        guard let item=namingItem(id) else{return false};naming.register(segment:id,item:item);showSpeakerConfirmation(id,wholeSpeaker:wholeSpeaker,fromLine:true);return true
     }
     func beginInlineName(_ id:String) {
         guard !(workspaceOwner ?? self).meetingDeletionBusy else{return}

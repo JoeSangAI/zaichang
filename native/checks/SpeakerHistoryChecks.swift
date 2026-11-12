@@ -604,15 +604,17 @@ func speakerHistoryChecks() async throws -> [String:Any] {
         return (timeline,ProcessInfo.processInfo.systemUptime-start)
     }
     let (oneHour,oneHourSeconds)=buildRevisionHistory(frameCount:360_000)
-    var (twoHours,twoHourSeconds)=buildRevisionHistory(frameCount:720_000)
+    let (twoHours,twoHourSeconds)=buildRevisionHistory(frameCount:720_000)
     let linearScale=twoHourSeconds/max(oneHourSeconds,0.001)
     check(oneHour.retainedFrameCount==360_000 && oneHour.revisionSpanCount==1_800,"one-hour per-batch revision history")
-    check(twoHours.retainedFrameCount==720_000 && twoHours.revisionSpanCount==3_600 && twoHours.compressedRunCount==1 && !twoHours.historyLimitReached,"two-hour per-batch revision retention")
+    check(twoHours.retainedFrameCount==720_000 && twoHours.revisionSpanCount==3_600 && twoHours.compressedRunCount==1,"two-hour per-batch revision retention")
     check(linearScale<3.5,"revision-history append scales approximately linearly")
     check(twoHours.join(event("two-hour-tail",7199.90,7200),source:"remote",epoch:"history-check")["cluster_id"] as? Int==7,"last in-budget interval")
-    twoHours.append([frame(7200,7200.01,[2])])
-    check(twoHours.historyLimitReached && twoHours.retainedFrameCount==720_000 &&
-          twoHours.join(event("over-budget",7200,7200.01),source:"remote",epoch:"history-check")["reason"] as? String=="speaker_history_limit","explicit two-hour cap")
+    // Meetings longer than two hours keep naming speakers from start to end.
+    var long=SpeakerTimeline();long.setHistoryOriginIfNeeded(0)
+    long.append(stride(from:0.0,to:9000.0,by:100.0).map{frame($0,$0+100,[Int($0/100)%2==0 ? 2:3])})
+    check(long.join(event("after-two-hours",8810,8890),source:"remote",epoch:"history-check")["cluster_id"] as? Int==2,"speakers are still named after two hours")
+    check(long.join(event("first-minute",10,20),source:"remote",epoch:"history-check")["cluster_id"] as? Int==2 && long.compressedRunCount==90,"the start of a long meeting is kept")
 
     // Many runs verify lower-bound lookup work stays logarithmic plus matches.
     var indexed=SpeakerTimeline();indexed.setHistoryOriginIfNeeded(0)
@@ -678,7 +680,7 @@ func speakerHistoryChecks() async throws -> [String:Any] {
     check(featureClosed["retained_feature_tiles"] as? Int==0,"close releases meeting-local feature vectors")
 
     return ["type":"speaker_history_checks","passed":passed,"delayed_final_seconds":309,
-            "history_limit_seconds":SpeakerTimeline.maximumHistorySeconds,"two_hour_frames_retained":720_000,
+            "two_hour_frames_retained":720_000,
             "two_hour_compressed_runs":twoHours.compressedRunCount,"two_hour_revision_spans":twoHours.revisionSpanCount,
             "one_hour_append_seconds":oneHourSeconds,"two_hour_append_seconds":twoHourSeconds,"two_hour_to_one_hour_elapsed_ratio":linearScale,"indexed_runs":indexed.compressedRunCount,
             "indexed_binary_comparisons":search.binarySearchComparisons,"indexed_candidate_runs":search.candidateRunCount,
