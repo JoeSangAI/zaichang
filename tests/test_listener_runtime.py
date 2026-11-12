@@ -477,6 +477,8 @@ class ListenerTests(ListenerHarness):
         prompt = AssistantRuntime._listener_prompt()
         self.assertNotIn('不发消息', prompt); self.assertNotIn('不需要回应', prompt)
         self.assertIn('say', prompt); self.assertIn('start_task', prompt)
+        # Sides with the user's goal; risks come with a usable alternative.
+        self.assertIn('站在用户这一方', prompt); self.assertIn('替代说法', prompt)
 
     async def test_start_task_works_beside_listening_and_reports_back(self):
         data = await self.start_work()
