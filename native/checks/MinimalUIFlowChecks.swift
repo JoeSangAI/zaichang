@@ -88,7 +88,7 @@ private struct MinimalFixtureTitleProvider:MeetingTitleProvider {
     let cardChecks=try meetingCardSummaryChecks(directory:directory);checks.append("participant_card_summary")
     let reviewUI=try await minimalSpeakerUIChecks(owner:owner,directory:directory);checks.append("speaker_ui_edits_and_narrow_layout")
     try owner.settleTranscriptForOfflineReview()
-    try await meetingAutoTitleFixture();checks.append("auto_title_offline_mock");try await meetingTitleGeneratorChecks();checks.append("auto_title_generator_retitle")
+    try await meetingAutoTitleFixture();checks.append("auto_title_offline_mock");try await meetingTitleGeneratorChecks();checks.append("auto_title_generator_retitle");try meetingVoiceCheckChecks();checks.append("voice_check_rejudge")
     owner.phase.phase = .recording;owner.updateUI();owner.openSpeakerReview()
     let reviewWindow=owner.speakerReviewWindow
     let commandsBeforeClose=commands

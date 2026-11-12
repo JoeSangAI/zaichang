@@ -43,7 +43,9 @@ struct ManualRunOverride {
     let end:Double
     let text:String
 }
-enum SessionNameOrigin:String {case manual,voiceprint,semantic}
+// voiceCheck: the meeting's own voices, judged after it against the lines
+// the user named personally (MeetingVoiceCheck). Never a confirmation.
+enum SessionNameOrigin:String {case manual,voiceprint,semantic,voiceCheck="voice_check"}
 struct SessionDisplayName {
     let value:String;let origin:SessionNameOrigin
     var visibleValue:String {value}
@@ -69,6 +71,7 @@ struct SessionNames {
     private var autoNames:[SessionSpeakerKey:SessionAutoName]=[:];private var voiceSuggestions:[SessionSpeakerKey:SessionAutoName]=[:];private var autoSuppressed:Set<SessionSpeakerKey>=[]
     private var correctedBindings:Set<String>=[];private var bindings:[String:SessionSpeakerKey]=[:];private var aliases:[SessionSpeakerKey:SessionSpeakerKey]=[:];private var sessions:[String:String]=[:]
     private var validatedVoiceRevisions:[String:Int]=[:]
+    private var voiceChecks:[String:String]=[:]
     private var segmentRevisions:[String:Int]=[:]
     private var runAnchors:[String:RunAnchor]=[:]
     private var anchorsByParent:[String:Set<String>]=[:]
@@ -131,7 +134,17 @@ struct SessionNames {
     func name(segment:String)->String? {sentenceNames[segment] ?? key(segment:segment).flatMap{speakerNames[$0]}}
     func sentenceName(segment:String)->String? {sentenceNames[segment]}
     func name(speaker:SessionSpeakerKey)->String? {speakerNames[canonical(speaker)]}
+    /// Replaces the after-meeting voice check; names the user set still win.
+    mutating func applyVoiceChecks(_ names:[String:String]) {voiceChecks=names}
+    func voiceCheckName(segment:String)->String? {
+        guard sentenceNames[segment]==nil,!correctedBindings.contains(segment) else{return nil}
+        return voiceChecks[segment]
+    }
     func displayName(segment:String)->SessionDisplayName? {
+        // A line the user named or moved stays theirs. Otherwise the voice
+        // check outranks a name the line only inherited from its voice.
+        if let manual=sentenceNames[segment] {return SessionDisplayName(value:manual,origin:.manual)}
+        if let checked=voiceCheckName(segment:segment) {return SessionDisplayName(value:checked,origin:.voiceCheck)}
         if let manual=name(segment:segment) {return SessionDisplayName(value:manual,origin:.manual)}
         guard let key=key(segment:segment) else{return nil}
         if let value=voiceSuggestion(for:key),validatedVoiceRevisions[value.personID]==value.archiveRevision,
@@ -568,9 +581,10 @@ struct SessionNames {
         }
         personReferences=refs.filter{sessions[$0.key]==session && name(segment:$0.key)==$0.value.name}
         voiceConfirmations=confirmations.filter{record in record.segmentIDs.allSatisfy{sessions[$0]==session && name(segment:$0)==record.name}}
+        voiceChecks=directory.map{MeetingVoiceCheck.load(directory:$0,session:session,namesData:originalData)} ?? [:]
         undoStack=value.undo ?? [];correctionRevision &+= 1
     }
-    mutating func reset() {correctionRevision &+= 1;speakerOrder=[];correctedBindings=[];sentenceNames=[:];speakerNames=[:];semanticNames=[:];semanticMatcher=LocalSemanticNames();autoNames=[:];voiceSuggestions=[:];autoSuppressed=[];bindings=[:];aliases=[:];sessions=[:];segmentRevisions=[:];runAnchors=[:];anchorsByParent=[:];personReferences=[:];voiceConfirmations=[];undoStack=[];lastUndoSegmentIDs=[];restoredAutoNameInvalidated=false;validatedVoiceRevisions=[:]}
+    mutating func reset() {correctionRevision &+= 1;speakerOrder=[];correctedBindings=[];sentenceNames=[:];speakerNames=[:];semanticNames=[:];semanticMatcher=LocalSemanticNames();autoNames=[:];voiceSuggestions=[:];autoSuppressed=[];bindings=[:];aliases=[:];sessions=[:];segmentRevisions=[:];runAnchors=[:];anchorsByParent=[:];personReferences=[:];voiceConfirmations=[];undoStack=[];lastUndoSegmentIDs=[];restoredAutoNameInvalidated=false;validatedVoiceRevisions=[:];voiceChecks=[:]}
 }
 func sessionSpeakerMappingChecks()->Int {
     var n=SessionNames();var checks=0

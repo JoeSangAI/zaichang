@@ -97,6 +97,9 @@ struct TranscriptExportSnapshot {
 
     private func identity(_ id:String,_ item:[String:Any])->String? {
         if names.sentenceName(segment:id) != nil {return "manual:"+id}
+        if let name=names.voiceCheckName(segment:id) {
+            return [item["session"] as? String ?? "",item["source_id"] as? String ?? "",item["epoch"] as? String ?? "","manual-name",name].joined(separator:"\u{001F}")
+        }
         guard let key=names.key(segment:id) ?? SessionSpeakerKey.from(item) else{return nil}
         if let name=names.displayName(segment:id),name.origin == .voiceprint,names.displayName(speaker:key)==nil {
             return [key.session,key.source,key.epoch,key.identity,"voiceprint",name.value].joined(separator:"\u{001F}")

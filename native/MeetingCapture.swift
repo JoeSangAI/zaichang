@@ -1501,6 +1501,13 @@ struct CaptureControlAcknowledgement {
                     print(String(data:try JSONSerialization.data(withJSONObject:result,options:[.sortedKeys]),encoding:.utf8)!);return
                 } catch let error as SpeakerRefinementArtifactError {throw Failure(code:"acoustic_"+String(describing:error).lowercased())}
             }
+            if args.count==3,args[1]=="--voice-check" {
+                let input=FileHandle.standardInput.readData(ofLength:65537)
+                guard !input.isEmpty,input.count<=65536,let request=try JSONSerialization.jsonObject(with:input) as? [String:Any],
+                      let folder=request["folder"] as? String,let session=request["session"] as? String else{throw Failure(code:"voice_check_request_invalid")}
+                let result=try MeetingVoiceCheck.run(folder:URL(fileURLWithPath:folder,isDirectory:true),session:session,modelURL:URL(fileURLWithPath:args[2]))
+                print(String(data:try JSONSerialization.data(withJSONObject:result,options:[.sortedKeys]),encoding:.utf8)!);return
+            }
             if args.count==3,args[1]=="--saved-voice-recognition" {
                 let input=FileHandle.standardInput.readData(ofLength:65537)
                 guard !input.isEmpty,input.count<=65536 else{throw Failure(code:"saved_voice_request_too_large")}

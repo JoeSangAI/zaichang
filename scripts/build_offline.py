@@ -73,7 +73,7 @@ if not args.helper_only:
  ui+=['MeetingAssistantLinks','MeetingMarkdown','MeetingMarkdownChecks','MeetingAgentPanel','MeetingAgentBridge','MeetingAgentChecks']
  ui+=['RuntimeConfiguration','RuntimeConfigurationChecks','MeetingMinutes','MeetingMinutesUI','MeetingMinutesChecks','EditionUIChecks','FirstRunGuide','AppUpdate','AppUpdateChecks']
  ui+=['MeetingNotes','MeetingNotesUI','MeetingNotesChecks']
- ui+=['MeetingSpeechIntervals','MeetingAcousticRefinement','SavedVoiceRecognition','SavedVoiceRecognitionUI','SavedVoiceRecognitionChecks','VoiceSuggestionPersistenceChecks','HistoricalVoiceEnrollment','VoiceprintAutomaticLearning','VoiceprintAutomaticLearningChecks']
+ ui+=['MeetingSpeechIntervals','MeetingAcousticRefinement','MeetingVoiceCheck','MeetingVoiceCheckUI','MeetingVoiceCheckChecks','SavedVoiceRecognition','SavedVoiceRecognitionUI','SavedVoiceRecognitionChecks','VoiceSuggestionPersistenceChecks','HistoricalVoiceEnrollment','VoiceprintAutomaticLearning','VoiceprintAutomaticLearningChecks']
  for name in ui:shutil.copy2(source_file(name),ui_sources/(name+'.swift'))
  subprocess.run(['xcrun','swiftc','-whole-module-optimization','-parse-as-library','-swift-version','5','-module-cache-path',str(work/'module-cache'),*[str(ui_sources/(f+'.swift')) for f in ui],'-o',str(binary)],check=True)
  shutil.copy2(binary,app/'Contents/MacOS/MeetingAssistant')
@@ -82,7 +82,7 @@ if not args.ui_only:
  for stale in s.glob('*.swift'):stale.unlink()
  files=['MeetingCoarseRefinement','OfflineSpeakerBackend','WholeMeetingSpeakerRefinement','SpeakerRefinement','SpeakerRefinementArtifact','VoiceprintAcousticContext','HistoricalVoiceLearning','MeetingAbsoluteTime','SessionSpeakerKey','CaptureSafetyChecks','SpeakerHistoryChecks','SourcePipelineFixture','AudioSourceIdentity','ProcessAudioSources','SourceCaptureSession','EchoPreprocessor','TranscriptTimeline','LocalSpeakerBackend','SpeakerPipeline','SessionRecovery','RecordingJournal','SessionCacheRecoveryChecks','CapturePrimitives','PipelineFixture','ASRDecoder','SpeakerEmbeddingBackend','IndependentClockFixture','OfflineSpeechProbe','BufferedCaptureFixture','PublicAudioTrial','LocalRecording','MeetingCapture','NetworkRecoveryFixture']
  files+=['RuntimeConfiguration','RuntimeConfigurationChecks']
- files+=['SavedVoiceRecognition','MeetingAcousticRefinement','MeetingSpeechIntervals']
+ files+=['SavedVoiceRecognition','MeetingAcousticRefinement','MeetingVoiceCheck','MeetingSpeechIntervals']
  for f in files:shutil.copy2(source_file(f),s/(f+'.swift'))
  c=h/'Sources/SherpaC';c.mkdir(parents=True,exist_ok=True);shutil.copy2(native/'local-embedding-install/c-api.h',c/'c-api.h');(c/'module.modulemap').write_text('module SherpaC { header "c-api.h" link "sherpa-onnx-c-api" export * }\n')
  sdk=native/'local-speaker-install/sdk';lib=native/'local-embedding-install/runtime/lib'

@@ -157,6 +157,7 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
     var quickVoiceUndoScope:(session:String,cache:String,generation:Int,revision:Int)?;var quickVoiceUndoPending=false
     var voiceprintService:VoiceprintRecommendationService?;var voiceprintCandidates:[SessionSpeakerKey:VoiceprintRecommendation]=[:];var voiceprintSuggestionArchive:VoiceprintArchive?;var voiceprintGeneration=0;var voiceprintStatus=""
     let savedVoiceRecognitionJob=SpeakerRefinementJob(timeout:120)
+    let voiceCheckJob=SpeakerRefinementJob(timeout:300);var voiceCheckPending:DispatchWorkItem?
     var savedVoiceRecognitionExecutorOverride:((SavedVoiceRecognitionRequest,UUID,@escaping(UUID,Result<Data,Error>)->Void)->Void)?
     var workerInput:FileHandle?;var activeSession:String?;var identitySnapshot:[String:Any]?;var humanIdentityAuthorized=false;var identityBusy=false;var profileStore:ProfileArchiveStore?;var balanceState=BalanceSnapshotState();var balanceCredentials:BalanceCredentials?;var balancePermission=false;var lastWorkerManual:[String:String]=[:]
     var pausedTailStates:[String:String]=[:];var pausedTailRevision:Int?;var lastRecordingControlRevision = -1
@@ -722,7 +723,7 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
                 self.coarseProcessingProgress=nil;self.coarseProcessingSummary=completionSummary
             }
             self.updateUI();self.refreshOpenSpeakerReview()
-            self.scheduleSavedVoiceRecognition()
+            self.scheduleSavedVoiceRecognition();self.scheduleVoiceCheck()
         }
     }
     var canRetrySpeakerRefinement:Bool {
@@ -802,7 +803,7 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
             }
         }
         if let warning=events.first?["speaker_reconciliation_warning"] as? String {phase.error=warning;diagnostic.stringValue=warning}
-        if !preserveNames,let names=payload.names,let session=activeSession {try naming.restore(names,session:session,events:events,directory:item.directory);if naming.restoredAutoNameInvalidated {persistSessionNames();reloadLibraryAfterVoiceprintNameWrite()};spokenRowsCache.removeAll();markAllTranscriptParentsDirty()}
+        if !preserveNames,let names=payload.names,let session=activeSession {try naming.restore(names,session:session,events:events,directory:item.directory);if naming.restoredAutoNameInvalidated {persistSessionNames();reloadLibraryAfterVoiceprintNameWrite()};spokenRowsCache.removeAll();markAllTranscriptParentsDirty();scheduleVoiceCheck()}
         if let archive=payload.archive,events.isEmpty {recoveredArchiveText=archive;output.string=archive;empty.isHidden=true}
         else {renderText()}
     }
@@ -1405,6 +1406,10 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
     }
     func readingIdentity(_ id:String,_ item:[String:Any])->String? {
         if naming.sentenceName(segment:id) != nil {return "manual:"+id}
+        // The after-meeting voice check groups by person, like a manual name.
+        if let name=naming.voiceCheckName(segment:id) {
+            return [item["session"] as? String ?? "",item["source_id"] as? String ?? "",(item["epoch"] as? String) ?? "","manual-name",name].joined(separator:"\u{001F}")
+        }
         guard let key=naming.key(segment:id) ?? SessionSpeakerKey.from(item) else{return nil}
         if let name=naming.displayName(segment:id),name.origin == .voiceprint,naming.displayName(speaker:key)==nil {
             return [key.session,key.source,key.epoch,key.identity,"voiceprint",name.value].joined(separator:"\u{001F}")
@@ -1851,6 +1856,7 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
                     let same=previous.flatMap{try? JSONSerialization.jsonObject(with:$0)}.flatMap{$0 as? NSDictionary}.map{old in (try? JSONSerialization.jsonObject(with:data)).flatMap{$0 as? NSDictionary}.map{old.isEqual(to:$0 as! [AnyHashable:Any])} ?? false} ?? false
                     if !same {try data.write(to:file,options:.atomic);try FileManager.default.setAttributes([.posixPermissions:0o600],ofItemAtPath:file.path)}
                     DispatchQueue.main.async {
+                        if !same,self.activeSession==session,self.currentCacheID==id {self.scheduleVoiceCheck()}
                         if self.activeSession==session,self.currentCacheID==id,self.meetingDocumentGeneration==generation,self.naming.correctionRevision==revision {
                             self.synchronizeCommittedVoiceMemory(session:session,confirmations:confirmations,revision:revision)
                             if manualNamesChanged {self.rematchLiveVoices()}

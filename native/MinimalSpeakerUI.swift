@@ -332,7 +332,7 @@ private final class MinimalSpeakerReviewController:NSObject,NSWindowDelegate,NST
         let source="来源："+sourceTitle(key)
         if let name=owner?.naming.displayName(speaker:key) {
             if name.origin == .manual {return "人工确认姓名：\(name.value) · \(source)"}
-            let basis=name.origin == .voiceprint ? "声音识别候选" : "语义识别候选"
+            let basis=name.origin == .semantic ? "语义识别候选" : "声音识别候选"
             return "\(basis)：\(name.value)，尚未人工确认 · \(source)"
         }
         if let candidate=owner?.voiceprintRecommendation(for:key) {
@@ -1772,6 +1772,22 @@ extension Delegate {
             if let name=naming.displayName(speaker:person.key)?.visibleValue {if seen.insert(name).inserted {named.append((name,id))}}
             else if seconds>=5 {unnamed.append(id)}
         }
+        // Names set for single lines, or given by the after-meeting voice
+        // check, belong to no voice; they still show here. Their chip edits
+        // the line it opens with, never a whole voice.
+        var lines:[String:(seconds:Double,id:String,longest:Double)]=[:]
+        for turn in readingTurns() {
+            for part in turn.parts {
+                guard let shown=naming.displayName(segment:part.0),shown.origin == .manual || shown.origin == .voiceCheck,!seen.contains(shown.value),
+                      let start=part.1["start"] as? Double,let end=part.1["end"] as? Double,end>start,end-start<3600 else{continue}
+                var entry=lines[shown.value] ?? (0,part.0,0);entry.seconds+=end-start
+                if end-start>entry.longest {entry.id=part.0;entry.longest=end-start}
+                lines[shown.value]=entry
+            }
+        }
+        for (name,entry) in lines.sorted(by:{$0.value.seconds>$1.value.seconds}) where entry.seconds>=3 {
+            seen.insert(name);named.append((name,"line:"+entry.id))
+        }
         func chip(_ title:String,_ id:String,avatar:NSImage,tint:NSColor)->NSButton {
             let button=ImmediateButton(title:title,target:self,action:#selector(openSpeakerChip(_:)));button.isBordered=false
             button.image=avatar;button.imagePosition = .imageLeading;button.font = .systemFont(ofSize:12.5);button.contentTintColor=tint
@@ -1789,8 +1805,10 @@ extension Delegate {
         strip.isHidden=strip.arrangedSubviews.isEmpty
     }
     @objc func openSpeakerChip(_ sender:NSButton) {
-        guard let id=sender.identifier?.rawValue,let item=namingItem(id) else{return}
-        naming.register(segment:id,item:item);showSpeakerConfirmation(id,wholeSpeaker:true,anchor:sender)
+        guard let raw=sender.identifier?.rawValue else{return}
+        let line=raw.hasPrefix("line:"),id=line ? String(raw.dropFirst(5)):raw
+        guard let item=namingItem(id) else{return}
+        naming.register(segment:id,item:item);showSpeakerConfirmation(id,wholeSpeaker:!line,anchor:sender)
     }
     func openSpeakerReview(for key:SessionSpeakerKey?=nil) {
         if let existing=speakerReviewWindow as? SpeakerReviewWindow,let controller=existing.reviewController {
