@@ -89,3 +89,16 @@ class TitleContextTests(unittest.TestCase):
         self.assertEqual(value['domains'],['工作','我司'])
         self.assertEqual(value['terms'],['闲鱼；常被误识为咸鱼','九界；常被误识为九届'])
         self.assertEqual(value['unheard'],['菜鸟驿站','Agent'])
+        # Only the leading project's own mishearings; shared tables are never swapped.
+        self.assertEqual(value['spellings'],[['咸鱼','闲鱼'],['九届','九界']])
+
+    def test_title_spellings_skip_ambiguous_misheard_words(self):
+        row=lambda term,aliases=(),misheard=():dict(term=term,aliases=list(aliases),misheard=list(misheard))
+        owners=[dict(path='/w/工作/通用.md',layer='general',error=None,rows=[row('晴川',(),('长城',))]),
+                dict(path='/w/工作/客户/青禾/实体与术语.md',layer='project',error=None,
+                     rows=[row('青禾露',(),('清禾露','禾露')),row('禾露花园',(),('禾露',)),row('金穗',(),('金岁',)),row('金岁')])]
+        with tempfile.TemporaryDirectory() as folder, \
+             patch('shared_terms.meeting_text',return_value='清禾露和禾露花园，金穗和金岁，长城'), \
+             patch('shared_terms.connectors',return_value={'project_roots':['/w/工作']}):
+            value=terms.title_context(Path(folder),owners)
+        self.assertEqual(value['spellings'],[['清禾露','青禾露']])

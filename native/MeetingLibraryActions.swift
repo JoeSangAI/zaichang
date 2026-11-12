@@ -207,7 +207,7 @@ struct MeetingRecycleBinRow {
                 let value=try object(folder.appendingPathComponent(track+"-manifest.json"))
                 guard value["track"] as? String==track,let bytes=value["written_bytes"] as? Int,bytes>=0,bytes<=512*1024*1024 else{throw Failure(code:"recycle_row_unreadable")}
                 let origin=metadata["capture_origin_uptime"] as? Double,trackOrigin=value["origin_uptime"] as? Double
-                let offset=(origin != nil && trackOrigin != nil && origin!.isFinite && trackOrigin!.isFinite && trackOrigin!>=origin! && trackOrigin!-origin!<=7200) ? trackOrigin!-origin!:0
+                let offset=(origin != nil && trackOrigin != nil && origin!.isFinite && trackOrigin!.isFinite && trackOrigin!>=origin! && trackOrigin!-origin!<=86400) ? trackOrigin!-origin!:0
                 duration=max(duration ?? 0,Double(bytes)/32000+offset)
             }
             row.duration=duration

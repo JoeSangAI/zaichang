@@ -572,4 +572,23 @@ func meetingTitleGeneratorChecks() async throws {
     let prompt = context.prompt(transcript: input.transcript)
     guard prompt.contains("我的公司"), prompt.contains("工作/客户/闲鱼"), prompt.hasSuffix(input.transcript),
           MeetingTitleContext.empty.prompt(transcript: "原文") == "逐字稿：\n原文" else { throw Failure(code: "title_context_prompt") }
+
+    // A registered mishearing copied by the model is swapped for the standard
+    // spelling after naming, without another model call.
+    let spelled = MeetingTitleContext(terms: ["青禾露；常被误识为清禾露、禾露"],
+                                      spellings: [("清禾露", "青禾露"), ("禾露", "青禾露"), ("ocean", "Ocean Spray")])
+    guard spelled.respelled("清禾露｜中秋投放复盘") == "青禾露｜中秋投放复盘",
+          spelled.respelled("青禾露｜中秋投放复盘") == "青禾露｜中秋投放复盘",
+          spelled.respelled("禾露与山泉｜复盘") == "青禾露与山泉｜复盘",
+          spelled.respelled("Oceanic｜复盘") == "Oceanic｜复盘",
+          spelled.respelled("OCEAN｜复盘") == "Ocean Spray｜复盘",
+          MeetingTitleContext.empty.respelled("清禾露｜复盘") == "清禾露｜复盘" else { throw Failure(code: "title_registered_spelling") }
+    let spellingID = UUID().uuidString, spellingFolder = root.appendingPathComponent(spellingID)
+    try FileManager.default.createDirectory(at: spellingFolder, withIntermediateDirectories: true)
+    try JSONSerialization.data(withJSONObject: ["session": session, "cache_id": spellingID]).write(to: spellingFolder.appendingPathComponent("meeting.json"))
+    let misheard = await MeetingAutoTitle().generate(cacheID: spellingID, session: session, directory: spellingFolder, events: marked,
+        provider: FixtureTitleProvider(titleText: "清禾露｜中秋投放复盘", delayNanoseconds: 0), cloudTextAllowed: true, finalized: true,
+        context: spelled)
+    guard case .saved("青禾露｜中秋投放复盘") = misheard,
+          try MeetingDisplayInfoStore.load(in: spellingFolder)?.title == "青禾露｜中秋投放复盘" else { throw Failure(code: "title_registered_spelling_saved") }
 }

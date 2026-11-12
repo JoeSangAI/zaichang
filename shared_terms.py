@@ -263,16 +263,32 @@ def title_context(cache_dir,owners=None):
     owners=owners if owners is not None else compiled_owners()
     roots=_root_names()
     # Ownership must come from the words alone: the old title is what is being replaced.
-    projects=[]
+    projects=[];top=None
     for score,path in project_scores(text,owners):
         if score<PROJECT_MIN_SCORE:continue
+        top=top or path
         folder=Path(path).parent
         label=next((str(Path(r.name)/folder.relative_to(r)) for r in (Path(x) for x in connectors().get('project_roots') or [])
                     if folder.is_relative_to(r)),folder.name)
         if label not in projects:projects.append(label)
-    folded=text.casefold();seen=set();terms=[];domains=list(roots);unheard=[]
+    folded=text.casefold();seen=set();terms=[];domains=list(roots);unheard=[];spellings=[]
     root_keys={name.casefold() for name in roots}
     order={'project':0,'people':1,'general':2}
+    # A title's misheard spelling is replaced only from the leading project's
+    # own table (shared tables list everyday words such as 长城), and only when
+    # it points to one term and is not itself another term's spelling.
+    known={};targets={}
+    for owner in owners:
+        if owner.get('error'):continue
+        for row in owner['rows']:
+            for word in [row['term'],*row['aliases']]:known.setdefault(word.casefold(),set()).add(row['term'].casefold())
+            for word in row['misheard']:targets.setdefault(word.casefold(),set()).add(row['term'].casefold())
+    ambiguous={word for word,values in targets.items() if len(values|known.get(word,set()))>1}
+    for owner in owners:
+        if owner['path']!=top or owner.get('layer')!='project' or owner.get('error'):continue
+        for row in owner['rows']:
+            spellings.extend([word,row['term']] for word in row['misheard']
+                             if _searchable(word) and len(word)<=40 and len(row['term'])<=40 and word.casefold() not in ambiguous)
     for owner in sorted(owners,key=lambda o:order.get(o.get('layer'),3)):
         if owner.get('error'):continue
         for row in owner['rows']:
@@ -292,7 +308,8 @@ def title_context(cache_dir,owners=None):
             terms.append(line[:160])
     heard={w.casefold() for line in terms for w in [line]}
     unheard=[w for w in unheard if not any(w.casefold() in h for h in heard)]
-    return dict(schema=1,domains=[d for d in domains if d][:12],projects=projects[:4],terms=terms[:TITLE_TERM_LIMIT],unheard=unheard[:2000])
+    return dict(schema=1,domains=[d for d in domains if d][:12],projects=projects[:4],terms=terms[:TITLE_TERM_LIMIT],unheard=unheard[:2000],
+                spellings=spellings[:400])
 
 if __name__=='__main__':
     import argparse
@@ -303,5 +320,5 @@ if __name__=='__main__':
         if folder.is_symlink() or not (folder/'meeting.json').is_file():raise ValueError('scope')
         print(json.dumps(title_context(folder),ensure_ascii=False))
     except Exception:
-        print(json.dumps(dict(schema=1,domains=[],projects=[],terms=[],unheard=[])))
+        print(json.dumps(dict(schema=1,domains=[],projects=[],terms=[],unheard=[],spellings=[])))
         raise SystemExit(1)
