@@ -136,6 +136,7 @@ struct SessionNames {
     func name(speaker:SessionSpeakerKey)->String? {speakerNames[canonical(speaker)]}
     /// Replaces the after-meeting voice check; names the user set still win.
     mutating func applyVoiceChecks(_ names:[String:String]) {voiceChecks=names}
+    var appliedVoiceChecks:[String:String] {voiceChecks}
     func voiceCheckName(segment:String)->String? {
         guard sentenceNames[segment]==nil,!correctedBindings.contains(segment) else{return nil}
         return voiceChecks[segment]

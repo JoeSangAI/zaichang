@@ -176,6 +176,10 @@ extension Delegate {
         }
         // An explicit retry rebuilds from the complete current transcript and
         // therefore subsumes any queued append-only follow-up.
+        // The tidy-up reconciles voices against the names saved when it starts;
+        // a voice check landing midway would redraw and re-save them. It runs
+        // again once the tidy-up has finished.
+        if !isSavedScope {cancelVoiceCheck()}
         if trigger=="manual_retry" {speakerRefinementNeedsRetry=false}
         owner.savedCoarseJobs.removeValue(forKey:cacheID)
         owner.pendingCoarseCutoffs.removeValue(forKey:cacheID)

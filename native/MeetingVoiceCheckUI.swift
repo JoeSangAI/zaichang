@@ -13,6 +13,18 @@ extension Delegate {
         DispatchQueue.main.asyncAfter(deadline:.now()+delay,execute:work)
     }
 
+    func cancelVoiceCheck() {
+        voiceCheckPending?.cancel();voiceCheckPending=nil
+        voiceCheckJob.cancel();voiceCheckRunning=nil
+    }
+
+    private func showVoiceCheck(_ names:[String:String]) {
+        guard names != naming.appliedVoiceChecks else{return}
+        naming.applyVoiceChecks(names)
+        markAllTranscriptParentsDirty();renderText();updateUI()
+        refreshSpeakerStrip(force:true);refreshOpenSpeakerReview()
+    }
+
     private var voiceCheckAllowed:Bool {
         guard !quitting,!Credential.offline,!previewRenderOnly || isHistoryReader,!hasRunningCoarseRefinement else{return false}
         if isHistoryReader {return !voiceprintManagementOwner.savedVoiceRecognitionBlocksHistory}
@@ -25,8 +37,18 @@ extension Delegate {
         let model=URL(fileURLWithPath:root).appendingPathComponent("native/local-embedding-install/3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx")
         let executable=captureExecutableURL
         cacheWriteQueue.async { [weak self] in
-            guard MeetingVoiceCheck.isStale(directory:folder,session:session),
-                  let names=try? Data(contentsOf:folder.appendingPathComponent("session-names.json")),
+            // Already checked for these names (perhaps while a tidy-up ran):
+            // show the saved result instead of computing it again.
+            if !MeetingVoiceCheck.isStale(directory:folder,session:session) {
+                guard let names=try? Data(contentsOf:folder.appendingPathComponent("session-names.json")) else{return}
+                let saved=MeetingVoiceCheck.load(directory:folder,session:session,namesData:names)
+                DispatchQueue.main.async { [weak self] in
+                    guard let self,self.currentCacheID==cache,self.activeSession==session,!self.hasRunningCoarseRefinement else{return}
+                    self.showVoiceCheck(saved)
+                }
+                return
+            }
+            guard let names=try? Data(contentsOf:folder.appendingPathComponent("session-names.json")),
                   let object=(try? JSONSerialization.jsonObject(with:names)) as? [String:Any],
                   let digest=MeetingVoiceCheck.namesDigest(object) else{return}
             DispatchQueue.main.async { [weak self] in
@@ -65,9 +87,9 @@ extension Delegate {
                         DispatchQueue.main.async { [weak self] in
                             guard let self,job.isCurrent(returned),self.currentCacheID==cache,self.activeSession==session else{return}
                             if self.voiceCheckRunning==scope {self.voiceCheckRunning=nil}
-                            self.naming.applyVoiceChecks(checked.names)
-                            self.markAllTranscriptParentsDirty();self.renderText();self.updateUI()
-                            self.refreshSpeakerStrip(force:true);self.refreshOpenSpeakerReview()
+                            // Saved either way; shown after a tidy-up that started meanwhile.
+                            guard !self.hasRunningCoarseRefinement else{return}
+                            self.showVoiceCheck(checked.names)
                         }
                     }
                 }

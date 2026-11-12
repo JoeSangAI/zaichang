@@ -395,7 +395,17 @@ func meetingCoarseRefinementUIChecks(directory:URL)throws->[String] {
     // Require this detached request to create its own artifact; earlier phases
     // already exercised reuse of an existing coarse sidecar.
     try FileManager.default.removeItem(at:sidecar)
+    // Opening a meeting starts the after-meeting voice check; pressing
+    // 重新整理 right away must stop it, or its result lands mid-tidy-up and
+    // fails the run with acoustic_names_changed.
+    view.voiceCheckRunning="fixture-check"
+    _=view.voiceCheckJob.startProcess(request:[:],executable:URL(fileURLWithPath:"/bin/sleep"),arguments:["30"]) {_,_ in}
+    let voiceCheckStarted=Date().addingTimeInterval(5)
+    while !view.voiceCheckJob.busy && Date()<voiceCheckStarted {RunLoop.current.run(until:Date().addingTimeInterval(0.02))}
+    try check(view.voiceCheckJob.busy,"voice_check_fixture_running_before_retry")
     view.scheduleSpeakerRefinement(trigger:"manual_retry",allowUnsealed:false)
+    try check(!view.voiceCheckJob.busy && !view.voiceCheckJob.waiting && view.voiceCheckRunning==nil && view.voiceCheckPending==nil,
+              "manual_retry_right_after_open_stops_voice_check")
     guard let detached=takeRequest(until:Date().addingTimeInterval(5)),
           let detachedJob=view.savedCoarseJobs[cacheID],detachedJob === view.speakerRefinementJob else {
         throw Failure(code:"coarse_ui_new_meeting_detach_fixture_missing")
