@@ -1,0 +1,4 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><OutputType>WinExe</OutputType><TargetFramework>net10.0-windows</TargetFramework><UseWPF>true</UseWPF><EnableWindowsTargeting>true</EnableWindowsTargeting><Nullable>enable</Nullable><ImplicitUsings>enable</ImplicitUsings><AssemblyName>Zaichang</AssemblyName></PropertyGroup>
+  <ItemGroup><PackageReference Include="NAudio.Core" Version="2.3.0" /><PackageReference Include="NAudio.Wasapi" Version="2.3.0" /></ItemGroup>
+</Project>

@@ -4,6 +4,8 @@
 
 <h1 align="center">在场 · Zaichang</h1>
 
+Windows 原生适配正在开发，构建方法和当前限制见 [Windows 开发预览](docs/WINDOWS.md)，尚未正式发布。
+
 <h3 align="center">别人的会也能留下原文；开会时，随时有外脑在场。</h3>
 
 <p align="center">Mac 上的会议记录与 AI 助理：留下原文，认出熟悉的声音，<br>在讨论中提问、核对数据，并在需要时获得主动提醒。</p>

@@ -2147,7 +2147,11 @@ async def _serve(service: AssistantRuntime):
     loop = asyncio.get_running_loop()
     reader = asyncio.StreamReader(limit=MAX_PROTOCOL_LINE_BYTES)
     protocol = asyncio.StreamReaderProtocol(reader)
-    transport, _ = await loop.connect_read_pipe(lambda: protocol, sys.stdin.buffer)
+    if sys.platform == "win32":
+        from windows_stdio import StdinTransport
+        transport = StdinTransport(loop, protocol, sys.stdin.buffer)
+    else:
+        transport, _ = await loop.connect_read_pipe(lambda: protocol, sys.stdin.buffer)
 
     async def process_line(line: str):
         try:

@@ -10,7 +10,11 @@ import contextlib
 import json
 import logging
 import os
-import resource
+import sys
+try:
+    import resource
+except ImportError:
+    resource = None
 import signal
 import subprocess
 from collections import defaultdict, deque
@@ -34,6 +38,16 @@ class RuntimeErrorCode(Exception):
 
 def process_headroom() -> int:
     """Free process slots for this user; 0 when the machine cannot even fork."""
+    if resource is None:
+        import ctypes
+        class Memory(ctypes.Structure):
+            _fields_ = [("length", ctypes.c_ulong), ("load", ctypes.c_ulong),
+                        *[(name, ctypes.c_uint64) for name in ("total", "available", "page_total", "page_available", "virtual_total", "virtual_available", "extended")]]
+        memory = Memory(); memory.length = ctypes.sizeof(memory)
+        if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(memory)):
+            return 0
+        # Windows has no RLIMIT_NPROC; keep 128 MiB free per potential worker.
+        return int(memory.available // (128 * 1024 * 1024))
     limit = resource.getrlimit(resource.RLIMIT_NPROC)[0]
     try:
         if limit == resource.RLIM_INFINITY:
@@ -53,6 +67,7 @@ class CodexRuntime:
         self.experimental_api = experimental_api
         self.args = tuple(args)
         self.process = None
+        self._windows_job = None
         self._next_id = 0
         self._pending: dict[int, asyncio.Future] = {}
         self._events: dict[str, deque] = defaultdict(deque)
@@ -79,6 +94,14 @@ class CodexRuntime:
             raise RuntimeErrorCode("machine_process_limit") from exc
         except FileNotFoundError as exc:
             raise RuntimeErrorCode("codex_not_installed") from exc
+        if sys.platform == "win32":
+            from windows_process import Job
+            try:
+                self._windows_job = Job(self.process.pid)
+            except BaseException:
+                self.process.kill()
+                await self.process.wait()
+                raise
         self.closed = False
         self._reader = asyncio.create_task(self._read())
         self._stderr = asyncio.create_task(self._drain_stderr())
@@ -288,6 +311,9 @@ class CodexRuntime:
 
     async def _end_session(self):
         """Nothing this process started may outlive it."""
+        if sys.platform == "win32":
+            if self._windows_job: self._windows_job.close()
+            return
         for sig in (signal.SIGTERM, signal.SIGKILL):
             for check in range(10):
                 try:

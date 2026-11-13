@@ -1,16 +1,19 @@
 """Data-root contract inherited by all Python workers. There is one app, so one data directory."""
 import os
+import sys
 from pathlib import Path
 
 
 def data_root(environment=None):
     env = os.environ if environment is None else environment
+    base = (Path(env.get('LOCALAPPDATA') or Path.home() / 'AppData/Local')
+            if sys.platform == 'win32' else Path.home() / 'Library/Application Support')
     value = env.get('ZAICHANG_DATA_ROOT', '')
     if value and Path(value).is_absolute() and '..' not in Path(value).parts:
         return Path(value)
-    if value and '/' not in value and value not in {'.', '..'}:
-        return Path.home() / 'Library/Application Support' / value
-    return Path.home() / 'Library/Application Support/ZaichangStandalone'
+    if value and '/' not in value and '\\' not in value and ':' not in value and value not in {'.', '..'}:
+        return base / value
+    return base / 'ZaichangStandalone'
 
 
 DEFAULT_ASSISTANT_NAME = '小满'

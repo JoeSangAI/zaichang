@@ -25,3 +25,5 @@ connectors.json
 
 # The owner's private notes, status and settings: never committed
 .local/
+windows/**/bin/
+windows/**/obj/
