@@ -29,6 +29,17 @@ import AppKit
     try check(names.personReference(segment:"confirmed-0")==nil && names.voiceConfirmations.isEmpty,"different_name_revokes_previous_identity_and_learning")
     _=names.undo()
     try check(names.personReference(segment:"confirmed-0")==ref && names.voiceConfirmations.count==1,"undo_correction_restores_original_confirmation")
+    do {
+        var pair=SessionNames();for i in 0..<4 {pair.register(segment:"confirmed-\(i)",item:event(i))}
+        _=pair.confirmSegments(["confirmed-2","confirmed-3"],name:ref.name,learn:true)
+        let saved=try pair.snapshot(session:session),id=pair.voiceConfirmations.first?.id
+        var resegmented=SessionNames();for i in 0..<3 {resegmented.register(segment:"confirmed-\(i)",item:event(i))}
+        try resegmented.restore(saved,session:session)
+        try check(resegmented.voiceConfirmations.map(\.segmentIDs)==[["confirmed-2"]] && resegmented.voiceConfirmations.first?.id==id,"retired_turn_keeps_rest_of_confirmation")
+        var gone=SessionNames();for i in 0..<2 {gone.register(segment:"confirmed-\(i)",item:event(i))}
+        try gone.restore(saved,session:session)
+        try check(gone.voiceConfirmations.isEmpty,"confirmation_without_surviving_turns_is_dropped")
+    }
     _ = NSApplication.shared;NSApp.setActivationPolicy(.prohibited)
     let view=Delegate();view.previewRenderOnly=true;view.applicationDidFinishLaunching(Notification(name:NSApplication.didFinishLaunchingNotification))
     let cacheRoot=fixtureDirectory.appendingPathComponent("SessionCache")

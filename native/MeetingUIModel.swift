@@ -581,7 +581,13 @@ struct SessionNames {
             else {restoredAutoNameInvalidated=true}
         }
         personReferences=refs.filter{sessions[$0.key]==session && name(segment:$0.key)==$0.value.name}
-        voiceConfirmations=confirmations.filter{record in record.segmentIDs.allSatisfy{sessions[$0]==session && name(segment:$0)==record.name}}
+        // Re-segmenting a meeting retires some turn IDs. Keep each confirmation for the turns that still
+        // carry its name; dropping the whole record would revoke the voice it already taught.
+        voiceConfirmations=confirmations.compactMap{record in
+            let kept=record.segmentIDs.filter{sessions[$0]==session && name(segment:$0)==record.name}
+            guard !kept.isEmpty else{return nil}
+            return kept.count==record.segmentIDs.count ? record:SessionVoiceConfirmation(id:record.id,session:record.session,name:record.name,person:record.person,segmentIDs:kept,createdAt:record.createdAt)
+        }
         voiceChecks=directory.map{MeetingVoiceCheck.load(directory:$0,session:session,namesData:originalData)} ?? [:]
         undoStack=value.undo ?? [];correctionRevision &+= 1
     }

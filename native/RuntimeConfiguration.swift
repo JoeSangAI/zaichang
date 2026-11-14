@@ -62,6 +62,16 @@ enum RuntimeConfiguration {
               let schema=value["schema"] as? NSNumber,CFGetTypeID(schema) != CFBooleanGetTypeID(),schema.intValue==1,schema.doubleValue==1 else{return [:]}
         return value
     }
+    /// A zone named in the user's own connectors.json ("time_zone") holds whatever the Mac says: a Mac that picks its
+    /// zone automatically can follow a VPN abroad (2026-11-05, New York) and move times, default titles and dates
+    /// with it. Without one, 在场 follows the Mac like any app.
+    static var pinnedZone:TimeZone? {(connectors["time_zone"] as? String).flatMap(TimeZone.init(identifier:))}
+    /// First thing in every executable: formatters and calendars then use the pinned zone, children inherit it (TZ),
+    /// and meetings already recorded elsewhere are read in it too (MeetingAbsoluteTime).
+    static func applyMeetingZone() {
+        guard let zone=pinnedZone else{return}
+        NSTimeZone.default=zone;setenv("TZ",zone.identifier,1);setenv(MeetingAbsoluteTime.pinnedZoneVariable,zone.identifier,1)
+    }
     static var archiveConfiguration:(url:String,appID:String)? {
         guard let archive=connectors["archive"] as? [String:Any],let raw=archive["url"] as? String,
               let url=URLComponents(string:raw),["http","https"].contains(url.scheme ?? ""),let host=url.host,!host.isEmpty,

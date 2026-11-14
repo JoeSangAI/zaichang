@@ -1459,6 +1459,7 @@ struct CaptureControlAcknowledgement {
 }
 @main struct Main {
     static func main() async {
+        RuntimeConfiguration.applyMeetingZone()
         do {
             let args = CommandLine.arguments
             if args.count==2,args[1]=="--runtime-configuration-self-test",Bundle.main.object(forInfoDictionaryKey:"OfflineOnly") as? Bool==true {

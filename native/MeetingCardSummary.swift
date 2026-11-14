@@ -114,9 +114,10 @@ func meetingParticipantSummary(_ item:CachedMeeting,voiceArchive:VoiceprintArchi
             person.intervals.append((start,end));people[normalized]=person
         } else if let manualID=manualID,let manualName=manualName,!manualName.isEmpty {
             // A sentence-level manual name confirms this utterance, but does not
-            // establish a reusable identity shared with any other utterance.
+            // establish a reusable identity shared with any other utterance. It is
+            // still a name a person gave, so the card lists that name once.
             let oneOff=MeetingSummaryIdentity(session:session,source:"manual",epoch:"",identity:manualID)
-            var person=people[oneOff] ?? MeetingSummaryPerson(title:manualName)
+            var person=people[oneOff] ?? MeetingSummaryPerson(title:manualName,hasDisplayName:true)
             person.intervals.append((start,end));people[oneOff]=person
         }
     }
@@ -168,7 +169,7 @@ func meetingParticipantSummary(_ item:CachedMeeting,voiceArchive:VoiceprintArchi
 
     // Established display names share one meeting-local presentation regardless
     // of recognition source. This never merges acoustic identities or profiles;
-    // unresolved suggestions and one-off sentence labels remain distinct.
+    // unresolved suggestions stay distinct.
     var displayPeople:[String:MeetingSummaryPerson]=[:]
     for (key,person) in people {
         let identityKey=key.session+"\u{001F}"+key.source+"\u{001F}"+key.epoch+"\u{001F}"+key.identity
@@ -341,9 +342,13 @@ final class MeetingParticipantLabel:NSView {
     try names.snapshot(session:session).write(to:folder.appendingPathComponent("session-names.json"),options:.atomic)
     let spanSummary=meetingParticipantSummary(item,voiceArchive:enabledArchive)
     guard spanSummary.contains("示例人") && !spanSummary.contains("（声音识别）"),!spanSummary.contains("可能是示例人") else{throw Failure(code:"meeting_card_identified_spans_show_actual_name")}
+    names.set(segment:"unknown",name:"次要人物");names.set(segment:"suggested-2",name:"次要人物")
+    try names.snapshot(session:session).write(to:folder.appendingPathComponent("session-names.json"),options:.atomic)
+    let sentenceSummary=meetingParticipantSummary(item,voiceArchive:enabledArchive)
+    guard sentenceSummary.filter({$0=="次要人物"}).count==1,sentenceSummary.first=="次要人物" else{throw Failure(code:"meeting_card_sentence_names_listed_once")}
     let empty=MeetingParticipantLabel(names:[])
     guard empty.isHidden else{throw Failure(code:"meeting_card_empty_hidden")}
     let populated=MeetingParticipantLabel(names:summary)
     guard !populated.isHidden,populated.names==summary else{throw Failure(code:"meeting_card_participant_label_values")}
-    return 8
+    return 9
 }

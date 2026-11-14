@@ -15,6 +15,19 @@ func voiceprintLearningChecks(directory:URL)throws->[String] {
     try check(!policy.isEnabled,"continuous_learning_is_off_for_fresh_install")
     policy.setEnabled(true);try check(policy.isEnabled,"continuous_learning_permission_persists_locally")
     policy.setEnabled(false);try check(!policy.isEnabled,"turning_off_learning_is_durable")
+    do {
+        let names=["fresh","legacy","empty"].map{preferenceDomain+"-"+$0}
+        let (fresh,legacy,empty)=(UserDefaults(suiteName:names[0])!,UserDefaults(suiteName:names[1])!,UserDefaults(suiteName:names[2])!)
+        defer {names.forEach{policyDefaults.removePersistentDomain(forName:$0)}}
+        legacy.set(true,forKey:VoiceprintLearningPolicy.preferenceKey)
+        let adopted=VoiceprintLearningPolicy(defaults:fresh)
+        try check(adopted.adoptLegacyChoice(from:[empty,legacy]) && adopted.isEnabled,"legacy_learning_choice_carries_over")
+        adopted.setEnabled(false)
+        try check(!adopted.adoptLegacyChoice(from:[legacy]) && !adopted.isEnabled,"own_learning_choice_beats_legacy")
+        try check(!policy.adoptLegacyChoice(from:[legacy]) && !policy.isEnabled,"legacy_never_overrides_existing_choice")
+        let untouched=VoiceprintLearningPolicy(defaults:empty)
+        try check(!untouched.adoptLegacyChoice(from:[empty]) && !untouched.isEnabled,"no_legacy_choice_stays_off")
+    }
     func sample(_ index:Int,_ voice:Int=0,_ session:String="current")->VoiceprintSample {
         VoiceprintSample(session:session,source:"mic",epoch:"epoch",start:Double(index*5),end:Double(index*5+2),vector:vector(voice))
     }

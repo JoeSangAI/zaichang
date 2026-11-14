@@ -120,6 +120,7 @@ Python 回归位于 `tests/`，原生检查位于 `native/checks/`。`scripts/of
 | `archive` | `{ "url": "http://127.0.0.1:18766", "app_id": "example-archive" }`，可选归档服务接口 |
 | `agent_bridge` | 既有桥接维护脚本的可选参数：`tunnel_id`、`key_file`（仅路径）、`mcp_server`（脚本路径）；普通本机 MCP 注册不需要。该维护脚本不随公开版导出 |
 | `context_hint` | 追加到助理通用提示后的资料说明，不进入只认本场证据的概览 |
+| `time_zone` | 可选，如 `Asia/Shanghai`。写了以后，在场的时间显示、默认标题和导出都固定按这个时区，不随 Mac 的系统时区变（系统开着自动设置时区时，可能跟着 VPN 跑到国外）；不写就跟系统 |
 
 人员加载器沿用候选接口：每项 `id` 为 `person:` 加 20 位小写十六进制，`name`、`aliases`、`organization`、`role` 和 `evidence`（第一项目根内的绝对文件路径列表）。加载器只返回候选，必须人工选择才能绑定。应用不写人员主本。仅配置人员术语表不启用此模块。
 

@@ -2555,6 +2555,7 @@ final class Delegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSTextField
         return ["type":"offline_native_workflow","native_handler_checks":checks,"python_workflow_checks":document["checks"]!,"real_model_pipeline":fixture.evidence,"round":document["round"]!,"window_opened":false,"screen_mouse_keyboard":false,"real_keychain":false,"financial_network":false,"capture":false,"real_voiceprint_quality_verified":false,"fake_archive_removed":true]
     }
     @MainActor static func main() async {
+        RuntimeConfiguration.applyMeetingZone()
         if CommandLine.arguments.contains("--update-probe") {print(AppUpdater.current);exit(0)}
         if runMeetingNotesChecks() {return}
         if CommandLine.arguments.count>=2,Credential.offline {

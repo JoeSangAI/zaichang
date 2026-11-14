@@ -3,6 +3,9 @@ import Foundation
 // Recording offsets omit pauses; these measured anchors restore actual capture
 // time without using cache creation, ASR arrival, or transcript processing time.
 struct MeetingAbsoluteTime {
+    // Set by RuntimeConfiguration.applyMeetingZone when the user pins a zone: the instants stay what was recorded,
+    // and a meeting recorded while the Mac was set elsewhere is read in the pinned zone.
+    static let pinnedZoneVariable="ZAICHANG_PINNED_TIME_ZONE"
     let anchors:[(relative:Double,unix:Double)]
     let zone:TimeZone
     private let displayFormatter:DateFormatter
@@ -19,9 +22,10 @@ struct MeetingAbsoluteTime {
                   anchors.last.map({relative >= $0.relative}) ?? true else{return nil}
             anchors.append((relative,unix))
         }
-        self.anchors=anchors;self.zone=zone
-        let display=DateFormatter();display.locale=Locale(identifier:"en_US_POSIX");display.timeZone=zone;display.dateFormat="HH:mm:ss";displayFormatter=display
-        let iso=DateFormatter();iso.locale=Locale(identifier:"en_US_POSIX");iso.timeZone=zone;iso.dateFormat="yyyy-MM-dd'T'HH:mm:ss.SSSXXXXX";isoFormatter=iso
+        let readZone=ProcessInfo.processInfo.environment[Self.pinnedZoneVariable].flatMap(TimeZone.init(identifier:)) ?? zone
+        self.anchors=anchors;self.zone=readZone
+        let display=DateFormatter();display.locale=Locale(identifier:"en_US_POSIX");display.timeZone=readZone;display.dateFormat="HH:mm:ss";displayFormatter=display
+        let iso=DateFormatter();iso.locale=Locale(identifier:"en_US_POSIX");iso.timeZone=readZone;iso.dateFormat="yyyy-MM-dd'T'HH:mm:ss.SSSXXXXX";isoFormatter=iso
     }
     func date(_ offset:Double,endBoundary:Bool=false)->Date? {
         guard offset.isFinite,offset>=0 else{return nil}

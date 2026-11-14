@@ -458,6 +458,9 @@ extension Delegate {
     }
     func configureVoiceprintRecommendations() {
         guard !previewRenderOnly else{return}
+        if !offlineQA,!mock,!Credential.offline {
+            VoiceprintLearningPolicy().adoptLegacyChoice(from:VoiceprintLearningPolicy.legacyDomains.compactMap{UserDefaults(suiteName:$0)})
+        }
         let folder=RuntimeConfiguration.dataRoot().appendingPathComponent(offlineQA ? "DevelopmentQA/Voiceprints":"Voiceprints")
         voiceprintService=VoiceprintRecommendationService(store:VoiceprintArchiveStore(folder:folder,domain:offlineQA ? "synthetic_model_output":"consented_live_audio"))
         voiceprintService?.learningUpdate={ [weak self] session,status in

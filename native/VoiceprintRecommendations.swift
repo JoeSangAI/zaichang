@@ -641,6 +641,16 @@ struct VoiceprintLearningPolicy {
     init(defaults:UserDefaults = .standard) {self.defaults=defaults}
     var isEnabled:Bool {defaults.object(forKey:Self.preferenceKey) as? Bool ?? false}
     func setEnabled(_ enabled:Bool) {Self.gate.lock();defer{Self.gate.unlock()};defaults.set(enabled,forKey:Self.preferenceKey)}
+    // 0.4.10 moved the app to one bundle identity; the voiceprints moved with the shared data directory
+    // but the learning choice stayed in the old app's preferences. Carry an explicit choice over once.
+    static let legacyDomains=["com.joesang.meeting-assistant.desktop","com.joesang.meeting-assistant"]
+    @discardableResult
+    func adoptLegacyChoice(from legacy:[UserDefaults])->Bool {
+        Self.gate.lock();defer{Self.gate.unlock()}
+        guard defaults.object(forKey:Self.preferenceKey)==nil,
+              let choice=legacy.lazy.compactMap({$0.object(forKey:Self.preferenceKey) as? Bool}).first else{return false}
+        defaults.set(choice,forKey:Self.preferenceKey);return true
+    }
     func commitIfEnabled(_ replace:()throws->Void)throws {
         Self.gate.lock();defer{Self.gate.unlock()}
         guard isEnabled else{throw Failure(code:"voice_learning_not_authorized")}
