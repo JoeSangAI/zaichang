@@ -1,5 +1,6 @@
 import ast
 import inspect
+import json
 import os
 import tempfile
 from pathlib import Path
@@ -26,6 +27,14 @@ class RuntimeConfigurationTests(unittest.TestCase):
         self.assertEqual(runtime_config.data_root({'ZAICHANG_DATA_ROOT': 'SyntheticQA'}), base / 'SyntheticQA')
         for value in ('../private', '/tmp/../private', '.', '..', 'sub/folder'):
             self.assertEqual(runtime_config.data_root({'ZAICHANG_DATA_ROOT': value}), base / 'ZaichangStandalone')
+
+    def test_codex_work_model_is_optional_and_validated(self):
+        path = runtime_config.data_root() / 'connectors.json'
+        self.assertNotIn('codex_work_model', runtime_config.connectors())
+        path.write_text(json.dumps({'schema': 1, 'codex_work_model': 'gpt-6.2-sol'}))
+        self.assertEqual(runtime_config.connectors()['codex_work_model'], 'gpt-6.2-sol')
+        path.write_text(json.dumps({'schema': 1, 'codex_work_model': 'gpt-6.2-sol\n'}))
+        self.assertNotIn('codex_work_model', runtime_config.connectors())
 
     def test_public_people_never_opens_private_paths(self):
         with patch.object(shared_people, 'canonical_path', side_effect=AssertionError('private path touched')), patch.object(shared_people.importlib.util, 'spec_from_file_location', side_effect=AssertionError('private import')):

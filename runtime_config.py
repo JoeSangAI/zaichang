@@ -1,5 +1,6 @@
 """Data-root contract inherited by all Python workers. There is one app, so one data directory."""
 import os
+import re
 from pathlib import Path
 
 
@@ -65,6 +66,9 @@ def connectors():
     hint = value.get('context_hint')
     if isinstance(hint, str) and hint.strip():
         result['context_hint'] = hint.strip()[:16000]
+    work_model = value.get('codex_work_model')
+    if isinstance(work_model, str) and re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}', work_model):
+        result['codex_work_model'] = work_model
     archive = value.get('archive')
     if isinstance(archive, dict) and isinstance(archive.get('url'), str) and isinstance(archive.get('app_id'), str):
         try:

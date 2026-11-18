@@ -5,7 +5,12 @@ import CoreFoundation
 // is the only thing a child inherits, and only so tests can point it somewhere isolated.
 enum RuntimeConfiguration {
     /// Where tools the user installed live; a GUI app does not inherit their shell's PATH.
-    static var toolSearchPaths:[String] {["/usr/local/bin","/opt/homebrew/bin",NSHomeDirectory()+"/.local/bin",NSHomeDirectory()+"/.codex/bin","/usr/bin","/bin"]}
+    static var toolSearchPaths:[String] {
+        let desktopRoots=["/Applications",NSHomeDirectory()+"/Applications"]
+        let desktopBins=desktopRoots.map{$0+"/ChatGPT.app/Contents/Resources/codex-cli/bin"}
+            .filter{FileManager.default.isExecutableFile(atPath:$0+"/codex")}
+        return desktopBins + ["/usr/local/bin","/opt/homebrew/bin",NSHomeDirectory()+"/.local/bin",NSHomeDirectory()+"/.codex/bin","/usr/bin","/bin"]
+    }
     /// Whatever Python 3 the user installed runs the workers, any version from any installer (python.org, Homebrew, uv,
     /// pyenv, conda, Apple's developer tools): the first that already has certifi and numpy, found once per launch.
     /// The shell's PATH never reaches a GUI app, so the usual homes are tried in turn; /usr/bin/python3 is skipped

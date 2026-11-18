@@ -192,7 +192,8 @@ class ListenerTests(ListenerHarness):
 
     async def test_user_message_executes_on_own_thread_while_listening_continues(self):
         listener=await self.listen()
-        row=await self.ask(self.speech)
+        with mock.patch('assistant_runtime.connectors', return_value={'codex_work_model': 'gpt-6.2-sol'}):
+            row=await self.ask(self.speech)
         self.fake.steer.assert_not_awaited(); self.fake.interrupt.assert_not_awaited()
         self.assertNotEqual(row['thread_id'], listener['thread_id'])
         self.assertEqual(self.row()['turn_id'], listener['turn_id'])
@@ -200,6 +201,9 @@ class ListenerTests(ListenerHarness):
         self.assertIn('execution_directory', start)
         self.assertIn('用户刚在侧栏说', start['input'][0]['text'])
         options=self.fake.threads[row['thread_id']]
+        self.assertEqual((options['model'], options['effort']), ('gpt-6.2-sol', 'medium'))
+        listening=self.fake.threads[listener['thread_id']]
+        self.assertEqual((listening['model'], listening['effort']), ('gpt-6.1-terra', 'medium'))
         self.assertIn('这个线程只负责把它答好', options['developer_instructions'])
         await self.context('paused')
         await self.answer(row, self.speech)
@@ -437,9 +441,12 @@ class ListenerTests(ListenerHarness):
         self.assertTrue(self.fake.requests[-1][1]['full_access'])
         await self.service.cmd_cancel('w', {})
         await self.wait(lambda: not self.service.task_workers)
-        await self.start_work()
+        with mock.patch('assistant_runtime.connectors', return_value={'codex_work_model': 'gpt-6.2-sol'}):
+            await self.start_work()
         start = [p for m, p in self.fake.requests if m == 'turn/start' and p['threadId'] == self.work()['thread_id']][-1]
         self.assertFalse(start['full_access'])
+        options = self.fake.threads[self.work()['thread_id']]
+        self.assertEqual((options['model'], options['effort']), ('gpt-6.2-sol', 'medium'))
 
     async def test_listener_work_never_waits_for_an_answer_mid_meeting(self):
         await self.start_work()

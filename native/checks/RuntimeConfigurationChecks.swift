@@ -18,6 +18,10 @@ func runtimeConfigurationChecks() throws -> [String] {
     try check(env["PYTHONDONTWRITEBYTECODE"]=="1","child_python_cannot_write_into_signed_bundle")
     try check(RuntimeConfiguration.bailianService=="com.joesang.zaichang.standalone.bailian","one_bailian_service")
     try check(RuntimeConfiguration.identityService=="com.zaichang.app.identity-v2","one_identity_service")
+    let bundled="/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin"
+    if FileManager.default.isExecutableFile(atPath:bundled+"/codex") {
+        try check(RuntimeConfiguration.toolSearchPaths.first==bundled,"desktop_codex_precedes_older_path")
+    }
     // No "time_zone" in connectors.json: 在场 follows the Mac. One named there holds against the Mac's zone,
     // also for a meeting recorded while the Mac was set elsewhere. Only an isolated QA data root is touched.
     let york:[String:Any]=["schema":1,"basis":"capture_clock","time_zone":"America/New_York","anchors":[["relative_start":0.0,"unix_time":1793844955.5]]]

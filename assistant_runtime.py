@@ -1,6 +1,6 @@
 """Local meeting history, incremental overview, and one ephemeral assistant per workspace."""
 from __future__ import annotations
-from runtime_config import assistant_name, context_guidance
+from runtime_config import assistant_name, connectors, context_guidance
 
 import argparse
 import asyncio
@@ -1644,8 +1644,9 @@ class AssistantRuntime:
             await self._snapshot(workspace_id)
 
     def _request_thread(self) -> dict:
+        model = connectors().get('codex_work_model', 'gpt-6.1-terra')
         return dict(ephemeral=True, sandbox="read-only", approval_policy="never",
-                    dynamic_tools=self._dynamic_tools(work=True), model='gpt-6.1-terra', effort='medium',
+                    dynamic_tools=self._dynamic_tools(work=True), model=model, effort='medium',
                     developer_instructions=self._request_prompt())
 
     def _executing(self, task_id):

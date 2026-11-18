@@ -66,6 +66,8 @@ Swift 使用 macOS 音频接口采集麦克风与电脑声音，并按音轨持�
 
 App Server 使用本机 Codex 可用的模型、Skills 与 MCP 配置。Codex 桌面产品中可见的连接器，不自动等同于这个进程可调用的工具。
 
+小满的 Codex 旁听用 GPT-6.1 Terra Medium。用户交办和旁听交出的独立执行任务可用 `codex_work_model` 指定模型，推理强度为 Medium。
+
 主要实现：`native/MeetingAgentBridge.swift`、`native/MeetingAgentPanel.swift`、`assistant_runtime.py`、`codex_runtime.py`。
 
 ## 概览为何与助理分开
@@ -120,6 +122,7 @@ Python 回归位于 `tests/`，原生检查位于 `native/checks/`。`scripts/of
 | `archive` | `{ "url": "http://127.0.0.1:18766", "app_id": "example-archive" }`，可选归档服务接口 |
 | `agent_bridge` | 既有桥接维护脚本的可选参数：`tunnel_id`、`key_file`（仅路径）、`mcp_server`（脚本路径）；普通本机 MCP 注册不需要。该维护脚本不随公开版导出 |
 | `context_hint` | 追加到助理通用提示后的资料说明，不进入只认本场证据的概览 |
+| `codex_work_model` | 可选，例如 `gpt-6.2-sol`。用于 Codex 交办的新执行任务。使用当前 Codex 客户端已支持的模型，默认 `gpt-6.1-terra` |
 | `time_zone` | 可选，如 `Asia/Shanghai`。写了以后，在场的时间显示、默认标题和导出都固定按这个时区，不随 Mac 的系统时区变（系统开着自动设置时区时，可能跟着 VPN 跑到国外）；不写就跟系统 |
 
 人员加载器沿用候选接口：每项 `id` 为 `person:` 加 20 位小写十六进制，`name`、`aliases`、`organization`、`role` 和 `evidence`（第一项目根内的绝对文件路径列表）。加载器只返回候选，必须人工选择才能绑定。应用不写人员主本。仅配置人员术语表不启用此模块。
