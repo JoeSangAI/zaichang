@@ -67,7 +67,7 @@ func meetingCoarseRefinementUIChecks(directory:URL)throws->[String] {
     var originalTranscript=Data()
     for event in [rawKnown,rawTarget] {originalTranscript.append(try JSONSerialization.data(withJSONObject:event,options:[.sortedKeys]));originalTranscript.append(10)}
     try originalTranscript.write(to:transcript,options:.atomic)
-    try write(["schema":1,"session":session,"capture_origin_uptime":10.0,"bundle":"*microphone*","capture_mode":"cloud","upload_authorized":true,"cloud_session_authorized":true,"asr_destination":"dashscope.aliyuncs.com","cloud_budget_yuan":5,"asr_vocabulary_confirmed":true,"asr_vocabulary":["简知":2]],to:folder.appendingPathComponent("meeting.json"))
+    try write(["schema":1,"session":session,"capture_origin_uptime":10.0,"bundle":"*microphone*","capture_mode":"cloud","upload_authorized":true,"cloud_session_authorized":true,"asr_destination":"dashscope.aliyuncs.com","cloud_budget_yuan":5,"asr_vocabulary_confirmed":true,"asr_vocabulary":["星笺":2]],to:folder.appendingPathComponent("meeting.json"))
     try write(["schema":2,"session":session,"cloud_budget_yuan":5,"cumulative_input_audio_seconds":10,"cumulative_estimated_yuan":"0.0033","meter":["input_audio_seconds":"10","estimated_yuan":"0.0033"]],to:folder.appendingPathComponent("session-usage.json"))
 
     let view=Delegate();view.previewRenderOnly=true;view.deferPresentation=true
@@ -202,7 +202,7 @@ func meetingCoarseRefinementUIChecks(directory:URL)throws->[String] {
     try write(["schema":1,"session":session,"capture_origin_uptime":10.0,"bundle":"*microphone*",
         "capture_mode":"cloud","upload_authorized":true,"cloud_session_authorized":true,
         "asr_destination":"dashscope.aliyuncs.com","cloud_budget_yuan":5,
-        "asr_vocabulary_confirmed":true,"asr_vocabulary":["简知":2]],to:folder.appendingPathComponent("meeting.json"))
+        "asr_vocabulary_confirmed":true,"asr_vocabulary":["星笺":2]],to:folder.appendingPathComponent("meeting.json"))
     try check(true,"pause_dispatches_before_asr_tail_and_freezes_text_and_pcm_at_its_explicit_cutoff")
     first.done(first.token,.success(try syntheticResponse(first.request)))
     let sidecar=folder.appendingPathComponent(MeetingCoarseRefinement.filename)

@@ -40,13 +40,13 @@ class GUIContract(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder,patch.object(Path,'home',return_value=Path(folder)):
             request=dict(bundle='*system*',key='synthetic-test',cloud_session_confirmed=True,
                          user_launch_confirmed=True,source_scope_confirmed=True,mic_enabled=True,
-                         asr_vocabulary={'晶视':5},asr_terms_confirmed=True)
+                         asr_vocabulary={'星笺':5},asr_terms_confirmed=True)
             self.assertFalse(any('Vocabulary' in k for k in gui_worker.cloud_session_config(request)))
             cid=str(uuid.uuid4());cache=Path(folder)/'Library/Application Support/ZaichangStandalone/SessionCache'/cid
             cache.mkdir(parents=True)
             meta=dict(session='resume-session',bundle='*system*',asr_model='qwen-audio-3.0-asr-flash-streaming',
                       cloud_session_authorized=True,asr_destination='dashscope.aliyuncs.com',
-                      asr_vocabulary={'晶视':5},asr_vocabulary_confirmed=True)
+                      asr_vocabulary={'星笺':5},asr_vocabulary_confirmed=True)
             path=cache/'meeting.json';path.write_text(json.dumps(meta));before=path.read_bytes()
             request['resume_cache_id']=cid
             with patch('gui_worker.transcript_tracks',return_value=['mic']):config=gui_worker.cloud_session_config(request)

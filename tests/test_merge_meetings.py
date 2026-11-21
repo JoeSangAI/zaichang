@@ -9,11 +9,24 @@ from unittest.mock import patch
 from scripts import merge_meetings
 
 
-FIRST = "D2909AA6-B97C-4AA7-83AD-506F47CABA67"
-SECOND = "2931F606-7911-46ED-8200-40038FA5896F"
+FIRST = "00000000-0000-4000-8000-000000000001"
+SECOND = "00000000-0000-4000-8000-000000000002"
+
+
+SOURCE_TITLES = {FIRST: "云梯邮局｜模型搭建", SECOND: "云梯邮局｜路线试走"}
+MERGED_TITLE = "云梯邮局｜布展演练"
 
 
 class MergeMeetingsTests(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        selection = Path(directory.name) / "merge-meetings.json"
+        selection.write_text(json.dumps({"sources": SOURCE_TITLES, "title": MERGED_TITLE}), encoding="utf-8")
+        config = patch.object(merge_meetings, "SELECTION_PATH", selection)
+        config.start()
+        self.addCleanup(config.stop)
+
     def make_source(self, root: Path, cache_id: str, title: str, session: str,
                     anchor: float, text: str, epoch: str, raw: bytes) -> Path:
         directory = root / cache_id
@@ -71,9 +84,9 @@ class MergeMeetingsTests(unittest.TestCase):
             first_epoch, second_epoch = str(uuid.uuid4()), str(uuid.uuid4())
             first_pcm = b"\x01\x00" * 32000
             second_pcm = b"\x02\x00" * 32000
-            first = self.make_source(root, FIRST, merge_meetings.EXPECTED[FIRST], first_session,
+            first = self.make_source(root, FIRST, SOURCE_TITLES[FIRST], first_session,
                                      1000.0, "alpha", first_epoch, first_pcm)
-            second = self.make_source(root, SECOND, merge_meetings.EXPECTED[SECOND], second_session,
+            second = self.make_source(root, SECOND, SOURCE_TITLES[SECOND], second_session,
                                       1002.5, "beta", second_epoch, second_pcm)
             second_run_id = f"{second_session}:segment:word:1250"
             (second / "automatic-coarse-refinement.json").write_text(json.dumps({
@@ -137,7 +150,7 @@ class MergeMeetingsTests(unittest.TestCase):
             root = Path(tmp) / "cache"
             root.mkdir()
             self.make_source(root, FIRST, "unexpected", str(uuid.uuid4()), 1, "a", "e1", b"a")
-            self.make_source(root, SECOND, merge_meetings.EXPECTED[SECOND], str(uuid.uuid4()), 2, "b", "e2", b"b")
+            self.make_source(root, SECOND, SOURCE_TITLES[SECOND], str(uuid.uuid4()), 2, "b", "e2", b"b")
             stage = Path(tmp) / "stage"
             with patch.object(merge_meetings, "DEFAULT_STAGE_ROOT", stage):
                 with self.assertRaisesRegex(ValueError, "Unexpected meeting title"):
@@ -148,8 +161,8 @@ class MergeMeetingsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "cache"
             root.mkdir()
-            a = self.make_source(root, FIRST, merge_meetings.EXPECTED[FIRST], str(uuid.uuid4()), 1, "a", "e1", b"\x00\x00")
-            self.make_source(root, SECOND, merge_meetings.EXPECTED[SECOND], str(uuid.uuid4()), 2, "b", "e2", b"\x00\x00")
+            a = self.make_source(root, FIRST, SOURCE_TITLES[FIRST], str(uuid.uuid4()), 1, "a", "e1", b"\x00\x00")
+            self.make_source(root, SECOND, SOURCE_TITLES[SECOND], str(uuid.uuid4()), 2, "b", "e2", b"\x00\x00")
             (a / "unsafe-link").symlink_to(a / "mic-raw-000000.pcm")
             stage = Path(tmp) / "stage"
             with patch.object(merge_meetings, "DEFAULT_STAGE_ROOT", stage):
@@ -161,9 +174,9 @@ class MergeMeetingsTests(unittest.TestCase):
             root = Path(tmp) / "cache"
             root.mkdir()
             first_session, second_session = str(uuid.uuid4()), str(uuid.uuid4())
-            first = self.make_source(root, FIRST, merge_meetings.EXPECTED[FIRST], first_session,
+            first = self.make_source(root, FIRST, SOURCE_TITLES[FIRST], first_session,
                                      1000.0, "alpha", "epoch-a", b"\x01\x00" * 32000)
-            second = self.make_source(root, SECOND, merge_meetings.EXPECTED[SECOND], second_session,
+            second = self.make_source(root, SECOND, SOURCE_TITLES[SECOND], second_session,
                                       1002.5, "beta", "epoch-b", b"\x02\x00" * 32000)
             second_run_id = f"{second_session}:segment:word:1250"
             (second / "automatic-coarse-refinement.json").write_text(json.dumps({
@@ -186,6 +199,7 @@ class MergeMeetingsTests(unittest.TestCase):
                 package = merge_meetings.prepare_merge(root, stage_root, FIRST, SECOND)
                 dry = merge_meetings.import_staged(root, package, info)
                 self.assertEqual(dry["mode"], "dry-run")
+                self.assertEqual(dry["merged_title"], MERGED_TITLE)
                 self.assertFalse(dry["writes_performed"])
                 self.assertEqual(before[FIRST], merge_meetings._walk_files(first))
                 self.assertEqual(before[SECOND], merge_meetings._walk_files(second))

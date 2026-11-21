@@ -68,7 +68,7 @@ enum RuntimeConfiguration {
         return value
     }
     /// A zone named in the user's own connectors.json ("time_zone") holds whatever the Mac says: a Mac that picks its
-    /// zone automatically can follow a VPN abroad (2026-11-05, New York) and move times, default titles and dates
+    /// zone automatically can follow a VPN abroad and move times, default titles and dates
     /// with it. Without one, 在场 follows the Mac like any app.
     static var pinnedZone:TimeZone? {(connectors["time_zone"] as? String).flatMap(TimeZone.init(identifier:))}
     /// First thing in every executable: formatters and calendars then use the pinned zone, children inherit it (TZ),

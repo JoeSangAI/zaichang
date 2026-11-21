@@ -42,14 +42,14 @@ import Foundation
         ["basis":"meeting_reconciliation","source_id":"mic","epoch":"fixture-epoch",
          "identity_key":try JSONSerialization.jsonObject(with:JSONEncoder().encode(key))]
     }
-    var repeated=event("same-person-roster-switch",22,"那个叫闲鱼的事情。",nil)
+    var repeated=event("same-person-roster-switch",22,"那个叫纸京的展览。",nil)
     repeated["speaker_runs"]=[
         ["start":22.0,"end":23.0,"text":"那个叫","speaker":try reconciled(remoteKey)],
-        ["start":23.0,"end":24.0,"text":"闲鱼","speaker":try reconciled(micKey)],
-        ["start":24.0,"end":26.0,"text":"的事情。","speaker":try reconciled(remoteKey)]]
+        ["start":23.0,"end":24.0,"text":"纸京","speaker":try reconciled(micKey)],
+        ["start":24.0,"end":26.0,"text":"的展览。","speaker":try reconciled(remoteKey)]]
     nameReuse.receive(repeated);try nameReuse.settleTranscriptForOfflineReview()
     let samePersonTurns=nameReuse.readingTurns(["same-person-roster-switch"])
-    try check(samePersonTurns.count==1 && samePersonTurns[0].item["text"] as? String=="那个叫闲鱼的事情。" && samePersonTurns[0].parts.count==3,
+    try check(samePersonTurns.count==1 && samePersonTurns[0].item["text"] as? String=="那个叫纸京的展览。" && samePersonTurns[0].parts.count==3,
               "same_physical_sentence_reconciled_to_same_manual_name_reads_as_one_turn")
     try check(TranscriptTimeline.speakerRuns(nameReuse.segments["same-person-roster-switch"]!).count==3 &&
               SessionSpeakerKey.from(samePersonTurns[0].parts[0].1)==remoteKey &&
@@ -74,10 +74,10 @@ import Foundation
     do {
         NSApp.appearance=NSAppearance(named:.aqua)
         let talk=makeView();talk.window.appearance=NSApp.appearance;talk.window.setContentSize(NSSize(width:1100,height:760))
-        talk.activeSession="timeline-fixture";talk.phase.phase = .recording;talk.meetingTitle="客户投放｜节后到访与点位盘点"
-        let lines:[(String,Double,Int,String)]=[("c1",31,0,"节后我们想先把首位周边五公里的点位过一遍，智能屏和电梯海报分开算。"),("c2",37,0,"尤其是靠近联美那几个盘，上次说的那张表还在吗？"),
-            ("c3",44,1,"在的，九月二十九号那两张原始点位表我都发群里了，按首位中心做的半径。"),("c4",52,2,"那电梯这块我建议先按楼盘入住率筛一遍，别把空置率高的也算进去。"),
-            ("c5",61,0,"同意。我们先出一版带入住率的清单，下周二前给到对方。"),("c6",68,0,"另外广佛那边的效果验证，下次一起过。")]
+        talk.activeSession="timeline-fixture";talk.phase.phase = .recording;talk.meetingTitle="云梯邮局｜展柜布置与路线试走"
+        let lines:[(String,Double,Int,String)]=[("c1",31,0,"我们先走一遍云梯邮局模型的展线，把折纸展柜和投影墙分开标。"),("c2",37,0,"入口旁边留了两个空展柜，平面图上能看见吗？"),
+            ("c3",44,1,"能看见，蓝色方块就是空展柜，旁边的虚线是参观路线。"),("c4",52,2,"把大件放到里侧吧，这样入口的参观队伍可以绕开。"),
+            ("c5",61,0,"好，先更新平面图，复核通道宽度后再摆展柜。"),("c6",68,0,"投影字幕也放进试走清单，确认站在出口能读清楚。")]
         for (id,start,slot,body) in lines {talk.receive(event(id,start,body,slot))}
         for (id,name) in [("c1","张宇"),("c3","李晴"),("c4","王磊")] {talk.naming.setSpeaker(segment:id,name:name)}
         talk.markAllTranscriptParentsDirty();try talk.settleTranscriptForOfflineReview();talk.updateUI();talk.scroll.contentView.scroll(to:.zero)

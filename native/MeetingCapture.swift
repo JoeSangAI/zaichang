@@ -615,7 +615,7 @@ func applicationTapInputFormat(device:AudioObjectID)throws->AVAudioFormat {
 }
 
 // Bluetooth call routes can keep reporting 48 kHz for both the tap and the aggregate
-// stream while frames really arrive at 16 kHz (Feishu with iFlytek earbuds, 2026-10-30).
+// stream while frames really arrive at 16 kHz.
 // The delivered frame rate is therefore the only trustworthy rate. Two consecutive
 // windows must agree on a standard rate, so a stall or burst cannot switch the format.
 struct TapDeliveryRate {

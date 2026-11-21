@@ -50,7 +50,7 @@ private actor RotatingTitleProvider:MeetingTitleProvider {
 private struct GroundedTermTitleProvider:MeetingTitleProvider {
     let output:String
     func title(for transcript:String) async throws->String {
-        guard !transcript.contains("原文中出现的识别词") && transcript.contains("简知") && transcript.contains("我最近在减脂") else {
+        guard !transcript.contains("原文中出现的识别词") && transcript.contains("星笺") && transcript.contains("信件可以叠成方块") else {
             throw MeetingAutoTitleError.invalidResponse
         }
         return output
@@ -289,7 +289,7 @@ func meetingAutoTitleFixture() async throws {
     try JSONSerialization.data(withJSONObject: ["session": session, "cache_id": id])
         .write(to: folder.appendingPathComponent("meeting.json"))
     let events: [[String: Any]] = [
-        ["segment_id": "a", "start": 0.0, "final": true, "text": "品牌营销超能体讨论了客户需求与课程方向，先整理学员访谈。"],
+        ["segment_id": "a", "start": 0.0, "final": true, "text": "品牌营销演练先整理云梯邮局志愿者的反馈，再确定展览服务范围。"],
         ["segment_id": "b", "start": 5.0, "final": true, "text": "团队决定下周核对服务交付范围，报价和分工仍待确认。"]
     ]
     let liveEvents=events+[["segment_id":"partial","start":8.0,"final":false,
@@ -316,7 +316,7 @@ func meetingAutoTitleFixture() async throws {
     // ASCII separator, and reject provider output that is a sentence or list.
     let formatEvents: [[String: Any]] = [
         ["segment_id": "format", "start": 0.0,
-         "text": "品牌营销团队讨论客户投放，比较青浦奥莱选点与广佛效果验证，并确认采购边界和四周试投安排。"]
+         "text": "品牌营销演练为虚构的云梯邮局设计展览，比较入口布置和导览路线，并明确展柜如何安装。"]
     ]
     func makeFormatFolder() throws -> URL {
         let formatID = UUID().uuidString, formatFolder = root.appendingPathComponent(formatID)
@@ -327,30 +327,30 @@ func meetingAutoTitleFixture() async throws {
     }
     let formatFolder = try makeFormatFolder()
     let formatID = formatFolder.lastPathComponent
-    let asciiProvider = FixtureTitleProvider(titleText: "客户投放 | 青浦奥莱选点与广佛效果验证", delayNanoseconds: 0)
+    let asciiProvider = FixtureTitleProvider(titleText: "云梯邮局 | 入口布置与导览路线", delayNanoseconds: 0)
     let formatted = await service.generate(cacheID: formatID, session: session, directory: formatFolder,
                                             events: formatEvents, provider: asciiProvider, cloudTextAllowed: true)
-    guard case .saved("客户投放｜青浦奥莱选点与广佛效果验证") = formatted else {
+    guard case .saved("云梯邮局｜入口布置与导览路线") = formatted else {
         throw MeetingAutoTitleError.invalidResponse
     }
     let groundedFolder=try makeFormatFolder(),groundedID=groundedFolder.lastPathComponent
     try JSONSerialization.data(withJSONObject:["session":session,"cache_id":groundedID,
-        "asr_vocabulary_confirmed":true,"asr_vocabulary":["简知":2]],options:[.sortedKeys])
+        "asr_vocabulary_confirmed":true,"asr_vocabulary":["星笺":2]],options:[.sortedKeys])
         .write(to:groundedFolder.appendingPathComponent("meeting.json"),options:.atomic)
     let groundedEvents:[[String:Any]]=[["segment_id":"grounded","start":0.0,
-        "text":"这次会议聊到简知这个中老年教育平台的课程，也有人说我最近在减脂。"]]
+        "text":"虚构的星笺平台要试投折纸课程，助教补充说信件可以叠成方块。"]]
     let grounded=await service.generate(cacheID:groundedID,session:session,directory:groundedFolder,
-        events:groundedEvents,provider:GroundedTermTitleProvider(output:"简知｜平台试投"),cloudTextAllowed:true)
-    guard case .saved("简知｜平台试投")=grounded else {
+        events:groundedEvents,provider:GroundedTermTitleProvider(output:"星笺｜平台试投"),cloudTextAllowed:true)
+    guard case .saved("星笺｜平台试投")=grounded else {
         throw MeetingAutoTitleError.invalidResponse
     }
-    // Regression from the 2026-10-20 call: unrelated global ASR terms must
+    // Regression: unrelated global ASR terms must
     // neither enter the title prompt nor change its digest.
-    let reportedEvents:[[String:Any]]=[["segment_id":"reported-call","start":28.0,"final":true,
-        "text":"我们还是想找到，比方说千问办公和codex这些产品的差异化。所以我就想听一听你在一线的感受是怎么样子。"]]
+    let unrelatedVocabularyEvents:[[String:Any]]=[["segment_id":"title-vocabulary-fixture","start":28.0,"final":true,
+        "text":"虚构的月面展馆要比较纸质地图和语音导览，请志愿者记录试走时遇到的问题。"]]
     let invalidFolder = try makeFormatFolder()
     let invalidID = invalidFolder.lastPathComponent
-    let invalidProvider = FixtureTitleProvider(titleText: "客户投放讨论青浦奥莱选点与广佛效果验证。", delayNanoseconds: 0)
+    let invalidProvider = FixtureTitleProvider(titleText: "云梯邮局讨论入口布置和导览路线。", delayNanoseconds: 0)
     let invalid = await service.generate(cacheID: invalidID, session: session, directory: invalidFolder,
                                          events: formatEvents, provider: invalidProvider, cloudTextAllowed: true)
     guard case .failed = invalid,
@@ -362,7 +362,7 @@ func meetingAutoTitleFixture() async throws {
     // Stopped transcription can add a final sentence immediately after the pause.
     // It gets one updated title despite the ordinary 60-second pause cooldown.
     let finalEvents = events + [["segment_id": "c", "start": 10.0,
-                                 "text": "品牌营销最终确定先做客户访谈，再核对服务范围和报价。"]]
+                                 "text": "品牌营销演练决定先走一次展线，再核对展柜安装和志愿者安排。"]]
     let refreshed = await service.generate(cacheID: id, session: session, directory: folder,
                                            events: finalEvents, provider: mock, cloudTextAllowed: true, refresh:true)
     guard case .saved = refreshed,
@@ -533,14 +533,14 @@ func meetingTitleGeneratorChecks() async throws {
     try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
     try JSONSerialization.data(withJSONObject: ["session": session, "cache_id": id]).write(to: folder.appendingPathComponent("meeting.json"))
     let events: [[String: Any]] = [["segment_id": "a", "start": 0.0, "final": true,
-                                    "text": "咸鱼这边双十一想先在智能屏上测一下，五十万的预算怎么分城市还要再算。"]]
+                                    "text": "纸鲸计划在灯塔展上试用投影屏，先拿一段动画看看字幕是否清楚。"]]
     guard let input = MeetingTitleInput(events: events) else { throw Failure(code: "title_generator_input") }
-    try JSONSerialization.data(withJSONObject: ["schema": 2, "title": "咸鱼｜投放方案验证", "provenance": "automatic", "state": "ready",
+    try JSONSerialization.data(withJSONObject: ["schema": 2, "title": "纸鲸｜投放方案验证", "provenance": "automatic", "state": "ready",
         "session": session, "cache_id": id, "source_digest": input.digest, "attempts": 1, "attempted_at": 1.0],
         options: [.sortedKeys]).write(to: folder.appendingPathComponent("display-info.json"))
     guard MeetingDisplayInfoStore.owesTitle(in: folder) else { throw Failure(code: "title_old_generator_not_owed") }
     let counter = FixtureTitleCallCounter()
-    let provider = FixtureTitleProvider(titleText: "闲鱼｜双十一智能屏测试", delayNanoseconds: 0, counter: counter)
+    let provider = FixtureTitleProvider(titleText: "纸京｜灯塔展投影测试", delayNanoseconds: 0, counter: counter)
     let service = MeetingAutoTitle()
     // FixtureTitleProvider requires its marker word; give it one.
     let marked = events.map { var e = $0; e["text"] = (e["text"] as! String) + "品牌营销"; return e }
@@ -550,7 +550,7 @@ func meetingTitleGeneratorChecks() async throws {
     try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys]).write(to: folder.appendingPathComponent("display-info.json"))
     let retitled = await service.generate(cacheID: id, session: session, directory: folder, events: marked,
                                           provider: provider, cloudTextAllowed: true, finalized: true)
-    guard case .saved("闲鱼｜双十一智能屏测试") = retitled, await counter.count() == 1,
+    guard case .saved("纸京｜灯塔展投影测试") = retitled, await counter.count() == 1,
           let saved = try MeetingDisplayInfoStore.load(in: folder), saved.generator == MeetingAutoTitle.generator,
           !MeetingDisplayInfoStore.owesTitle(in: folder) else { throw Failure(code: "title_old_generator_not_retitled") }
     let again = await service.generate(cacheID: id, session: session, directory: folder, events: marked,
@@ -559,36 +559,36 @@ func meetingTitleGeneratorChecks() async throws {
     try MeetingDisplayInfoStore.saveManual("我起的名字", in: folder)
     guard !MeetingDisplayInfoStore.owesTitle(in: folder) else { throw Failure(code: "title_manual_owed") }
 
-    let reply = #"{"title":"闲鱼｜双十一智能屏测试"}"#
-    let context = MeetingTitleContext(domains: ["我的公司"], projects: ["工作/客户/闲鱼"], terms: ["闲鱼；常被误识为咸鱼"])
+    let reply = #"{"title":"纸京｜灯塔展投影测试"}"#
+    let context = MeetingTitleContext(domains: ["示例工作室"], projects: ["项目/纸京"], terms: ["纸京；常被误识为纸鲸"])
     guard (try? DashScopeMeetingTitleProvider.groundedTitle(reply, transcript: input.transcript)) == nil,
-          try DashScopeMeetingTitleProvider.groundedTitle(reply, transcript: input.transcript, context: context) == "闲鱼｜双十一智能屏测试",
-          (try? DashScopeMeetingTitleProvider.groundedTitle(#"{"title":"淘宝｜双十一智能屏测试"}"#, transcript: input.transcript)) == nil,
-          (try? DashScopeMeetingTitleProvider.groundedTitle(#"{"title":"淘宝｜双十一智能屏测试"}"#, transcript: input.transcript,
-                context: MeetingTitleContext(terms: ["闲鱼"], unheard: ["淘宝"]))) == nil,
-          (try? DashScopeMeetingTitleProvider.groundedTitle(#"{"title":"Taobao｜双十一智能屏测试"}"#, transcript: input.transcript, context: context)) == nil,
-          try DashScopeMeetingTitleProvider.groundedTitle(#"{"title":"投放测试｜双十一智能屏预算"}"#, transcript: input.transcript, context: context) == "投放测试｜双十一智能屏预算"
+          try DashScopeMeetingTitleProvider.groundedTitle(reply, transcript: input.transcript, context: context) == "纸京｜灯塔展投影测试",
+          (try? DashScopeMeetingTitleProvider.groundedTitle(#"{"title":"岩羽｜灯塔展投影测试"}"#, transcript: input.transcript)) == nil,
+          (try? DashScopeMeetingTitleProvider.groundedTitle(#"{"title":"岩羽｜灯塔展投影测试"}"#, transcript: input.transcript,
+                context: MeetingTitleContext(terms: ["纸京"], unheard: ["岩羽"]))) == nil,
+          (try? DashScopeMeetingTitleProvider.groundedTitle(#"{"title":"Nebulapuff｜灯塔展投影测试"}"#, transcript: input.transcript, context: context)) == nil,
+          try DashScopeMeetingTitleProvider.groundedTitle(#"{"title":"投放测试｜灯塔展字幕布局"}"#, transcript: input.transcript, context: context) == "投放测试｜灯塔展字幕布局"
     else { throw Failure(code: "title_context_grounding") }
     let prompt = context.prompt(transcript: input.transcript)
-    guard prompt.contains("我的公司"), prompt.contains("工作/客户/闲鱼"), prompt.hasSuffix(input.transcript),
+    guard prompt.contains("示例工作室"), prompt.contains("项目/纸京"), prompt.hasSuffix(input.transcript),
           MeetingTitleContext.empty.prompt(transcript: "原文") == "逐字稿：\n原文" else { throw Failure(code: "title_context_prompt") }
 
     // A registered mishearing copied by the model is swapped for the standard
     // spelling after naming, without another model call.
-    let spelled = MeetingTitleContext(terms: ["青禾露；常被误识为清禾露、禾露"],
-                                      spellings: [("清禾露", "青禾露"), ("禾露", "青禾露"), ("ocean", "Ocean Spray")])
-    guard spelled.respelled("清禾露｜中秋投放复盘") == "青禾露｜中秋投放复盘",
-          spelled.respelled("青禾露｜中秋投放复盘") == "青禾露｜中秋投放复盘",
-          spelled.respelled("禾露与山泉｜复盘") == "青禾露与山泉｜复盘",
-          spelled.respelled("Oceanic｜复盘") == "Oceanic｜复盘",
-          spelled.respelled("OCEAN｜复盘") == "Ocean Spray｜复盘",
-          MeetingTitleContext.empty.respelled("清禾露｜复盘") == "清禾露｜复盘" else { throw Failure(code: "title_registered_spelling") }
+    let spelled = MeetingTitleContext(terms: ["云芽盒；常被误识为云牙盒、芽盒"],
+                                      spellings: [("云牙盒", "云芽盒"), ("芽盒", "云芽盒"), ("orbit", "Orbit Pouch")])
+    guard spelled.respelled("云牙盒｜灯塔展复盘") == "云芽盒｜灯塔展复盘",
+          spelled.respelled("云芽盒｜灯塔展复盘") == "云芽盒｜灯塔展复盘",
+          spelled.respelled("芽盒与风铃架｜复盘") == "云芽盒与风铃架｜复盘",
+          spelled.respelled("Orbital｜复盘") == "Orbital｜复盘",
+          spelled.respelled("ORBIT｜复盘") == "Orbit Pouch｜复盘",
+          MeetingTitleContext.empty.respelled("云牙盒｜复盘") == "云牙盒｜复盘" else { throw Failure(code: "title_registered_spelling") }
     let spellingID = UUID().uuidString, spellingFolder = root.appendingPathComponent(spellingID)
     try FileManager.default.createDirectory(at: spellingFolder, withIntermediateDirectories: true)
     try JSONSerialization.data(withJSONObject: ["session": session, "cache_id": spellingID]).write(to: spellingFolder.appendingPathComponent("meeting.json"))
     let misheard = await MeetingAutoTitle().generate(cacheID: spellingID, session: session, directory: spellingFolder, events: marked,
-        provider: FixtureTitleProvider(titleText: "清禾露｜中秋投放复盘", delayNanoseconds: 0), cloudTextAllowed: true, finalized: true,
+        provider: FixtureTitleProvider(titleText: "云牙盒｜灯塔展复盘", delayNanoseconds: 0), cloudTextAllowed: true, finalized: true,
         context: spelled)
-    guard case .saved("青禾露｜中秋投放复盘") = misheard,
-          try MeetingDisplayInfoStore.load(in: spellingFolder)?.title == "青禾露｜中秋投放复盘" else { throw Failure(code: "title_registered_spelling_saved") }
+    guard case .saved("云芽盒｜灯塔展复盘") = misheard,
+          try MeetingDisplayInfoStore.load(in: spellingFolder)?.title == "云芽盒｜灯塔展复盘" else { throw Failure(code: "title_registered_spelling_saved") }
 }

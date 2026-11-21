@@ -22,7 +22,7 @@ class RuntimeConfigurationTests(unittest.TestCase):
     def test_one_data_root(self):
         base = Path.home() / 'Library/Application Support'
         self.assertEqual(runtime_config.data_root({}), base / 'ZaichangStandalone')
-        self.assertEqual(runtime_config.data_root({'ZAICHANG_EDITION': 'joe'}), base / 'ZaichangStandalone')
+        self.assertEqual(runtime_config.data_root({'ZAICHANG_EDITION': 'personal'}), base / 'ZaichangStandalone')
         self.assertEqual(runtime_config.data_root({'ZAICHANG_DATA_ROOT': '/tmp/p6-isolated'}), Path('/tmp/p6-isolated'))
         self.assertEqual(runtime_config.data_root({'ZAICHANG_DATA_ROOT': 'SyntheticQA'}), base / 'SyntheticQA')
         for value in ('../private', '/tmp/../private', '.', '..', 'sub/folder'):

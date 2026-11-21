@@ -121,10 +121,10 @@ class MeetingContextNotesTests(unittest.TestCase):
                 with self.assertRaisesRegex(mc.ContextError, "invalid_note_cache_id"):
                     self.snapshot()
 
-    def test_new_york_meeting_notes_use_shanghai_time_and_same_capture_anchors(self):
+    def test_notes_use_pinned_zone_and_same_capture_anchors(self):
         self.upgrade()
         metadata = json.loads(self.writer.execute("SELECT metadata FROM meetings").fetchone()[0])
-        metadata["absolute_clock"]["time_zone"] = "America/New_York"
+        metadata["absolute_clock"]["time_zone"] = "America/Denver"
         self.writer.execute("UPDATE meetings SET metadata=?", (json.dumps(metadata),))
         self.writer.commit()
         self.note("recording", relative=15)

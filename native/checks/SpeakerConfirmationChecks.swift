@@ -208,7 +208,7 @@ import AppKit
     whole.receive(spoken(10,slot:0,vector:voice(1)));try whole.settleTranscriptForOfflineReview()
     try check(whole.naming.name(segment:"w-10")=="合成丁","later_lines_of_the_voice_keep_its_name_after_a_line_fix")
     whole.window.close()
-    // The link is deliberately narrow; these are the shapes real meetings produced.
+    // The link only covers these supported identity combinations.
     func linkMatcher(_ rows:[(SessionSpeakerKey,Int,[Double])])->VoiceprintMatcher {
         var matcher=VoiceprintMatcher();matcher.reset(session:wholeSession)
         matcher.importSavedEvidence(rows.map{key,index,vector in SavedVoiceRecognitionEvidence(id:"m-\(key.identity)-\(key.source)-\(index)",revision:1,key:key,sample:VoiceprintSample(session:wholeSession,source:key.source,epoch:key.epoch,start:Double(index*4),end:Double(index*4)+3,vector:vector))})

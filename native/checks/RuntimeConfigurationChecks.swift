@@ -24,7 +24,7 @@ func runtimeConfigurationChecks() throws -> [String] {
     }
     // No "time_zone" in connectors.json: 在场 follows the Mac. One named there holds against the Mac's zone,
     // also for a meeting recorded while the Mac was set elsewhere. Only an isolated QA data root is touched.
-    let york:[String:Any]=["schema":1,"basis":"capture_clock","time_zone":"America/New_York","anchors":[["relative_start":0.0,"unix_time":1793844955.5]]]
+    let recordedClock:[String:Any]=["schema":1,"basis":"capture_clock","time_zone":"America/Denver","anchors":[["relative_start":0.0,"unix_time":1927938600.5]]]
     let connectorsFile=RuntimeConfiguration.dataRoot().appendingPathComponent("connectors.json")
     if ProcessInfo.processInfo.environment["ZAICHANG_DATA_ROOT"] != nil,!FileManager.default.fileExists(atPath:connectorsFile.path) {
         let zoneBefore=NSTimeZone.default,environment=ProcessInfo.processInfo.environment
@@ -34,12 +34,12 @@ func runtimeConfigurationChecks() throws -> [String] {
             try? FileManager.default.removeItem(at:connectorsFile)
         }
         RuntimeConfiguration.applyMeetingZone()
-        try check(RuntimeConfiguration.pinnedZone==nil && MeetingAbsoluteTime(york)?.display(0)=="21:15:55" && MeetingAbsoluteTime(york)?.zone.identifier=="America/New_York","unpinned_follows_the_recorded_zone")
+        try check(RuntimeConfiguration.pinnedZone==nil && MeetingAbsoluteTime(recordedClock)?.display(0)=="19:30:00" && MeetingAbsoluteTime(recordedClock)?.zone.identifier=="America/Denver","unpinned_follows_the_recorded_zone")
         try FileManager.default.createDirectory(at:connectorsFile.deletingLastPathComponent(),withIntermediateDirectories:true)
         try JSONSerialization.data(withJSONObject:["schema":1,"time_zone":"Asia/Shanghai"]).write(to:connectorsFile)
         RuntimeConfiguration.applyMeetingZone()
-        let read=MeetingAbsoluteTime(york)
-        try check(RuntimeConfiguration.pinnedZone?.identifier=="Asia/Shanghai" && read?.display(0)=="10:15:55" && read?.iso(0)=="2026-11-05T10:15:55.500+08:00","pinned_zone_reads_a_new_york_meeting_in_china_time")
+        let read=MeetingAbsoluteTime(recordedClock)
+        try check(RuntimeConfiguration.pinnedZone?.identifier=="Asia/Shanghai" && read?.display(0)=="10:30:00" && read?.iso(0)=="2031-02-04T10:30:00.500+08:00","pinned_zone_overrides_recorded_zone")
         try check(TimeZone.current.identifier=="Asia/Shanghai" && RuntimeConfiguration.childEnvironment()["TZ"]=="Asia/Shanghai","pinned_zone_reaches_formatters_and_children")
     }
     return checks

@@ -121,7 +121,7 @@ import AppKit
     try check(bootstrapURL.path=="/api/meeting-archives-bootstrap","archive_uses_lightweight_bootstrap_route")
     let bootstrapResponse=HTTPURLResponse(url:bootstrapURL,statusCode:200,httpVersion:nil,headerFields:nil)
     let token=try MeetingArchiveRequest.validatedCSRFToken(data:bootstrapData,response:bootstrapResponse,error:nil)
-    try check(token=="synthetic-csrf","bootstrap_requires_workbench_identity")
+    try check(token=="synthetic-csrf","bootstrap_requires_archive_service_identity")
     do {
         let wrongApp=Data("{\"app_id\":\"other-service\",\"csrf_token\":\"synthetic-csrf\"}".utf8)
         _=try MeetingArchiveRequest.validatedCSRFToken(data:wrongApp,response:bootstrapResponse,error:nil)

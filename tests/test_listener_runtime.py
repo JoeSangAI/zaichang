@@ -91,7 +91,7 @@ class ListenerTests(ListenerHarness):
         self.assertEqual(runtime.request.await_args.args, ('turn/steer', {'threadId':'t','expectedTurnId':'turn','input':[{'type':'text','text':'hello'}]}))
 
     async def test_concurrent_sends_each_run_at_once_on_their_own_thread(self):
-        # A slow image must not hold up the next question (2026-10-29 meeting).
+        # A slow image must not hold up the next question.
         await self.listen()
         await asyncio.gather(*(self.service.cmd_send('w', {'text': f'{self.speech}{i}'}) for i in range(3)))
         requests = lambda: [r for r in self.store.tasks('w') if r['lane'] == 'request']
@@ -309,7 +309,7 @@ class ListenerTests(ListenerHarness):
         self.assertEqual(len(self.fake.threads),2)
 
     async def test_silent_request_is_stopped_and_frees_the_assistant(self):
-        # 2026-10-29: an image turn went silent after its image and never ended.
+        # A turn can emit an image without sending a completion event.
         with mock.patch('assistant_runtime.TURN_STALL_SECONDS', 0.3):
             row = await self.ask('再生成一张')
             await self.wait(lambda: self.store.task(row['id'])['status'] == 'failed', seconds=4)
@@ -475,7 +475,7 @@ class ListenerTests(ListenerHarness):
 
     async def start_work(self):
         await self.listen()
-        result = await self.tool('start_task', {'title': '查 Qoder 校园推广', 'goal': self.speech})
+        result = await self.tool('start_task', {'title': '查 纸鸮展台夜间导览', 'goal': self.speech})
         self.assertTrue(result['success'], result)
         await self.wait(lambda: self.work()['turn_id'] is not None)
         return json.loads(result['contentItems'][0]['text'])
@@ -500,7 +500,7 @@ class ListenerTests(ListenerHarness):
         self.assertTrue(start['execution_directory'].startswith(str(Path(self.tmp.name) / 'outputs')))
         self.assertIn(self.speech, start['input'][0]['text'])
         state = await self.service.cmd_snapshot('w', {})
-        self.assertEqual([w['title'] for w in state['work']], ['查 Qoder 校园推广'])
+        self.assertEqual([w['title'] for w in state['work']], ['查 纸鸮展台夜间导览'])
         self.assertFalse(state['awaiting_response'])
         await self.work_event('item/completed', {'id': 'answer', 'type': 'agentMessage', 'phase': 'final_answer', 'text': self.speech})
         await self.work_event('turn/completed')
@@ -508,7 +508,7 @@ class ListenerTests(ListenerHarness):
         state = await self.service.cmd_snapshot('w', {})
         self.assertEqual(state['work'], [])
         reply = [m for m in state['messages'] if m['role'] == 'assistant'][-1]
-        self.assertEqual((reply['text'], reply['origin']), (f'**查 Qoder 校园推广**\n\n{self.speech}', 'proactive'))
+        self.assertEqual((reply['text'], reply['origin']), (f'**查 纸鸮展台夜间导览**\n\n{self.speech}', 'proactive'))
         background = self.service._with_background('w', {}, 'other-listener')['background']
         self.assertEqual((background[0]['status'], background[0]['result']), ('completed', reply['text']))
         self.assertEqual(self.row()['status'], 'running')

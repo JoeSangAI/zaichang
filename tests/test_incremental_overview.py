@@ -19,14 +19,14 @@ class MeetingIncrementalOverviewTests(unittest.IsolatedAsyncioTestCase):
 
     def segments(self, count=1):
         return [{"id": f"speech-{i}", "final": True, "speaker": "Bob", "revision": 1,
-                 "text": f"第{i}项：不知道 qoder 有没有做过校园的推广。我们需要了解学校合作的具体条件、预算边界与负责人。"}
+                 "text": f"第{i}项：不知道 纸鸮展台有没有办过夜间导览。我们要核对模型展厅开放条件、导览动线与值班人员。"}
                 for i in range(count)]
 
     async def settle(self):
         await self.wait_until(lambda: not self.service.overview_timers and not self.service.task_workers)
 
     async def context(self, count, state="paused", segments=None):
-        await self.service.cmd_context(self.workspace_id, {"title": "Qoder 校园推广", "meeting_state": state,
+        await self.service.cmd_context(self.workspace_id, {"title": "纸鸮展台夜间导览", "meeting_state": state,
                                                            "segments": segments or self.segments(count)})
 
     def overview_runs(self):
@@ -234,7 +234,7 @@ class MeetingIncrementalOverviewTests(unittest.IsolatedAsyncioTestCase):
     async def test_incremental_validates_old_ids_current_quality_and_exact_quote(self):
         ctx = {"segments": self.segments(3)}
         data = copy.deepcopy(ar.EMPTY_OVERVIEW)
-        data["discussion_points"] = [{"text": "学校合作条件", "evidence": [{"segment_id": "speech-0", "quote": "学校合作的具体条件"}]}]
+        data["discussion_points"] = [{"text": "展厅开放条件", "evidence": [{"segment_id": "speech-0", "quote": "模型展厅开放条件"}]}]
         self.assertEqual(ar.AssistantRuntime._validate_overview(ar._compact(data),ctx)["discussion_points"],data["discussion_points"])
         ctx["segments"][0]["quality_flags"] = ["needs_review"]
         self.assertEqual(ar.AssistantRuntime._validate_overview(ar._compact(data),ctx)["discussion_points"],[])
@@ -245,7 +245,7 @@ class MeetingIncrementalOverviewTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ar.AssistantRuntime._validate_overview(ar._compact(data),ctx)["discussion_points"][0]["evidence"],
                          [{"segment_id":"speech-1","quote":"第1项：不知道"}])
         # Words in more than one line prove nothing about which one was meant.
-        data["discussion_points"][0]["evidence"][0]={"segment_id":"speech-9-miscopied","quote":"学校合作的具体条件"}
+        data["discussion_points"][0]["evidence"][0]={"segment_id":"speech-9-miscopied","quote":"模型展厅开放条件"}
         self.assertEqual(ar.AssistantRuntime._validate_overview(ar._compact(data),ctx)["discussion_points"],[])
         data["discussion_points"][0]["evidence"][0]={"segment_id":"speech-0","quote":"不在原文的引用"}
         self.assertEqual(ar.AssistantRuntime._validate_overview(ar._compact(data),ctx)["discussion_points"],[])

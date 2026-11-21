@@ -80,8 +80,7 @@ class CoarseAudioError(Exception):
         self.diagnostic = diagnostic
 
 
-# Per-meeting ceiling on pre-reserved model spend. The largest real meeting so
-# far reserved about 9.7 yuan; this bounds runaway retries without blocking use.
+# Limit model spend per meeting so retries cannot keep reserving funds indefinitely.
 MAX_RESERVED_YUAN_PER_MEETING = 20.0
 
 
@@ -485,7 +484,7 @@ def name_changes(units_original: list[dict], units_cleaned: list[dict], rows: li
                 continue
             left = max([a-lo for lo, _ in hit_old] + [c-lo for lo, _ in hit_new] + [0])
             right = max([hi-b for _, hi in hit_old] + [hi-d for _, hi in hit_new] + [0])
-            # Include shared suffixes/prefixes (金→惊 becomes 金石→惊石).
+            # Include shared suffixes/prefixes (甲→乙 becomes 甲丙→乙丙).
             a, b, c, d = max(0,a-left), min(len(old),b+right), max(0,c-left), min(len(new),d+right)
             if edits and a <= edits[-1][1] and c <= edits[-1][3]:
                 p,q,r,s = edits.pop();a,b,c,d = min(p,a),max(q,b),min(r,c),max(s,d)

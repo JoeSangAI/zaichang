@@ -8,14 +8,34 @@ from unittest.mock import patch
 from scripts import replay_meeting_assistant as replay
 
 
+def replay_fixture(root: Path) -> dict:
+    database = root / "context.sqlite"
+    sentences = [
+        "纸鸮展台的入口先留空，方便观众排队。",
+        "把折纸模型放在蓝色桌子上。",
+        "导览牌移到投影墙旁边，留出通道。",
+        "走完展线后再确定灯光角度。",
+    ]
+    metadata = {"cache_id": "fixture-cache", "title": "纸鸮展台｜布展演练",
+                "absolute_clock": {"anchors": [{"unix_time": 1927938600}]}}
+    with sqlite3.connect(database) as db:
+        db.executescript("CREATE TABLE meetings(session,metadata); "
+                         "CREATE TABLE segments(session,parent,revision,start,end,payload,deleted);")
+        db.execute("INSERT INTO meetings VALUES(?,?)", ("fixture-session", json.dumps(metadata)))
+        for index, text in enumerate(sentences):
+            start, end = index * 3, index * 3 + 2
+            turn = {"id": f"turn-{index}", "text": text, "start": start, "end": end, "final": True}
+            db.execute("INSERT INTO segments VALUES(?,?,?,?,?,?,?)",
+                       ("fixture-session", turn["id"], 1, start, end, json.dumps([turn]), 0))
+    with patch.object(replay, "native_projection", side_effect=AssertionError("unexpected fallback")):
+        return replay.load_context("fixture-cache", root, database=database, cache_root=root / "cache")
+
+
 class ReplayTests(unittest.TestCase):
-    def test_offline_real_meeting_drives_production_conversation(self):
+    def test_offline_fixture_drives_production_conversation(self):
         with tempfile.TemporaryDirectory() as directory:
             out = Path(directory)
-            if not (replay.DATA_ROOT / "AgentContext/context.sqlite").is_file():
-                self.skipTest("authorized local meeting unavailable")
-            with patch.object(replay, 'native_projection', side_effect=unittest.SkipTest('meeting projection unavailable')):
-                context = replay.load_context("394FBA81-C2E0-4258-B1B3-B2AE038E2017", out)
+            context = replay_fixture(out)
             result = asyncio.run(replay.replay(context, out, offline=True))
             self.assertEqual(result['errors'], [])
             self.assertEqual(result['final_revision'], len(context['segments']))

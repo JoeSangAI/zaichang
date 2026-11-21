@@ -26,10 +26,21 @@ from typing import Any
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CACHE_ROOT = Path.home() / "Library/Application Support/ZaichangStandalone/SessionCache"
 DEFAULT_STAGE_ROOT = PROJECT_ROOT / ".runtime/session-continuity-1012/merge-staging"
-EXPECTED = {
-    "D2909AA6-B97C-4AA7-83AD-506F47CABA67": "点位筛选与投放节奏｜单周滚动策略下高入住率楼盘点位可得性验证",
-    "2931F606-7911-46ED-8200-40038FA5896F": "投放排期｜11月7日启动的可行性验证",
-}
+SELECTION_PATH = PROJECT_ROOT / ".local/merge-meetings.json"
+
+
+def _selection() -> tuple[dict[str, str], str]:
+    """Read the two explicitly selected recordings and the target title."""
+    try:
+        value = read_json(SELECTION_PATH)
+        sources, title = value["sources"], value["title"]
+        if (not isinstance(sources, dict) or len(sources) != 2
+                or any(str(uuid.UUID(key)).upper() != key for key in sources)
+                or any(not isinstance(text, str) or not text.strip() for text in [*sources.values(), title])):
+            raise ValueError
+        return sources, title
+    except (KeyError, OSError, ValueError):
+        raise ValueError("Configure two source UUIDs and titles and the merged title in .local/merge-meetings.json") from None
 
 
 def _merged_ids(first_id: str, second_id: str) -> tuple[str, str]:
@@ -111,21 +122,21 @@ def _try_app_lock(lock_path: Path) -> tuple[int | None, str]:
     return descriptor, "available"
 
 
-def _validate_import_package(cache_root: Path, package: Path) -> tuple[dict[str, Any], Path, dict[str, str]]:
+def _validate_import_package(cache_root: Path, package: Path, selected: dict[str, str], title: str) -> tuple[dict[str, Any], Path, dict[str, str]]:
     stage_root = DEFAULT_STAGE_ROOT.resolve()
     resolved_package = package.resolve(strict=True)
     if stage_root not in resolved_package.parents:
         raise ValueError("Import package must be inside the project merge-staging directory")
     manifest = read_json(resolved_package / "merge-manifest.json")
     sources = manifest.get("sources")
-    if not isinstance(sources, list) or [row.get("cache_id") for row in sources] != list(EXPECTED):
+    if not isinstance(sources, list) or [row.get("cache_id") for row in sources] != list(selected):
         raise ValueError("Staging manifest does not name exactly the two selected meetings in order")
     cache_id = manifest.get("app_cache", {}).get("cache_id")
-    expected_id, expected_session = _merged_ids(*EXPECTED.keys())
+    expected_id, expected_session = _merged_ids(*selected)
     if cache_id != expected_id or manifest.get("merge_session") != expected_session:
         raise ValueError("Unexpected merged cache identity")
     app_meta = manifest["app_cache"]
-    if app_meta.get("title") != "点位筛选与投放排期｜11月7日启动可行性验证":
+    if app_meta.get("title") != title:
         raise ValueError("Unexpected merged recording title")
     folder_rel = Path(app_meta.get("folder", ""))
     if folder_rel.as_posix() != f"merged_recording/{cache_id}":
@@ -140,7 +151,7 @@ def _validate_import_package(cache_root: Path, package: Path) -> tuple[dict[str,
     sources_root = resolved_package / "sources"
     for row in sources:
         cache_id_source = row.get("cache_id")
-        if cache_id_source not in EXPECTED or row.get("title") != EXPECTED[cache_id_source]:
+        if cache_id_source not in selected or row.get("title") != selected[cache_id_source]:
             raise ValueError("Unexpected source title or ID in staging manifest")
         expected = row.get("files_sha256")
         source_copy = sources_root / cache_id_source
@@ -150,7 +161,7 @@ def _validate_import_package(cache_root: Path, package: Path) -> tuple[dict[str,
         if source_live.is_symlink() or not source_live.is_dir() or _walk_files(source_live) != expected:
             raise ValueError(f"Live source changed since staging: {cache_id_source}")
         display = read_json(source_live / "display-info.json")
-        if display.get("title") != EXPECTED[cache_id_source]:
+        if display.get("title") != selected[cache_id_source]:
             raise ValueError(f"Live source title changed: {cache_id_source}")
     return manifest, merged, expected_cache_hashes
 
@@ -188,7 +199,8 @@ def _import_receipt(cache_root: Path, manifest: dict[str, Any], state: str,
 
 
 def import_staged(cache_root: Path, package: Path, app_info: Path, *, apply: bool = False) -> dict[str, Any]:
-    manifest, staged_cache, expected_cache_hashes = _validate_import_package(cache_root, package)
+    selected, title = _selection()
+    manifest, staged_cache, expected_cache_hashes = _validate_import_package(cache_root, package, selected, title)
     cache_id = manifest["app_cache"]["cache_id"]
     target, temp, originals = _import_layout(cache_root, cache_id)
     _validate_originals_parent(cache_root)
@@ -219,7 +231,7 @@ def import_staged(cache_root: Path, package: Path, app_info: Path, *, apply: boo
     receipt_path = originals / "import-receipt.json"
     try:
         # Recheck all mutation preconditions after taking the lock.
-        manifest, staged_cache, expected_cache_hashes = _validate_import_package(cache_root, package)
+        manifest, staged_cache, expected_cache_hashes = _validate_import_package(cache_root, package, selected, title)
         target, temp, originals = _import_layout(cache_root, cache_id)
         if target.exists() or temp.exists() or originals.exists():
             raise FileExistsError("An import destination appeared after preflight")
@@ -273,7 +285,8 @@ def import_staged(cache_root: Path, package: Path, app_info: Path, *, apply: boo
 
 
 def rollback_import(cache_root: Path, merged_id: str, app_info: Path) -> dict[str, Any]:
-    expected_id, _ = _merged_ids(*EXPECTED.keys())
+    selected, _ = _selection()
+    expected_id, _ = _merged_ids(*selected)
     if merged_id != expected_id:
         raise ValueError("Rollback is restricted to this explicitly selected merged recording")
     lock_path = _app_lock_path(app_info)
@@ -288,7 +301,7 @@ def rollback_import(cache_root: Path, merged_id: str, app_info: Path) -> dict[st
         if receipt.get("kind") != "zaichang-sessioncache-merge-import" or receipt.get("merged_cache_id") != merged_id:
             raise ValueError("Missing or invalid merge import receipt")
         rows = receipt.get("sources")
-        if not isinstance(rows, list) or [row.get("cache_id") for row in rows] != list(EXPECTED):
+        if not isinstance(rows, list) or [row.get("cache_id") for row in rows] != list(selected):
             raise ValueError("Receipt does not authorize exactly the two selected sources")
         target = cache_root / merged_id
         if target.exists():
@@ -741,7 +754,7 @@ def _write_app_cache(temp: Path, first_dir: Path, second_dir: Path, first_id: st
                      first_display: dict[str, Any], second_display: dict[str, Any], first_meeting: dict[str, Any],
                      second_meeting: dict[str, Any], first_session: str, second_session: str,
                      first_anchor: float, second_anchor: float, second_offset: float,
-                     first_epoch_map: dict[str, str], second_epoch_map: dict[str, str], rows: list[dict[str, Any]]) -> dict[str, Any]:
+                     first_epoch_map: dict[str, str], second_epoch_map: dict[str, str], rows: list[dict[str, Any]], title: str) -> dict[str, Any]:
     cache_id, merge_session = _merged_ids(first_id, second_id)
     cache = temp / "merged_recording" / cache_id
     cache.mkdir(parents=True)
@@ -854,7 +867,7 @@ def _write_app_cache(temp: Path, first_dir: Path, second_dir: Path, first_id: st
                                            for manifest in (source_manifest[0],)]}})
     (cache / "meeting.json").write_text(json.dumps(metadata, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
     display = {"schema": 2, "cache_id": cache_id, "session": merge_session,
-               "title": "点位筛选与投放排期｜11月7日启动可行性验证",
+               "title": title,
                "provenance": "merged-local-recordings"}
     (cache / "display-info.json").write_text(json.dumps(display, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
     controls = {"schema": 1, "session": merge_session, "last_event": "stopped", "reason": "merged_saved_sessions",
@@ -872,10 +885,11 @@ def prepare_merge(cache_root: Path, stage_root: Path, first_id: str, second_id: 
     first_id, second_id = first_id.upper(), second_id.upper()
     if first_id == second_id:
         raise ValueError("Choose two different meeting IDs")
-    if first_id not in EXPECTED or second_id not in EXPECTED:
+    selected, title = _selection()
+    if [first_id, second_id] != list(selected):
         raise ValueError("This preparation tool only accepts the two user-selected meetings")
-    first_dir, first_display, first_meeting = _validate_source(cache_root, first_id, EXPECTED[first_id])
-    second_dir, second_display, second_meeting = _validate_source(cache_root, second_id, EXPECTED[second_id])
+    first_dir, first_display, first_meeting = _validate_source(cache_root, first_id, selected[first_id])
+    second_dir, second_display, second_meeting = _validate_source(cache_root, second_id, selected[second_id])
     first_session, second_session = first_meeting.get("session"), second_meeting.get("session")
     if not first_session or not second_session or first_session == second_session:
         raise ValueError("Missing or duplicate session identities")
@@ -970,7 +984,7 @@ def prepare_merge(cache_root: Path, stage_root: Path, first_id: str, second_id: 
         app_cache = _write_app_cache(temp, first_dir, second_dir, first_id, second_id,
                                      first_display, second_display, first_meeting, second_meeting,
                                      first_session, second_session, first_anchor, second_anchor,
-                                     second_offset, {}, {}, combined)
+                                     second_offset, {}, {}, combined, title)
         app_cache["files_sha256"] = _walk_files(temp / app_cache["folder"])
         manifest["app_cache"] = app_cache
         (temp / "merge-manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")

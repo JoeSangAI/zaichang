@@ -716,42 +716,42 @@ class CoarseAudioTests(unittest.TestCase):
 
 
     def test_exact_mapping_prompt_and_name_change_audit(self):
-        rows=[dict(term='惊石',aliases=[],misheard=['金石'])]
-        old=[dict(id='name',text='金石说嗯嗯先这样。'),dict(id='filler',text='嗯嗯先这样。')]
-        new=[dict(unit_id='name',text='惊石说先这样。'),dict(unit_id='filler',text='先这样。')]
-        self.assertEqual(coarse.name_changes(old,new,rows),[dict(unit_id='name',old='金石',new='惊石')])
+        rows=[dict(term='示例林舟',aliases=[],misheard=['示例林洲'])]
+        old=[dict(id='name',text='示例林洲说嗯嗯把灯打开。'),dict(id='filler',text='嗯嗯把灯打开。')]
+        new=[dict(unit_id='name',text='示例林舟说把灯打开。'),dict(unit_id='filler',text='把灯打开。')]
+        self.assertEqual(coarse.name_changes(old,new,rows),[dict(unit_id='name',old='示例林洲',new='示例林舟')])
         self.assertEqual(coarse.name_changes(old,old,rows),[])
-        prompt=coarse._prompt('mic',[],[],[],0, ['惊石；常被误识为金石'])
+        prompt=coarse._prompt('mic',[],[],[],0, ['示例林舟；常被误识为示例林洲'])
         self.assertIn('精确出现',prompt)
         self.assertIn('即使读音相近也保留原文',prompt)
         self.assertNotIn('term_hints=',prompt)
 
     def test_receipt_audits_registered_names_and_rejects_unregistered_name_swap(self):
-        rows=[dict(term='惊石',aliases=[],misheard=['金石'],layer='project'),
-              dict(term='晶视',aliases=[],misheard=[],layer='people')]
-        request=self.request(units=[dict(id='name',source_id='mic',text='金石说写到PPT里面。',start=0,end=1,speaker_locked=True)])
-        call=Mock(return_value=({'units':[dict(unit_id='name',text='惊石说写到PPT里面。')]},{}))
+        rows=[dict(term='示例林舟',aliases=[],misheard=['示例林洲'],layer='project'),
+              dict(term='示例顾青',aliases=[],misheard=[],layer='people')]
+        request=self.request(units=[dict(id='name',source_id='mic',text='示例林洲说把图贴在展板上。',start=0,end=1,speaker_locked=True)])
+        call=Mock(return_value=({'units':[dict(unit_id='name',text='示例林舟说把图贴在展板上。')]},{}))
         with patch.object(coarse,'_cleanup_terms',return_value=rows),patch.object(coarse,'_name_rows',return_value=rows):
             result=coarse._process(request,call=call)
             reused=coarse._process(request,call=call)
-        self.assertEqual(result['name_changes'],[dict(unit_id='name',old='金石',new='惊石')])
+        self.assertEqual(result['name_changes'],[dict(unit_id='name',old='示例林洲',new='示例林舟')])
         self.assertEqual(reused['name_changes'],result['name_changes'])
         self.assertEqual(call.call_count,1)
-        unit=dict(text='写到PPT里面给惊石啊，水水啊，他们都在场。',manual=False,approximate_window=False)
-        self.assertEqual(coarse._safe_text(unit,unit['text'].replace('惊石','晶视'),rows),unit['text'])
+        unit=dict(text='请示例林舟核对纸船展板，志愿者会带上图钉。',manual=False,approximate_window=False)
+        self.assertEqual(coarse._safe_text(unit,unit['text'].replace('示例林舟','示例顾青'),rows),unit['text'])
         alias=[dict(term='张三',aliases=['小张'],misheard=[])]
-        unit['text']='小张说写到PPT里面。'
+        unit['text']='小张说把图贴在展板上。'
         self.assertEqual(coarse._safe_text(unit,unit['text'].replace('小张','张三'),alias),unit['text'])
 
     def test_previous_prompt_with_nonempty_old_hints_never_calls_model(self):
-        request=self.request(units=[dict(id='name',source_id='mic',text='写到PPT里面给晶视啊，水水啊，他们都在场。',start=0,end=1,speaker_locked=True)])
+        request=self.request(units=[dict(id='name',source_id='mic',text='请示例顾青核对纸船展板，志愿者会带上图钉。',start=0,end=1,speaker_locked=True)])
         parsed=coarse._parse_request(request)
         unit=parsed['units'][0]
         # Real previous hash shape, including the now-removed per-meeting hints.
         for revision in ['term-guide-5','clear-transcript-1']:
             state=dict(unit_id=unit['id'],source_id=unit['source_id'],text_sha256=unit['original_text_sha256'],
                        start=round(unit['start'],3),end=round(unit['end'],3),approximate_window=unit['approximate_window'],
-                       model=coarse.MODEL,prompt_revision=revision,term_hints=['晶视'])
+                       model=coarse.MODEL,prompt_revision=revision,term_hints=['示例顾青'])
             if revision=='clear-transcript-1':state['matched_terms']=[]
             old_hash=coarse.hashlib.sha256(json.dumps(state,ensure_ascii=False,sort_keys=True,separators=(',',':')).encode()).hexdigest()
             ledger=coarse._load_ledger(self.cache/coarse.PROGRESS_NAME,parsed['session'],parsed['cache_id'])
@@ -945,8 +945,8 @@ class CoarseAudioTests(unittest.TestCase):
         self.assertEqual(result[1]["speaker_key"], "p1")
 
     def test_fragment_text_is_preserved_even_when_model_or_cache_rewrites_it(self):
-        originals = ["只能", "块，就相当于", "我", "知道呀。", "一", "10万块钱", "完整但时间并未对齐的原始句子。", "这句较完整的原文，呃，允许明确纠错"]
-        proposals = ["只能最大。", "块，如或者", "我。", "知道呀！", "点。", "一百万块钱", "模型凭邻句补出的内容。", "这句较完整的原文允许明确纠错。"]
+        originals = ["暂留", "册，已经", "我", "收到啦。", "一", "12张纸片", "完整但时间并未对齐的原始句子。", "这句较完整的原文，呃，允许明确纠错"]
+        proposals = ["暂留备用。", "册，或者", "我。", "收到啦！", "点。", "二百张纸片", "模型凭邻句补出的内容。", "这句较完整的原文允许明确纠错。"]
         units = [{"id": f"u{i}", "source_id": "mic", "text": text, "start": i / 10,
                   "end": (i + 1) / 10, "approximate_window": i == 6} for i, text in enumerate(originals)]
         def answer(_key, _audio, prompt, _tokens, **_kwargs):
@@ -983,8 +983,8 @@ class CoarseAudioTests(unittest.TestCase):
             with self.subTest(original=original):
                 unit = {"text": original, "manual": False, "approximate_window": False}
                 self.assertEqual(coarse._safe_text(unit, proposed, terms), expected)
-        unit = {"text": "CODER", "manual": False, "approximate_window": False}
-        self.assertEqual(coarse._safe_text(unit, "Qoder", [{"term": "Qoder", "misheard": ["coder"]}]), "CODER")
+        unit = {"text": "PAPERMOTH", "manual": False, "approximate_window": False}
+        self.assertEqual(coarse._safe_text(unit, "PaperMote", [{"term": "PaperMote", "misheard": ["papermoth"]}]), "PAPERMOTH")
         # Synthetic shared person table uses 张三 as the canonical name and
         # 小张 as a confirmed spoken alias; preserve the confirmed-alias versus mishearing distinction.
         unit["text"] = "小小章"
@@ -1002,15 +1002,15 @@ class CoarseAudioTests(unittest.TestCase):
                          "我们先确认方案，然后再讨论时间。")
 
     def test_long_cleanup_keeps_raw_words_unless_registered(self):
-        terms = [{"term": "Qoder", "aliases": [], "misheard": ["coder"]}]
+        terms = [{"term": "PaperMote", "aliases": [], "misheard": ["papermoth"]}]
         cases = [
             # An unregistered name is never guessed from sound, even if it may be right.
-            ("哎，张总，那抱歉，我上午一直在投屏。", "哎，桑总，那抱歉，我上午一直在投屏。", None),
-            ("一年一个多亿，对于一个两优的品牌来说。", "一年一个多亿，对于一个粮油的品牌来说。", None),
+            ("喂，示例柳青，我把纸灯放在展柜左边了。", "喂，示例柳清，我把纸灯放在展柜左边了。", None),
+            ("这个展柜是摆止鸢模型用的。", "这个展柜是摆纸鸢模型用的。", None),
             # Words heard from the neighbouring turn are not added.
-            ("那我选一个楼的话，它即使不在这个top里面也行。", "那我选一个楼的话，你一个列表，它即使不在这个top里面也行。", None),
+            ("要是选纸船模型，放在角落的那个也可以。", "要是选纸船模型，找一下展品图册，放在角落的那个也可以。", None),
             # Registered mishearings, fillers, repeats and punctuation still clean up.
-            ("我们接下来也会跟coder这边有一些合作。", "我们接下来也会跟Qoder这边有一些合作。", "proposed"),
+            ("展品标签写的是papermoth，放在纸灯架旁边。", "展品标签写的是PaperMote，放在纸灯架旁边。", "proposed"),
             ("呃，我我觉得这个方案，就是，还可以再看看", "我觉得这个方案，还可以再看看。", "proposed"),
         ]
         for original, proposed, expected in cases:
@@ -1021,7 +1021,7 @@ class CoarseAudioTests(unittest.TestCase):
     def test_legacy_cleanup_reuses_history_and_only_revisits_known_wrong_name(self):
         terms = [{"term": "小张", "aliases": [], "misheard": ["小小章"]}]
         units = [{"id": "name", "source_id": "mic", "text": "小小章", "start": 0, "end": .5, "speaker_locked": True},
-                 {"id": "other", "source_id": "mic", "text": "北京学校基本上都在海淀。", "start": .5, "end": 1, "speaker_locked": True}]
+                 {"id": "other", "source_id": "mic", "text": "月面展馆的纸模型都放在北厅。", "start": .5, "end": 1, "speaker_locked": True}]
         request = self.request(units=units)
         with patch.object(coarse, "_cleanup_terms", return_value=terms):
             parsed = coarse._parse_request(request)
@@ -1051,8 +1051,8 @@ class CoarseAudioTests(unittest.TestCase):
         self.assertEqual(call.call_count, 1)
 
     def test_complete_sentence_correction_preserves_numeric_tokens(self):
-        originals = ["你不是可以从17号开始吗？", "这次计划用10万元投放这个区域。", "呃，这次计划用10万元投放这个区域"]
-        proposals = ["你不是可以从十七号开始吗？", "这次计划用100万元投放这个区域。", "这次计划用10万元投放这个区域。"]
+        originals = ["请把纸船模型放到第23格。", "展馆计划给纸灯展柜订12块展板。", "呃，展馆计划给纸灯展柜订12块展板"]
+        proposals = ["请把纸船模型放到第二十三格。", "展馆计划给纸灯展柜订120块展板。", "展馆计划给纸灯展柜订12块展板。"]
         units = [{"id": f"u{i}", "source_id": "mic", "text": text, "start": i / 10,
                   "end": (i + 1) / 10} for i, text in enumerate(originals)]
         call = Mock(return_value=({"units": [{"unit_id": f"u{i}", "text": text,

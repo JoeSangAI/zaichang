@@ -350,7 +350,7 @@ final class MeetingRecycleBinController:NSWindowController,NSTableViewDataSource
         try JSONSerialization.data(withJSONObject:["session":session,"cache_id":id,"bundle":"*microphone*","capture_origin_uptime":100.0,"absolute_clock":clock]).write(to:folder.appendingPathComponent("meeting.json"))
         try MeetingLibraryInfo.saveTitle(title,in:folder);return try cachedMeetings(in:cache).first{$0.id==id}!
     }
-    let first=try fixture("客户投放｜青浦奥莱选点与广佛效果验证",1791492000),second=try fixture("闲鱼用增｜采购边界与四周试投",1791495600),third=try fixture("项目沟通｜下一周安排",1791499200)
+    let first=try fixture("云梯邮局｜入口布置与导览路线",1791492000),second=try fixture("纸京｜灯塔展投影测试",1791495600),third=try fixture("项目沟通｜下一周安排",1791499200)
     let firstBytes=try hashes(first.directory),secondBytes=try hashes(second.directory),thirdBytes=try hashes(third.directory)
     let a=try store.trash(first),b=try store.trash(second),c=try store.trash(third)
     let rows=try store.receipts().map{MeetingRecycleBinRow.read($0,store:store)}

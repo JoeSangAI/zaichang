@@ -126,7 +126,7 @@ def _speech_line(segment: dict) -> str:
     return f"{_clock_text(segment.get('start'))} {speaker}：{str(segment.get('text') or '')}{review}"
 OVERVIEW_INTERVAL_SECONDS = 180
 # Overview is one JSON completion with no tools: it needs no Codex process and no ChatGPT account.
-# DeepSeek on Bailian, same key as transcription: qwen-flash took suggestions for decisions (replay, 2026-11-03).
+# DeepSeek on Bailian, same key as transcription: qwen-flash took suggestions for decisions.
 OVERVIEW_MODEL = "deepseek-v4.1-flash"
 OVERVIEW_API_HOST = "dashscope.aliyuncs.com"
 OVERVIEW_API_URL = f"https://{OVERVIEW_API_HOST}/compatible-mode/v1/chat/completions"
@@ -168,7 +168,7 @@ OVERVIEW_LIST_FIELDS = ("agenda", "discussion_points", "decisions", "actions", "
 EMPTY_OVERVIEW = {"summary": {"text": "", "evidence": []}, "agenda": [], "current_topic": {"text": "", "evidence": []},
                   "discussion_points": [], "decisions": [], "actions": [], "open_questions": []}
 # The meeting grows at the end of the user message; everything before it stays a cacheable prefix.
-# Codex's instructions plus the schema. Extra "not a decision" rules made the model drop real decisions (replay, 2026-11-03).
+# Codex's instructions plus the schema. Extra "not a decision" rules made the model drop real decisions.
 OVERVIEW_SYSTEM_PROMPT = ("You produce a concise, structured meeting overview from the provided finalized speech segments only. "
                           "Do not use filesystem, web, MCP, tools, or outside context. Never infer decisions, tasks, owners, or deadlines. "
                           "Every non-empty item must cite exact source quotes and segment IDs from the supplied meeting projection. "

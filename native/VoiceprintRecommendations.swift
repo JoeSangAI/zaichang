@@ -65,8 +65,7 @@ struct VoiceprintArchive:Codable {
 // Each person's references for one archive state with one meeting excluded.
 // Selecting them re-runs the ledger eligibility grouping for every person, so
 // a caller that scores many spans builds the table once. Scores are the same
-// as rebuilding it for every span (2026-10-30: per-span rebuilding made one
-// saved meeting take 1-3 minutes and backed up the serial voice queue).
+// as rebuilding it for every span, which backs up the serial voice queue.
 struct VoiceprintReferenceTable {
     private let rows:[(id:String,vectors:[[Double]])]
     init(archive:VoiceprintArchive,excludingSession:String?,includingAutomatic:Bool) {
@@ -118,22 +117,20 @@ final class VoiceprintReferenceCache {
     }
 }
 
-// Group identity, from the 2026-10-15 leave-one-meeting-out evaluation
-// (.runtime/voice-recognition-eval-20261014/report.md): the mean voice of one
-// session group is compared with each person's human reference centroid.
+// Group identity compares the mean voice of one session group with each
+// person's human reference centroid.
 // Only a person whose references span at least two other meetings can be named
 // this way; single-meeting enrollments keep the strict per-span rule because a
 // one-condition reference attracted unregistered voices in the evaluation.
 let voiceprintGroupCentroidThreshold=0.62
 let voiceprintGroupCentroidMargin=0.10
 let voiceprintGroupOutlierFloor=0.50
-// From 14 real meetings (2026-11-01): the same person across two slots scored
-// 0.86-0.95, except 0.56 and 0.74 which stay unlinked; 32 different-person pairs
-// peaked at 0.74. The margin is against the next named person on that channel.
+// The threshold excludes weak matches across slots on the same channel.
+// The margin is against the next named person on that channel.
 let voiceprintSessionLinkThreshold=0.80
 let voiceprintSessionLinkMargin=0.10
-// Across microphone and computer audio in one meeting: the same person 0.65-0.71,
-// 24 different-person pairs at most 0.29.
+// Comparing microphone and computer audio needs a separate threshold because
+// a single voice can score lower across capture sources.
 let voiceprintSessionCrossLinkThreshold=0.55
 // A person known only from the other kind of audio, from at least two meetings
 // (one attracted an unregistered voice in replay, the same lesson as above).
@@ -492,7 +489,7 @@ struct VoiceprintMatcher {
     // A person's voice can land in two slots of one meeting. Once a human names
     // one, another group whose mean voice clearly matches shows the same name.
     // Never a training label: only a person's own confirmation enrolls their
-    // voice. See docs/speaker-rename-live-20261101.md.
+    // voice.
     func sessionLink(_ key:SessionSpeakerKey,manualNames:[SessionSpeakerKey:String])->VoiceprintRecommendation? {
         guard key.session==session,!ignored.contains(key),manualNames[key]==nil,let rows=evidence[key],rows.count>=3 else{return nil}
         func centre(_ values:[VoiceprintEvidence])->[Double] {

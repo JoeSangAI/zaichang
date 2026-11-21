@@ -92,15 +92,8 @@ class ConnectorTests(unittest.TestCase):
         self.assertEqual(runtime_config.connectors()['agent_bridge']['tunnel_id'],'example-tunnel')
         self.assertFalse((self.root/'not-read.env').exists())
 
-    def test_private_template_contract_with_paths_replaced(self):
+    def test_connector_template_contract(self):
         config,project=self.fixture()
-        template=Path('docs/history/20261022-术语止损与旁听同事/tasks/joe-connectors.json')
-        if template.exists():
-            original=json.loads(template.read_text())
-            self.assertEqual(set(original)-{'agent_bridge'},set(config))
-            original.pop('agent_bridge',None)
-            original.update(config)
-            config=original
         self.write(config)
         self.assertEqual(shared_terms.term_guide(project),['项目甲（也称甲产品）；常被误识为误写甲','张三（也称小张）','通用词（也称通用别名）'])
         self.assertEqual(shared_people.search_people('Alpha')['candidates'][0]['reference']['name'],'合成甲')

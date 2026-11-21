@@ -245,7 +245,7 @@ struct MeetingTitleContext {
     // The model sometimes copies a misheard word from the transcript even when
     // the term table names the standard spelling. Swap registered misheard
     // spellings deterministically; a standard spelling already present is kept
-    // whole (青禾露 stays even when 禾露 is a registered mishearing).
+    // whole (a registered mishearing may be nested inside the standard spelling).
     func respelled(_ title: String) -> String {
         guard !spellings.isEmpty else { return title }
         let text = Array(title)
@@ -318,11 +318,9 @@ struct DashScopeMeetingTitleProvider: MeetingTitleProvider {
         return try Self.groundedTitle(content, transcript: transcript, context: context)
     }
 
-    // Replayed on 86 real meetings (2026-11-09): with the term table and the
-    // detected project, DeepSeek names the brand actually discussed in its
-    // standard spelling instead of a misheard word or a passing name.
-    // Replayed again on 89 (2026-11-12): several brands of one client are
-    // named by the client, not by whichever brand came up most.
+    // The term table and detected project help ground the subject and its
+    // standard spelling. When several brands belong to a single client,
+    // the client is the subject of the title.
     static func requestBody(transcript: String, context: MeetingTitleContext = .empty) -> [String: Any] {
         ["model": "deepseek-v4.1-flash", "stream": false, "temperature": 0.1, "max_tokens": 200,
          "enable_thinking": false, "response_format": ["type": "json_object"],
@@ -432,7 +430,7 @@ struct MeetingTitleInput {
 enum MeetingTitleOutcome { case saved(String), unchanged, manual, stale, unavailable, insufficientText, failed, unreachable }
 
 actor MeetingAutoTitle {
-    // 2: DeepSeek with the meeting's term table and projects (2026-11-09).
+    // 2: DeepSeek with the meeting's term table and projects.
     static let generator = 2
     private var generation: [String: Int] = [:]
     private var inFlight: [String: (digest: String, token: Int, revision: Int?)] = [:]

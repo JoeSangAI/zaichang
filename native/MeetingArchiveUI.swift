@@ -142,7 +142,7 @@ private final class MeetingArchivePanel:NSObject,NSWindowDelegate,WKNavigationDe
         let panel=MeetingArchiveSheetWindow(contentRect:NSRect(x:0,y:0,width:980,height:700),styleMask:[.titled,.closable,.resizable],backing:.buffered,defer:false)
         panel.title="归档";panel.delegate=self;panel.panelController=self;panel.center()
         let root=NSView();root.translatesAutoresizingMaskIntoConstraints=false
-        let label=NSTextField(labelWithString:"归档内容与每日工作台同步");label.textColor = .secondaryLabelColor;label.font = .systemFont(ofSize:12)
+        let label=NSTextField(labelWithString:"归档内容与归档服务同步");label.textColor = .secondaryLabelColor;label.font = .systemFont(ofSize:12)
         let retry=NSButton(title:"重试",target:self,action:#selector(retryPreparation));retry.bezelStyle = .rounded;retry.isHidden=true
         let spacer=NSView();spacer.setContentHuggingPriority(.defaultLow,for:.horizontal)
         let close=NSButton(title:"关闭",target:self,action:#selector(closePanel));close.bezelStyle = .rounded;close.controlSize = .regular
@@ -179,20 +179,20 @@ private final class MeetingArchivePanel:NSObject,NSWindowDelegate,WKNavigationDe
         owner.flushMeetingContext { [self,owner] success in
             DispatchQueue.main.async {
                 guard self.isCurrent(key,owner:owner,requireCoarse:requireCoarse) else{self.inFlight.remove(key);return}
-                guard success else{self.fail(key,"会议内容尚未保存到工作台，请重试归档准备。");return}
+                guard success else{self.fail(key,"会议内容尚未保存到归档服务，请重试归档准备。");return}
                 self.requestPreparation(key:key,owner:owner,session:session,requireCoarse:requireCoarse)
             }
         }
     }
 
     private func requestPreparation(key:String,owner:Delegate,session:String,requireCoarse:Bool) {
-        guard let bootstrapURL=MeetingArchiveRequest.bootstrapURL() else{fail(key,"工作台地址无效。稍后重试。");return}
+        guard let bootstrapURL=MeetingArchiveRequest.bootstrapURL() else{fail(key,"归档服务地址无效。稍后重试。");return}
         networkSession.dataTask(with:bootstrapURL) { [self,owner] data,response,error in
             DispatchQueue.main.async {
                 guard self.isCurrent(key,owner:owner,requireCoarse:requireCoarse) else{self.inFlight.remove(key);return}
                 guard let token=try? MeetingArchiveRequest.validatedCSRFToken(data:data,response:response,error:error),
                       let request=try? MeetingArchiveRequest.prepareRequest(session:session,csrfToken:token) else {
-                    self.fail(key,"工作台暂时无法连接，录音和文字仍保留。请稍后重试。");return
+                    self.fail(key,"归档服务暂时无法连接，录音和文字仍保留。请稍后重试。");return
                 }
                 self.networkSession.dataTask(with:request) { [self,owner] _,response,error in
                     DispatchQueue.main.async {
@@ -217,15 +217,15 @@ private final class MeetingArchivePanel:NSObject,NSWindowDelegate,WKNavigationDe
     }
 
     func webView(_ webView:WKWebView,didFail navigation:WKNavigation!,withError error:Error) {
-        show("工作台暂时无法打开，录音和文字仍保留。请稍后重试。",retry:true)
+        show("归档服务暂时无法打开，录音和文字仍保留。请稍后重试。",retry:true)
     }
 
     func webView(_ webView:WKWebView,didFinish navigation:WKNavigation!) {
-        if inFlight.isEmpty,retryButton?.isHidden != false {show("归档内容与每日工作台同步")}
+        if inFlight.isEmpty,retryButton?.isHidden != false {show("归档内容与归档服务同步")}
     }
 
     func webView(_ webView:WKWebView,didFailProvisionalNavigation navigation:WKNavigation!,withError error:Error) {
-        show("工作台暂时无法打开，录音和文字仍保留。请稍后重试。",retry:true)
+        show("归档服务暂时无法打开，录音和文字仍保留。请稍后重试。",retry:true)
     }
 
     func refreshButton() {

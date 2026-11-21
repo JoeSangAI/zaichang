@@ -14,7 +14,7 @@ enum MeetingVisualStyle {
                 blue:CGFloat(hex&0xff)/255,alpha:1)
     }
 
-    // Warm paper reading surface (2026-10-15 visual pass); dark mode stays neutral.
+    // Warm paper reading surface; dark mode stays neutral.
     static let surface=color(0xFBFAF7,0x1D1D20)
     static let sidebar=color(0xF3F1EC,0x232327)
     static let ink=color(0x1F2024,0xECEDEF)

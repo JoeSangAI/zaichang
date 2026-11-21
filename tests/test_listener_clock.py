@@ -1,34 +1,19 @@
-"""P8a offline contract checks, using the authorized meeting's real text/times.
-
-No model calls. Data-dependent cases skip on machines without this meeting;
-transport and CLI checks remain self-contained.
-"""
-import asyncio
+"""Offline meeting clock checks against an isolated replay fixture."""
 import copy
-import json
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
 
-from codex_runtime import CodexRuntime
 from scripts import replay_meeting_assistant as p
+from tests.test_assistant_replay import replay_fixture
 
-CACHE_ID = "394FBA81-C2E0-4258-B1B3-B2AE038E2017"
 
-
-class RealMeetingTests(unittest.IsolatedAsyncioTestCase):
+class MeetingClockTests(unittest.IsolatedAsyncioTestCase):
     @classmethod
     def setUpClass(cls):
-        database = p.DATA_ROOT / "AgentContext/context.sqlite"
-        if not database.is_file():
-            raise unittest.SkipTest("authorized local meeting is unavailable")
         with tempfile.TemporaryDirectory() as directory:
-            # The native reader fallback is separately exercised below; a unit
-            # test must not trigger a full Swift compilation unexpectedly.
-            with patch("scripts.replay_meeting_assistant.native_projection",
-                       side_effect=unittest.SkipTest("meeting projection unavailable")):
-                cls.context = p.load_context(CACHE_ID, Path(directory))
+            cls.context = replay_fixture(Path(directory))
 
     def short_context(self):
         context = copy.deepcopy(self.context)
@@ -58,7 +43,7 @@ class RealMeetingTests(unittest.IsolatedAsyncioTestCase):
     async def test_overlapping_end_order_ties_and_zero_time(self):
         context = self.short_context()
         rows = context["segments"][:3]
-        # Real sentences, controlled timing to cover simultaneous availability.
+        # Controlled timing to cover simultaneous availability.
         rows[0].update(start=0, end=20)
         rows[1].update(start=5, end=10)
         rows[2].update(start=8, end=10)

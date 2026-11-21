@@ -79,7 +79,7 @@ class FakeAppServer:
         q = self.events.setdefault(thread_id, asyncio.Queue())
         await asyncio.sleep(0)
         if params.get("outputSchema"):
-            text = json.dumps({"stance": "代表团队明确校园推广目标", "items": []}, ensure_ascii=False)
+            text = json.dumps({"stance": "代表团队明确导览目标", "items": []}, ensure_ascii=False)
         else:
             text = "已完成"
         await q.put({"method": "item/completed", "params": {"threadId": thread_id,
@@ -127,13 +127,13 @@ class FakeOverviewModel:
         rows = prompt.removesuffix(assistant_runtime.OVERVIEW_KEEP_REMINDER).split("最终发言片段：\n", 1)[1]
         source_rows = [json.loads(line) for line in rows.splitlines()]
         source_id = next((str(row[0]) for row in source_rows if isinstance(row[2], str)
-                          and "不知道 qoder 有没有做过校园的推广" in row[2]), "0")
-        text = json.dumps({"current_topic": {"text": "Qoder 校园推广", "evidence": [
-            {"segment_id": source_id, "quote": "qoder 有没有做过校园的推广"}]},
-            "discussion_points": [{"text": "团队尚不确定 Qoder 是否做过校园推广", "evidence": [
-                {"segment_id": source_id, "quote": "不知道 qoder 有没有做过校园的推广"}]}],
-            "decisions": [], "actions": [], "open_questions": [{"text": "Qoder 是否做过校园推广？", "evidence": [
-                {"segment_id": source_id, "quote": "qoder 有没有做过校园的推广"}]}]}, ensure_ascii=False)
+                          and "不知道 纸鸮展台有没有办过夜间导览" in row[2]), "0")
+        text = json.dumps({"current_topic": {"text": "纸鸮展台夜间导览", "evidence": [
+            {"segment_id": source_id, "quote": "纸鸮展台有没有办过夜间导览"}]},
+            "discussion_points": [{"text": "团队尚不确定 纸鸮展台是否办过夜间导览", "evidence": [
+                {"segment_id": source_id, "quote": "不知道 纸鸮展台有没有办过夜间导览"}]}],
+            "decisions": [], "actions": [], "open_questions": [{"text": "纸鸮展台是否办过夜间导览？", "evidence": [
+                {"segment_id": source_id, "quote": "纸鸮展台有没有办过夜间导览"}]}]}, ensure_ascii=False)
         return {"text": text, "model": "deepseek-v4.1-flash", "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
 
 
@@ -235,9 +235,9 @@ class AssistantRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
 
     async def test_meeting_overview_uses_bailian_without_codex_or_chat_focus(self):
-        speech = "不知道 qoder 有没有做过校园的推广"
-        await self.service.cmd_context(self.workspace_id, {"title": "Qoder campus marketing", "notes": "PRIVATE_NOTE_SHOULD_NOT_ENTER_OVERVIEW",
-            "segments": [{"id": "public-qoder-1", "revision": 1, "text": speech, "speaker": "Bob", "final": True},
+        speech = "不知道 纸鸮展台有没有办过夜间导览"
+        await self.service.cmd_context(self.workspace_id, {"title": "Paper Owl exhibit tours", "notes": "PRIVATE_NOTE_SHOULD_NOT_ENTER_OVERVIEW",
+            "segments": [{"id": "public-owl-1", "revision": 1, "text": speech, "speaker": "Bob", "final": True},
                          {"id": "partial", "text": "unfinished", "final": False}]})
         result = await self.service.cmd_overview(self.workspace_id, {"active": True})
         self.assertTrue(result["queued"])
@@ -248,7 +248,7 @@ class AssistantRuntimeTests(unittest.IsolatedAsyncioTestCase):
         overview = state["meeting_overview"]
         self.assertEqual(overview["status"], "ready")
         self.assertEqual(overview["data"]["discussion_points"][0]["evidence"], [
-            {"segment_id": "public-qoder-1", "quote": speech}])
+            {"segment_id": "public-owl-1", "quote": speech}])
         self.assertNotIn("tasks", state)
         self.assertEqual(state["messages"], [])
         self.assertIsNone(self.store.workspace(self.workspace_id)["active_task_id"])
@@ -266,18 +266,18 @@ class AssistantRuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.service.cmd_overview(self.workspace_id, {"active": False})
 
     async def test_overview_attempt_hash_never_makes_prior_result_look_current(self):
-        speech_a = "不知道 qoder 有没有做过校园的推广"
-        speech_b = "随着它会主动调用 ai 示例人物39来写几句广告语。"
-        await self.service.cmd_context(self.workspace_id, {"title": "Qoder", "segments": [
-            {"id": "real-a", "text": speech_a, "final": True}]})
+        speech_a = "不知道 纸鸮展台有没有办过夜间导览"
+        speech_b = "月面展馆确认用纸质地图给来访者介绍展柜。"
+        await self.service.cmd_context(self.workspace_id, {"title": "纸鸮展台", "segments": [
+            {"id": "fixture-a", "text": speech_a, "final": True}]})
         hash_a = self.service._overview_hash(self.service.contexts[self.workspace_id])
         old_data = {"current_topic": {"text": speech_a, "evidence": [
-                        {"segment_id": "real-a", "quote": speech_a}]},
+                        {"segment_id": "fixture-a", "quote": speech_a}]},
                     "discussion_points": [], "decisions": [], "actions": [], "open_questions": []}
         self.service._set_overview_status(self.workspace_id, "ready", None, hash_a, old_data)
 
         await self.service.cmd_context(self.workspace_id, {"title": "Agent runtime", "segments": [
-            {"id": "real-b", "text": speech_b, "final": True}]})
+            {"id": "fixture-b", "text": speech_b, "final": True}]})
         hash_b = self.service._overview_hash(self.service.contexts[self.workspace_id])
         self.assertNotEqual(hash_a, hash_b)
 
@@ -306,8 +306,8 @@ class AssistantRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_overview_tab_closed_does_not_cancel_queued_job(self):
         self.fake.auto_complete = False
-        await self.service.cmd_context(self.workspace_id, {"title": "Qoder", "segments": [
-            {"id": "public-qoder-1", "text": "不知道 qoder 有没有做过校园的推广", "final": True}]})
+        await self.service.cmd_context(self.workspace_id, {"title": "纸鸮展台", "segments": [
+            {"id": "public-owl-1", "text": "不知道 纸鸮展台有没有办过夜间导览", "final": True}]})
         for index in range(2):
             other = await self.service.bind(f"busy-{index}", {})
             task_id = self.service._create_task(other["workspace_id"], f"占用后台{index}", "user", goal=f"busy {index}", kind="overview")
@@ -330,7 +330,7 @@ class AssistantRuntimeTests(unittest.IsolatedAsyncioTestCase):
         segments = [{"id": f"00000000-0000-0000-0000-000000000000:1:word:{index}",
                      "text": "概览只读，不允许审批和工具。", "speaker": f"声音来源{index % 9}",
                      "final": True} for index in range(1376)]
-        segments[700]["text"] = "不知道 qoder 有没有做过校园的推广"
+        segments[700]["text"] = "不知道 纸鸮展台有没有办过夜间导览"
         segments[0].update(speaker="", speaker_uncertain=True)
         segments[1].update(quality_flags=["audio_timing_mismatch"])
         ctx = {"title": "侧栏需求", "segments": segments + [{"id": "unfinished", "text": "尚未完成", "final": False}]}
@@ -398,11 +398,11 @@ class AssistantRuntimeTests(unittest.IsolatedAsyncioTestCase):
                          [{"segment_id": "original-first", "quote": quote}])
 
     async def test_overview_new_format_retries_persisted_legacy_too_long_without_manual_refresh(self):
-        ctx = {"title": "Qoder", "segments": [
-            {"id": "public-qoder-1", "text": "不知道 qoder 有没有做过校园的推广", "final": True}]}
+        ctx = {"title": "纸鸮展台", "segments": [
+            {"id": "public-owl-1", "text": "不知道 纸鸮展台有没有办过夜间导览", "final": True}]}
         await self.service.cmd_context(self.workspace_id, ctx)
         legacy_material = {"evidence_policy": 3, "title": ctx["title"], "segments": [
-            {"id": "public-qoder-1", "text": ctx["segments"][0]["text"], "speaker": "",
+            {"id": "public-owl-1", "text": ctx["segments"][0]["text"], "speaker": "",
              "quality_flags": [], "speaker_uncertain": False, "text_quality": None}]}
         old_hash = hashlib.sha256(assistant_runtime._compact(legacy_material).encode()).hexdigest()
         self.assertNotEqual(old_hash, self.service._overview_hash(ctx))
@@ -419,8 +419,8 @@ class AssistantRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
 
     async def test_overview_restart_marks_nonreplayable_task_interrupted(self):
-        await self.service.cmd_context(self.workspace_id, {"title": "Qoder", "segments": [
-            {"id": "public-qoder-1", "text": "不知道 qoder 有没有做过校园的推广", "final": True}]})
+        await self.service.cmd_context(self.workspace_id, {"title": "纸鸮展台", "segments": [
+            {"id": "public-owl-1", "text": "不知道 纸鸮展台有没有办过夜间导览", "final": True}]})
         source_hash = self.service._overview_hash(self.service.contexts[self.workspace_id])
         task_id = self.service._create_task(self.workspace_id, "概览", "user", goal="overview",
                                             source_refs=[source_hash], kind="overview")
@@ -438,8 +438,8 @@ class AssistantRuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(task["status"], "interrupted")
             self.assertEqual(overview["status"], "interrupted")
             self.assertEqual(overview["source_hash"], source_hash)
-            await offline.cmd_context(self.workspace_id, {"title": "Qoder", "segments": [
-                {"id": "public-qoder-1", "text": "不知道 qoder 有没有做过校园的推广", "final": True}]})
+            await offline.cmd_context(self.workspace_id, {"title": "纸鸮展台", "segments": [
+                {"id": "public-owl-1", "text": "不知道 纸鸮展台有没有办过夜间导览", "final": True}]})
             reopened_result = await offline.cmd_overview(self.workspace_id, {"active": True})
             self.assertFalse(reopened_result.get("queued"))
             self.assertEqual(overview["error"], "restart_no_replay")
@@ -460,9 +460,9 @@ class AssistantRuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.service._closed = True
 
     async def test_latest_completed_overview_task_controls_restart_recovery(self):
-        speech = "不知道 qoder 有没有做过校园的推广"
-        await self.service.cmd_context(self.workspace_id, {"title": "Qoder", "segments": [
-            {"id": "real-a", "text": speech, "final": True}]})
+        speech = "不知道 纸鸮展台有没有办过夜间导览"
+        await self.service.cmd_context(self.workspace_id, {"title": "纸鸮展台", "segments": [
+            {"id": "fixture-a", "text": speech, "final": True}]})
         older = self.service._create_task(self.workspace_id, "旧概览", "user", goal="older",
                                           source_refs=["hash-a"], kind="overview")
         newer = self.service._create_task(self.workspace_id, "新概览", "user", goal="newer",
@@ -489,9 +489,9 @@ class AssistantRuntimeTests(unittest.IsolatedAsyncioTestCase):
             reopened.close()
 
     async def test_failed_overview_same_hash_dedupes_after_context_rehydration_but_refresh_retries(self):
-        speech = "不知道 qoder 有没有做过校园的推广"
-        params = {"title": "Qoder", "segments": [
-            {"id": "public-qoder-1", "text": speech, "final": True}]}
+        speech = "不知道 纸鸮展台有没有办过夜间导览"
+        params = {"title": "纸鸮展台", "segments": [
+            {"id": "public-owl-1", "text": speech, "final": True}]}
         await self.service.cmd_context(self.workspace_id, params)
         source_hash = self.service._overview_hash(self.service.contexts[self.workspace_id])
         self.service._set_overview_status(self.workspace_id, "failed", "previous_failure", source_hash)
@@ -768,7 +768,7 @@ class AssistantRuntimeTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(RuntimeErrorCode, "runtime_offline"):
             await offline.cmd_send(result["workspace_id"], {"text": "no network"})
         await offline.cmd_context(result["workspace_id"], {"segments": [
-            {"id": "public-qoder-1", "text": "不知道 qoder 有没有做过校园的推广", "final": True}]})
+            {"id": "public-owl-1", "text": "不知道 纸鸮展台有没有办过夜间导览", "final": True}]})
         unavailable = await offline.cmd_overview(result["workspace_id"], {"active": True})
         self.assertFalse(unavailable["available"])
         self.assertEqual((await offline._snapshot(result["workspace_id"], announce=False))["meeting_overview"]["error"],
