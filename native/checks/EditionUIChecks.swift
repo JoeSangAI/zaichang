@@ -102,7 +102,10 @@ import AppKit
     let bootstrapResponse=HTTPURLResponse(url:MeetingArchiveRequest.bootstrapURL()!,statusCode:200,httpVersion:nil,headerFields:nil)
     let token=try MeetingArchiveRequest.validatedCSRFToken(data:Data(#"{"app_id":"example-archive","csrf_token":"example-token"}"#.utf8),response:bootstrapResponse,error:nil)
     try check(token=="example-token","archive_accepts_configured_app_identity")
+    try Data(#"{"schema":1,"ontology":"http://127.0.0.1:18767/api/ontology"}"#.utf8).write(to:configURL)
+    try check(RuntimeConfiguration.peopleEnabled && !RuntimeConfiguration.archiveEnabled,"ontology_alone_enables_people_search")
     try Data(#"{"schema":1,"archive":{"url":"file:///tmp/service","app_id":"example"}}"#.utf8).write(to:configURL)
+    try check(!RuntimeConfiguration.peopleEnabled,"no_people_source_keeps_people_search_off")
     try check(!RuntimeConfiguration.archiveEnabled && owner.makeMeetingArchiveButton().isHidden,"invalid_archive_config_stays_hidden")
     let later=(try firstRunGuideChecks(directory:directory))+(try appUpdateChecks())
     // Runs last: once this self-test suspends, nested run loops stop draining the main

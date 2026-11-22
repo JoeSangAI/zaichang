@@ -30,6 +30,7 @@ PYTHON_MODULES = (
     "gui_worker.py", "identity_bridge.py", "identity_control.py", "identity_session.py",
     "live_trial.py", "meeting_context.py", "model_standby.py", "public_audio_trial.py",
     "runtime_config.py", "shared_terms.py", "shared_people.py", "speaker_identity.py",
+    "ontology_source.py",
 )
 RUNTIME_MODELS = ("Nemotron3Diarizer_low.mlmodelc", "learnable_sil_emb.bin", "community-1", "localvqe-v1.3-4.8M-16ms.mlmodelc")
 VERSION = app_version.VERSION

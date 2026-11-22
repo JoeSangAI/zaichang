@@ -119,6 +119,7 @@ Python 回归位于 `tests/`，原生检查位于 `native/checks/`。`scripts/of
 | `general_terms` | 通用写法文件，读取 `## 转写词表` |
 | `people_terms` | 人员写法文件，同格式；不自动确认声音身份 |
 | `people_loader` | 用户信任的本机 Python 模块，显式配置后才执行；须提供 `load_people(root: Path) -> list[dict]`，root 为 `project_roots` 第一项 |
+| `ontology` | 本机已有的人物/机构/项目清单服务，写网址字符串，或 `{ "url": "http://127.0.0.1:8766/api/ontology", "snapshot": "~/path/ontology-snapshot.json" }`。只接受本机地址（127.0.0.1、localhost、::1）的 http；`snapshot` 为服务连不上时读取的导出文件，可省略。协议见下文 |
 | `archive` | `{ "url": "http://127.0.0.1:18766", "app_id": "example-archive" }`，可选归档服务接口 |
 | `agent_bridge` | 既有桥接维护脚本的可选参数：`tunnel_id`、`key_file`（仅路径）、`mcp_server`（脚本路径）；普通本机 MCP 注册不需要。该维护脚本不随公开版导出 |
 | `context_hint` | 追加到助理通用提示后的资料说明，不进入只认本场证据的概览 |
@@ -127,7 +128,16 @@ Python 回归位于 `tests/`，原生检查位于 `native/checks/`。`scripts/of
 
 人员加载器沿用候选接口：每项 `id` 为 `person:` 加 20 位小写十六进制，`name`、`aliases`、`organization`、`role` 和 `evidence`（第一项目根内的绝对文件路径列表）。加载器只返回候选，必须人工选择才能绑定。应用不写人员主本。仅配置人员术语表不启用此模块。
 
-术语解析器内置于 `shared_terms.py`，不加载外部 Skill。层级优先级为项目、人物、通用；项目选择最近的所属词表，只有本场项目层登记的精确误识可用于纠正，冲突保留原文。应用没有 learn/forget 写入口。
+术语解析器内置于 `shared_terms.py`，不加载外部 Skill。层级优先级为项目、人物、通用；项目选择最近的所属词表，只有本场项目层登记的精确误识（以及下文本体条目自己登记的误识）可用于纠正，冲突保留原文。应用没有 learn/forget 写入口。
+
+### 可选本体服务协议
+
+`ontology_source.py` 实现。配置 `ontology` 后：
+
+- **读：** `GET {url}?kind=subject` 与 `GET {url}?kind=project`，返回 `{"items":[...],"redirects":{...}}`。条目用到 `id`、`kind`、`name`、`type`（`person` / `organization` 等）、`aliases`、`misrecognitions`、`organization` 或 `organization_id`、`role`、`provenance[].path`。每次读取超时 1 秒，不走系统代理；失败时读 `snapshot`，再失败就退回 `people_loader` 与术语表，录音和转写不等待。
+- **选人：** 人物候选改为本体里 `type` 为 `person` 的主体，按姓名、别名、错听写法搜索，所属机构显示在姓名旁；候选 `id` 为 `person:` 加本体编号的哈希，`evidence` 为条目出处文件。仍须用户亲手选择并确认，声音和说话人通道不会自动绑到任何主体。
+- **写法：** 主体与项目的名字、别名、错听进入人物层词表。整理时只加入本场原文里出现过的条目，错听按精确写法纠正、冲突保留原文；标题背景加入本场提到的本体项目名与错听写法。
+- **送回：** `queue_misrecognition` / `deliver`（或 `python3 ontology_source.py --report-misrecognition JSON` / `--deliver`）把“主人把某个错听词改成某条目的正名”作为 owner 记录 POST 到 `{url}`：先 GET `?id=` 取当前完整 `misrecognitions`，追加后整份写回，`evidence` 为 `{"ref":"zaichang:<会议>#<操作编号>","quote":"<操作描述>"}`，`request_id` 同 ref。记录先存 `<数据目录>/ontology-outbox.json`，固定后原样重发，服务以重复处理；已在列表里的写法不再发送。当前界面没有“把词改成正名”的操作，所以应用本身还不会调用它；改说话人名、确认人物都不会送回。
 
 ### 可选归档服务协议
 

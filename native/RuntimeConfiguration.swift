@@ -85,7 +85,15 @@ enum RuntimeConfiguration {
         return (raw.hasSuffix("/") ? String(raw.dropLast()):raw,appID.trimmingCharacters(in:.whitespacesAndNewlines))
     }
     static var archiveEnabled:Bool {archiveConfiguration != nil}
+    /// A local ontology service ("ontology": a URL string or {"url":…,"snapshot":…}); shared_people.py
+    /// validates the address and falls back to the people loader when it cannot be read.
+    static var ontologyConfigured:Bool {
+        let value=connectors["ontology"]
+        let url=(value as? String) ?? ((value as? [String:Any])?["url"] as? String)
+        return url.map{!$0.isEmpty} ?? false
+    }
     static var peopleEnabled:Bool {
+        if ontologyConfigured {return true}
         guard let loader=connectors["people_loader"] as? String,!loader.isEmpty,
               let roots=connectors["project_roots"] as? [String],!roots.isEmpty else{return false}
         return true

@@ -63,4 +63,4 @@ class RuntimeConfigurationTests(unittest.TestCase):
 
     def test_runtime_packaging_includes_configuration(self):
         from scripts.install_standalone import PYTHON_MODULES
-        self.assertTrue({'runtime_config.py','shared_people.py','shared_terms.py'} <= set(PYTHON_MODULES))
+        self.assertTrue({'runtime_config.py','shared_people.py','shared_terms.py','ontology_source.py'} <= set(PYTHON_MODULES))

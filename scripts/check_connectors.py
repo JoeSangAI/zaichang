@@ -18,7 +18,7 @@ def check():
     # Report malformed optional fields as invalid, not as a successful disabled setup.
     try: raw=json.loads(path.read_text()) if path.exists() else {}
     except (ValueError,OSError):raw={}
-    for key in ('general_terms','people_terms','people_loader','archive','context_hint'):
+    for key in ('general_terms','people_terms','people_loader','archive','context_hint','ontology'):
         if isinstance(raw,dict) and raw.get(key) and key not in config:invalid=True
     if isinstance(raw,dict) and raw.get('project_roots'):
         if not isinstance(raw['project_roots'],list) or len(config.get('project_roots',[]))!=len(raw['project_roots']):invalid=True
@@ -26,7 +26,9 @@ def check():
             'configured':bool(config),'project_roots_exist':roots,'configured_files_exist':fields,
             'term_rows':{layer:sum(len(o['rows']) for o in owners if o['layer']==layer) for layer in ('project','people','general')},
             'term_errors':errors,'archive_enabled':'archive' in config,'people_loader_enabled':bool(config.get('people_loader') and roots),
-            'context_hint_enabled':bool(config.get('context_hint'))}
+            'context_hint_enabled':bool(config.get('context_hint')),
+            'ontology_enabled':'ontology' in config,
+            'ontology_reachable':any(o.get('ontology') and not o['error'] for o in owners)}
 
 
 if __name__=='__main__':

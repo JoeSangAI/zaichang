@@ -36,6 +36,25 @@ def assistant_name():
     return name
 
 
+LOOPBACK_HOSTS = ('127.0.0.1', 'localhost', '::1')
+
+
+def loopback_url(value):
+    """An http URL on this Mac only (no credentials, query or fragment), or None."""
+    from urllib.parse import urlsplit
+    if not isinstance(value, str) or len(value) > 512 or any(ord(c) <= 32 for c in value):
+        return None
+    try:
+        url = urlsplit(value)
+        url.port
+    except ValueError:
+        return None
+    if (url.scheme != 'http' or url.hostname not in LOOPBACK_HOSTS or url.username or url.password
+            or url.query or url.fragment):
+        return None
+    return value.rstrip('/')
+
+
 # Optional integration configuration is user-owned, never bundled with the app.
 def connectors():
     import json
@@ -78,6 +97,13 @@ def connectors():
                 result['archive'] = {'url': archive['url'].rstrip('/'), 'app_id': archive['app_id'].strip()}
         except ValueError:
             pass
+    ontology = value.get('ontology')
+    if isinstance(ontology, str):
+        ontology = {'url': ontology}
+    if isinstance(ontology, dict) and (url := loopback_url(ontology.get('url'))):
+        result['ontology'] = {'url': url}
+        if snapshot := path_value(ontology.get('snapshot')):
+            result['ontology']['snapshot'] = snapshot
     bridge = value.get('agent_bridge')
     if isinstance(bridge, dict) and isinstance(bridge.get('tunnel_id'), str) and bridge['tunnel_id'].strip():
         key_file, server = path_value(bridge.get('key_file')), path_value(bridge.get('mcp_server'))

@@ -442,8 +442,9 @@ def _preserve_text(unit: dict[str, Any]) -> bool:
 def _cleanup_terms(cache_dir: Path, units: list[dict[str, Any]]) -> list[dict]:
     try:
         import shared_terms
-        projects = shared_terms.meeting_projects(cache_dir,"".join(u["text"] for u in units))
-        return shared_terms.cleanup_terms(project_dirs=projects)[0]
+        text = "".join(u["text"] for u in units)
+        projects = shared_terms.meeting_projects(cache_dir,text)
+        return shared_terms.cleanup_terms(project_dirs=projects, text=text)[0]
     except Exception:
         return []
 
@@ -452,8 +453,9 @@ def _name_rows(cache_dir: Path, units: list[dict]) -> list[dict]:
     """All spellings for auditing, including non-project mishearings, never prompt evidence."""
     try:
         import shared_terms
-        projects = shared_terms.meeting_projects(cache_dir, "".join(u["text"] for u in units))
-        return [row for project in projects or [None] for row in shared_terms.project_rows(project)]
+        text = "".join(u["text"] for u in units)
+        projects = shared_terms.meeting_projects(cache_dir, text)
+        return [row for project in projects or [None] for row in shared_terms.project_rows(project, text=text)]
     except Exception:
         return []
 
@@ -611,7 +613,7 @@ def _term_guide(cache_dir: Path, units: list[dict[str, Any]]) -> list[str]:
         import shared_terms
         text = "".join(unit["text"] for unit in units)
         projects = shared_terms.meeting_projects(cache_dir,text)
-        return shared_terms.term_guide(project_dirs=projects)
+        return shared_terms.term_guide(project_dirs=projects, text=text)
     except Exception:
         return []
 

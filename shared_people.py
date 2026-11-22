@@ -106,8 +106,39 @@ def validated_person(person, focus):
     return candidate, [name, *aliases]
 
 
-def search_people(query, *, module_path=None, focus_root=None):
+def ontology_people(ontology_reader=None):
+    """People from the configured ontology, or None (not configured or unreachable): the caller
+    then keeps the people loader. Imported lazily so a missing connector costs nothing."""
+    if ontology_reader is None:
+        import ontology_source
+        if not ontology_source.enabled():
+            return None
+        ontology_reader = ontology_source.read_people
+    try:
+        return ontology_reader()
+    except Exception:
+        return None
+
+
+def search_ontology(query, people):
+    found = []
+    for candidate, names, misheard in people:
+        folded, wrong = [n.casefold() for n in names], [m.casefold() for m in misheard]
+        if query in folded:
+            found.append((0, candidate))
+        elif any(query in name for name in folded):
+            found.append((1, candidate))
+        elif any(query in name for name in wrong):
+            found.append((2, candidate))
+    found.sort(key=lambda row: (row[0], row[1]['reference']['name'], row[1]['reference']['id']))
+    return dict(schema=1, status='ok', requires_confirmation=True, source='ontology',
+                candidates=[row[1] for row in found[:MAX_RESULTS]], truncated=len(found)>MAX_RESULTS)
+
+
+def search_people(query, *, module_path=None, focus_root=None, ontology_reader=None):
     query = checked_text(query, 80).strip().casefold()
+    if module_path is None and focus_root is None and (people := ontology_people(ontology_reader)) is not None:
+        return search_ontology(query, people)
     people, focus = load_authoritative_people(module_path, focus_root)
     found = []
     ids = set()
@@ -131,22 +162,29 @@ def name_variants(name):
     return list(dict.fromkeys([name, bare, *bare.split()]))
 
 
-def resolve_names(names, *, module_path=None, focus_root=None, rows=None):
+def resolve_names(names, *, module_path=None, focus_root=None, rows=None, ontology_reader=None):
     """Map each name to its one authoritative spelling, when there is exactly one.
 
     People owners decide first; a term table's alias or known misspelling applies
     only to a whole name. An ambiguous name stays as it is.
     """
-    people, focus = load_authoritative_people(module_path, focus_root)
     owners = {}
-    for person in people:
-        candidate, spellings = validated_person(person, focus)
-        for spelling in spellings:
-            owners.setdefault(spelling.casefold(), set()).add(candidate['reference']['name'])
+    if module_path is None and focus_root is None and (found := ontology_people(ontology_reader)) is not None:
+        for candidate, spellings, _ in found:
+            for spelling in spellings:
+                owners.setdefault(spelling.casefold(), set()).add(candidate['reference']['name'])
+    else:
+        people, focus = load_authoritative_people(module_path, focus_root)
+        for person in people:
+            candidate, spellings = validated_person(person, focus)
+            for spelling in spellings:
+                owners.setdefault(spelling.casefold(), set()).add(candidate['reference']['name'])
     terms = {}
     if rows is None:
         from shared_terms import compiled_owners
-        rows = [row for owner in compiled_owners() if owner['layer'] in ('people', 'project') for row in owner['rows']]
+        # Ontology project names are not people's names.
+        rows = [row for owner in compiled_owners() if owner['layer'] in ('people', 'project')
+                and owner.get('ontology') != 'project' for row in owner['rows']]
     for row in rows:
         for spelling in [row['term'], *row['aliases'], *row['misheard']]:
             terms.setdefault(spelling.casefold(), set()).add(row['term'])

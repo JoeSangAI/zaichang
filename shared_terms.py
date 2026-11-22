@@ -119,7 +119,11 @@ def compiled_owners(max_age=60.0):
                 if Path(base).name == '知识库' and (Path(base).parent/'实体与术语.md').is_file(): continue
                 if '实体与术语.md' in files:
                     paths.setdefault(Path(base)/'实体与术语.md', 'project')
-        _COMPILED[:] = [time.monotonic(), [_read(path, layer) for path, layer in paths.items()], key]
+        owners = [_read(path, layer) for path, layer in paths.items()]
+        if config.get('ontology'):
+            import ontology_source
+            owners += ontology_source.term_owners(config)
+        _COMPILED[:] = [time.monotonic(), owners, key]
     return _COMPILED[1]
 
 PROJECT_MIN_SCORE=3.0
@@ -186,10 +190,18 @@ def meeting_title(cache_dir):
 def meeting_project(cache_dir):
     return detect_project(meeting_text(cache_dir),title=meeting_title(cache_dir))
 
-def project_rows(project_dir=None):
-    """Rows for one meeting in priority order: project, shared people, general."""
+def _heard(row,folded):
+    return any(_searchable(w) and w.casefold() in folded for w in [row['term'],*row['aliases'],*row['misheard']])
+
+def project_rows(project_dir=None,text=None):
+    """Rows for one meeting in priority order: project, shared people, general.
+    Ontology rows (hundreds of names) join only when this meeting's text says one of them."""
     owners = compiled_owners()
-    chosen = [owner for owner in owners if owner['layer'] != 'project']
+    chosen = [owner for owner in owners if owner['layer'] != 'project' and not owner.get('ontology')]
+    if text:
+        folded=text.casefold()
+        chosen += [dict(owner,rows=[row for row in owner['rows'] if _heard(row,folded)])
+                   for owner in owners if owner.get('ontology') and not owner.get('error')]
     if project_dir is not None:
         directory = Path(project_dir).resolve()
         candidates = [o for o in owners if o['layer'] == 'project' and directory.is_relative_to(Path(o['path']).parent.resolve())]
@@ -202,12 +214,14 @@ def meeting_projects(cache_dir,text=None):
     """Detect from this meeting's text and title; no derived term snapshot."""
     return detect_projects(meeting_text(cache_dir) if text is None else text,title=meeting_title(cache_dir))
 
-def cleanup_terms(project_dir=None,limit=TERM_LIMIT,*,project_dirs=None):
-    """Structured spelling evidence; ambiguous mishearings are never replacements."""
+def cleanup_terms(project_dir=None,limit=TERM_LIMIT,*,project_dirs=None,text=None):
+    """Structured spelling evidence; ambiguous mishearings are never replacements.
+    An ontology row's misrecognitions were recorded for that one entry, so they count like a project's."""
     rows=[];seen={}
     for directory in project_dirs or [project_dir]:
-        for row in project_rows(directory):
-            row=dict(row,misheard=list(row['misheard']) if row['layer']=='project' and directory is not None else [])
+        for row in (project_rows(directory,text=text) if text else project_rows(directory)):
+            own=(row['layer']=='project' and directory is not None) or bool(row.get('ontology'))
+            row=dict(row,misheard=[w for w in row['misheard'] if not row.get('ontology') or _searchable(w)] if own else [])
             key=row['term'].casefold()
             if key not in seen:
                 merged=dict(row,aliases=list(row['aliases']),misheard=list(row['misheard']))
@@ -232,9 +246,10 @@ def cleanup_terms(project_dir=None,limit=TERM_LIMIT,*,project_dirs=None):
         result.append(value)
     return result, sorted(conflicts)
 
-def term_guide(project_dir=None,limit=TERM_LIMIT,*,project_dirs=None):
+def term_guide(project_dir=None,limit=TERM_LIMIT,*,project_dirs=None,text=None):
     """Prompt lines for the pause cleanup: standard spelling, aliases and known misrecognitions."""
-    rows,conflicts=cleanup_terms(project_dir,limit,project_dirs=project_dirs)
+    rows,conflicts=(cleanup_terms(project_dir,limit,project_dirs=project_dirs,text=text) if text
+                    else cleanup_terms(project_dir,limit,project_dirs=project_dirs))
     lines=[]
     for row in rows:
         line=row['term']
@@ -289,7 +304,16 @@ def title_context(cache_dir,owners=None):
         for row in owner['rows']:
             spellings.extend([word,row['term']] for word in row['misheard']
                              if _searchable(word) and len(word)<=40 and len(row['term'])<=40 and word.casefold() not in ambiguous)
-    for owner in sorted(owners,key=lambda o:order.get(o.get('layer'),3)):
+    # An ontology entry's own misrecognitions, when this meeting says one; its project names
+    # are background for the title like the detected projects.
+    for owner in owners:
+        if not owner.get('ontology') or owner.get('error'):continue
+        for row in owner['rows']:
+            heard=[w for w in row['misheard'] if _searchable(w) and w.casefold() in folded]
+            spellings.extend([word,row['term']] for word in heard
+                             if len(word)<=40 and len(row['term'])<=40 and word.casefold() not in ambiguous)
+            if owner['ontology']=='project' and row['term'] not in projects and _heard(row,folded):projects.append(row['term'])
+    for owner in sorted(owners,key=lambda o:(bool(o.get('ontology')),order.get(o.get('layer'),3))):
         if owner.get('error'):continue
         for row in owner['rows']:
             words=[row['term'],*row['aliases']]
